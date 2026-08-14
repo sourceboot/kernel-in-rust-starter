@@ -1,0 +1,7 @@
+# Stable, deliberately: the scaffold needs nothing from nightly, and "install
+# stable Rust" is a materially gentler first step than nightly + components.
+# Revisit only when the lab-02 cockpit design settles whether the test registry
+# uses #[test_case] (nightly) or a hand-rolled link-section array (stable).
+[toolchain]
+channel = "stable"
+targets = ["x86_64-unknown-none"]

@@ -1,0 +1,9 @@
+# The learner-owned tree: `os/` is its own cargo workspace, standalone on
+# purpose — a fresh clone of the learner's repo builds with nothing but Rust
+# (`cd os && cargo build --release -p boot --target x86_64-unknown-none`).
+# xtask is NOT a member: it is our build tooling, lives beside `os/` in the
+# sboot run dir (mirroring os-rust's arrangement), and drives this workspace
+# with cwd = os/ so this file and os/.cargo/config.toml apply.
+[workspace]
+resolver = "2"
+members = ["kernel", "boot"]

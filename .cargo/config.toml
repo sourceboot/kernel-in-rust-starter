@@ -1,0 +1,9 @@
+# Root cargo config. Only the `cargo xtask` alias — the spelling every lab
+# brief uses — deliberately nothing else: the bare-metal settings live in
+# os/.cargo/config.toml so they travel with the learner's own tree, and xtask
+# is a plain host build. `--manifest-path` rather than `-p` because there is
+# no workspace at this level (mirrors os-rust): xtask is self-contained, and
+# in the materialized learner layout this root is the sboot run dir, where
+# `os/` is a symlink into the learner's repo.
+[alias]
+xtask = "run --manifest-path xtask/Cargo.toml --release --"

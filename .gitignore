@@ -1,0 +1,7 @@
+# Build artifacts. Cargo target dirs are large and machine-specific.
+target/
+build/
+
+# Editor / OS noise
+.DS_Store
+*.swp

@@ -1,0 +1,4 @@
+# This file tells the `sboot` CLI which SourceBoot course this repo is for.
+# Everything else — the tests and the grading engine — lives outside this repo:
+# run `sboot where` to see exactly where.
+course = "os2-rust"

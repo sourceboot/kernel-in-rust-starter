@@ -1,0 +1,10 @@
+# Bare-metal build settings, scoped to the learner's os/ workspace (this file
+# lives in os/.cargo/, so it applies when cargo runs with os/ as its working
+# directory — xtask does exactly that). Never contaminates host builds of
+# xtask itself, whose cwd is the run-dir root.
+#
+# The bare-metal target defaults to position-independent code; Limine wants a
+# classic static executable linked at the higher-half address the linker
+# script sets (a PIE without PT_DYNAMIC is refused — it panics the loader).
+[target.x86_64-unknown-none]
+rustflags = ["-C", "relocation-model=static"]
