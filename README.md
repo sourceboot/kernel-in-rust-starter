@@ -1,6 +1,6 @@
-# os2-starter
+# kernel-in-rust-starter
 
-The starter workspace for **Own the Machine: Build an OS in Rust** — a
+The starter workspace for **Kernel in Rust: Own the Machine** — a
 [SourceBoot](https://sourceboot.com) course where you build a real x86-64
 kernel instead of watching someone else build one.
 
@@ -12,8 +12,8 @@ grader are deliberately **not** in here — they live on
 into a separate cache directory. A repo created from this template stays your
 code and nothing else, which is what makes it worth showing people.
 
-> Naming note: `os2-starter` and the course id `os2-rust` are working names.
-> They may be renamed before launch; GitHub redirects renamed repos.
+> Renamed 2026-09-01 (was `os2-starter`, when the course id was `os2-rust`). GitHub redirects
+> renamed repos, so a template link you already have keeps working.
 
 ## Use it
 
@@ -22,7 +22,7 @@ Two ways in; both give you the same tree.
 **With GitHub** — your kernel starts life as a private repo you own:
 
 ```sh
-gh repo create my-os --private --template SourceBoot/os2-starter --clone
+gh repo create my-os --private --template sourceboot/kernel-in-rust-starter --clone
 cd my-os
 ```
 
@@ -37,16 +37,16 @@ sboot test 01-first-light     # fetches the lab's tests + grader, builds, boots,
 `sboot` recognises the repo by its `sboot.toml` and downloads each lab's tests
 on first use (`sboot where` prints where they live — outside this repo). Note:
 don't run `sboot start` inside the clone — that command creates a fresh
-`./os2-rust/` directory and refuses to write into a non-empty one. With the
+`./kernel-in-rust/` directory and refuses to write into a non-empty one. With the
 template you already have the tree, so you don't need it.
 
 **Without GitHub:**
 
 ```sh
-sboot start os2-rust
+sboot start kernel-in-rust
 ```
 
-materialises this same tree into `./os2-rust/`, no `gh` and no template
+materialises this same tree into `./kernel-in-rust/`, no `gh` and no template
 involved — make it a git repo whenever you like.
 
 ## What's in the tree
