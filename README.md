@@ -30,15 +30,15 @@ Then install `sboot` and work from inside the clone:
 
 ```sh
 curl -fsSL https://sourceboot.com/install.sh | sh
-export SBOOT_TOKEN=...        # from https://sourceboot.com/account
+sboot login                   # connects this machine, in your browser
 sboot test 01-first-light     # fetches the lab's tests + grader, builds, boots, grades
 ```
 
 `sboot` recognises the repo by its `sboot.toml` and downloads each lab's tests
-on first use (`sboot where` prints where they live — outside this repo). Note:
-don't run `sboot start` inside the clone — that command creates a fresh
-`./kernel-in-rust/` directory and refuses to write into a non-empty one. With the
-template you already have the tree, so you don't need it.
+on first use (`sboot where` prints where they live — outside this repo). Running
+`sboot start kernel-in-rust` inside the clone is safe: it puts back anything that
+is missing and never touches a file you have edited. With the template you
+already have the tree, so you don't need it.
 
 **Without GitHub:**
 
@@ -46,8 +46,11 @@ template you already have the tree, so you don't need it.
 sboot start kernel-in-rust
 ```
 
-materialises this same tree into `./kernel-in-rust/`, no `gh` and no template
-involved — make it a git repo whenever you like.
+materialises this same tree into `./kernel-sb/` — named after what you build
+rather than after the course — makes it a git repository and commits it, asking
+once for the name and email git stamps on your commits. No `gh` and no template
+involved; `--dir <name>` picks a different folder. When you want it on GitHub,
+`sboot repo` creates the private repo and pushes it.
 
 ## What's in the tree
 
