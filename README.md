@@ -61,7 +61,7 @@ os/                     the workspace you own
                         are provided instruments
   boot/                 thin boot binary: Limine (vendored + pinned), boot
                         shim, linker script
-.cargo/                 build config
+  .cargo/               the bare-metal build settings
 rust-toolchain.toml     pinned stable Rust + the x86_64-unknown-none target
 sboot.toml              tells the sboot CLI which course this repo is for
 ```

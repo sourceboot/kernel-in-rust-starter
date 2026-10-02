@@ -3,8 +3,8 @@
 //! must not ride the learner's port helpers.
 //!
 //! Needs `-device isa-debug-exit,iobase=0xf4,iosize=0x04` on the QEMU line;
-//! without the device the write is ignored and we halt instead (which is
-//! what a plain `cargo xtask run` gets). QEMU transforms the written value
+//! without the device — a plain QEMU boot — the write is ignored and we
+//! halt instead. QEMU transforms the written value
 //! into host exit code `(value << 1) | 1`, so SUCCESS lands as 33 and
 //! FAILURE as 35 — the harness decodes that.
 
