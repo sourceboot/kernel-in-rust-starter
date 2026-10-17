@@ -112,6 +112,21 @@ static HHDM_REQ: ReqCell<Request<HhdmResponse>> = ReqCell(UnsafeCell::new(Reques
     response: core::ptr::null_mut(),
 }));
 
+#[repr(C)]
+struct ExecAddrResponse {
+    revision: u64,
+    physical_base: u64,
+    virtual_base: u64,
+}
+
+#[used]
+#[link_section = ".limine_requests"]
+static EXEC_ADDR_REQ: ReqCell<Request<ExecAddrResponse>> = ReqCell(UnsafeCell::new(Request {
+    id: [LIMINE_COMMON_MAGIC[0], LIMINE_COMMON_MAGIC[1], 0x71ba76863cc55f63, 0xb2644a48c516a487],
+    revision: 0,
+    response: core::ptr::null_mut(),
+}));
+
 #[used]
 #[link_section = ".limine_requests"]
 static MEMMAP_REQ: ReqCell<Request<MemmapResponse>> = ReqCell(UnsafeCell::new(Request {
@@ -129,13 +144,27 @@ static BOOT_INFO: ReqCell<BootInfo> = ReqCell(UnsafeCell::new(BootInfo {
     fb: FramebufferInfo { addr: 0, width: 0, height: 0, pitch: 0, bpp: 0, _pad: [0; 6] },
     memmap_len: 0,
     memmap: [MemRegion { base: 0, len: 0, kind: 0, _pad: 0 }; MEMMAP_MAX],
+    kernel_phys: 0,
+    kernel_virt: 0,
+    kernel_len: 0,
 }));
 
+// Bracket the whole image (boot/linker.ld).
+extern "C" {
+    static __kernel_start: u8;
+    static __kernel_end: u8;
+}
+
 fn response<R>(req: &ReqCell<Request<R>>) -> Option<&'static R> {
+    // SAFETY: the request is a 'static the bootloader filled before entry;
+    // nothing writes it after, and a volatile read keeps the compiler from
+    // assuming the null it was initialised with.
     let ptr = unsafe { core::ptr::read_volatile(&(*req.0.get()).response) };
     if ptr.is_null() {
         None
     } else {
+        // SAFETY: a non-null response points into bootloader-reclaimable
+        // memory Limine filled, which nothing reclaims in this course.
         Some(unsafe { &*ptr })
     }
 }
@@ -153,9 +182,12 @@ pub unsafe fn boot_info() -> &'static BootInfo {
 
     let bi = &mut *BOOT_INFO.0.get();
 
-    let (Some(fb), Some(hhdm), Some(mm)) =
-        (response(&FB_REQ), response(&HHDM_REQ), response(&MEMMAP_REQ))
-    else {
+    let (Some(fb), Some(hhdm), Some(mm), Some(exec)) = (
+        response(&FB_REQ),
+        response(&HHDM_REQ),
+        response(&MEMMAP_REQ),
+        response(&EXEC_ADDR_REQ),
+    ) else {
         kernel::hcf();
     };
 
@@ -181,7 +213,33 @@ pub unsafe fn boot_info() -> &'static BootInfo {
     }
     bi.memmap_len = n as u64;
 
+    bi.kernel_phys = exec.physical_base;
+    bi.kernel_virt = exec.virtual_base;
+    bi.kernel_len = core::ptr::addr_of!(__kernel_end) as u64 - core::ptr::addr_of!(__kernel_start) as u64;
+
     bi.magic = BOOT_MAGIC;
 
-    &*BOOT_INFO.0.get()
+    let bi: &'static BootInfo = &*BOOT_INFO.0.get();
+    kernel::bootinfo::publish(bi);
+    bi
+}
+
+// ── Stacks the vehicles hand to `gdt::init` ─────────────────────────────────
+
+const STACK_BYTES: usize = 16 * 1024;
+
+#[repr(C, align(16))]
+struct Stack(UnsafeCell<[u8; STACK_BYTES]>);
+// SAFETY: each stack is used only by the CPU, as the stack a TSS field names.
+unsafe impl Sync for Stack {}
+
+static KSTACK: Stack = Stack(UnsafeCell::new([0; STACK_BYTES]));
+static IST1: Stack = Stack(UnsafeCell::new([0; STACK_BYTES]));
+
+/// The tops of two 16 KiB stacks in .bss: the kernel stack for `rsp0` and the
+/// IST1 stack for `#DF`, plus their size.
+#[allow(dead_code)]
+pub fn stacks() -> (kernel::addr::VirtAddr, kernel::addr::VirtAddr, u64) {
+    let top = |s: &Stack| kernel::addr::VirtAddr(s.0.get() as u64 + STACK_BYTES as u64);
+    (top(&KSTACK), top(&IST1), STACK_BYTES as u64)
 }

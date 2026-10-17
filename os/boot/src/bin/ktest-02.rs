@@ -40,13 +40,6 @@ ktest!("serial.burst", fn burst(t: &mut TestCtx) {
     t.expect_eq("LSR TEMT after burst", (serial::in8(COM1 + 5) & 0x40) as u64, 0x40);
 });
 
-// The SKIP vocabulary, proven on a real check: the receive path needs the
-// lab-07 IRQ line — polling RX here would hang the suite waiting for input
-// that never comes.
-ktest!("serial.rx", fn rx(t: &mut TestCtx) {
-    t.skip("receive path arrives with the lab-07 IRQ line");
-});
-
 // Plan self-test: the registry the plan line was computed from is non-empty
 // and every id is unique — a duplicated id would make a truncated transcript
 // ambiguous about which test died.
@@ -66,5 +59,5 @@ unsafe extern "C" fn _start() -> ! {
     // The suite needs no framebuffer, but the handoff is still validated —
     // a bad boot must fail as a boot failure, not as mystery test failures.
     let _bi = shim::boot_info();
-    kernel::ktap::run_and_exit()
+    kernel::ktap::run_and_halt()
 }

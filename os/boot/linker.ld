@@ -14,6 +14,7 @@ PHDRS
 SECTIONS
 {
     . = 0xffffffff80000000;
+    __kernel_start = .;
 
     .limine_requests : {
         KEEP(*(.limine_requests_start))
@@ -39,6 +40,8 @@ SECTIONS
     . = ALIGN(CONSTANT(MAXPAGESIZE));
     .data : { *(.data .data.*) } :data
     .bss : { *(.bss .bss.*) *(COMMON) } :data
+    . = ALIGN(4096);
+    __kernel_end = .;
 
     /DISCARD/ : { *(.eh_frame*) *(.note .note.*) }
 }
