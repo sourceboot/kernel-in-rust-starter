@@ -1,6 +1,6 @@
 //! Lab 02 — the report channel. This file is yours: the 16550 UART driver that
 //! every test in this course reports through. The provided cockpit (ktap.rs)
-//! calls write_str; get these right and it lights up green. See project.md.
+//! calls write_str; get these right and it lights up green. See this lab's page.
 //!
 //! Fill in the bodies. The signatures are the contract the cockpit depends on —
 //! keep them. `todo!()` compiles but panics, so the suite prints nothing until

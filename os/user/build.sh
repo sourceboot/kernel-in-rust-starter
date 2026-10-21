@@ -4,7 +4,8 @@
 # by hand (no CI workflow runs it yet); a learner never does: the binaries ship
 # built, beside their sources.
 #
-#   ./build.sh            build everything, check every binary, write bin/SHA256SUMS
+#   ./build.sh            build everything, check every binary, write bin/boot.archive
+#                         (CONTRACT §A.7), read it back, write bin/SHA256SUMS
 #   ZIG=/path/to/zig ./build.sh     use a zig that is not first on PATH
 #   OBJDUMP=llvm-objdump ./build.sh use another disassembler for the SSE check
 #
@@ -22,11 +23,39 @@ BIN=$HERE/bin
 #   layout "flat": exactly one PT_LOAD, file offset 0 -> 0x1000000, filesz == memsz,
 #   so labs 09-12's vehicle may copy the file's bytes to 0x1000000 and enter at
 #   e_entry. "elf": loaded by lab 13's ELF loader; may carry a RW segment.
+#   "flat-sse": "flat", and the SSE check allows exactly the movq lines between a
+#   general register or memory and xmm0/xmm1 (hostile-spin's inline asm, on purpose:
+#   lab 12's regs.survive.preempt row is the FXSAVE check -- CONTRACT §A.8 as amended
+#   2026-10-17). Any other SSE line in such a program still fails the build.
 PROGRAMS=(
   "hi|hi/hi.c|flat"
+  "hostile-kwrite|hostile-kwrite/hostile-kwrite.c|flat"
+  "hostile-badnum|hostile-badnum/hostile-badnum.c|flat"
+  "hostile-badptr|hostile-badptr/hostile-badptr.c|flat"
+  "hostile-spin|hostile-spin/hostile-spin.c|flat-sse"
+  "args|args/args.c|elf"
+  "init|init/init.c|elf"
+  "forker|forker/forker.c|elf"
+  "producer|producer/producer.c|elf"
+  "consumer|consumer/consumer.c|elf"
+  # labs 17-23 (the W3 programs): not in ARCHIVE -- the image writer copies bin/ into ext2's /bin
+  "ls|ls/ls.c|elf"
+  "cat|cat/cat.c|elf"
+  "stat|stat/stat.c|elf"
+  "mkfile|mkfile/mkfile.c|elf"
+  "rm|rm/rm.c|elf"
+  "mv|mv/mv.c|elf"
+  "mkdir|mkdir/mkdir.c|elf"
+  "rmdir|rmdir/rmdir.c|elf"
+  "mounts|mounts/mounts.c|elf"
+  "sh|sh/sh.c|elf"
 )
 
-# CONTRACT §A.8 (labs 09-22), plus -fno-builtin and the warnings, plus two measured additions:
+# The boot archive (CONTRACT §A.7): what labs 13-16 mount at / and 17 on at /boot.
+# The W3 programs (ls ... sh, labs 17-23) are not in it: they ride ext2's /bin (2026-10-17).
+ARCHIVE=(init hi args hostile-kwrite hostile-badnum hostile-badptr hostile-spin forker producer consumer)
+
+# CONTRACT §A.8 (labs 09-24), plus -fno-builtin and the warnings, plus two measured additions:
 #  * -mno-sse -mno-sse2 -mno-mmx -msoft-float, §A.8's named fallback: zig cc 0.17.0 turns
 #    -mgeneral-regs-only into -sse/-mmx/-x87 and then appends its own baseline
 #    +sse/+sse2/+mmx/+x87, so the flag alone changes no byte (hi kept 31 SSE lines, the
@@ -78,7 +107,7 @@ if not loads or loads[0][3] != 0x1000000 or loads[0][2] != 0:
     die("first PT_LOAD is not file offset 0 at vaddr 0x1000000")
 if not (loads[0][3] <= e_entry < loads[0][3] + loads[0][4]) or not (loads[0][1] & 1):
     die("e_entry is not inside the executable first PT_LOAD")
-if layout == "flat" and (len(loads) != 1 or loads[0][4] != loads[0][5]):
+if layout in ("flat", "flat-sse") and (len(loads) != 1 or loads[0][4] != loads[0][5]):
     die("layout 'flat' needs exactly one PT_LOAD with filesz == memsz (writable data present?)")
 # undefined symbols: a freestanding link must have none
 for i in range(e_shnum):
@@ -103,18 +132,69 @@ for row in "${PROGRAMS[@]}"; do
   for s in $srcs; do src+=("$HERE/$s"); done
   "$ZIG" cc "${CFLAGS[@]}" "${LDFLAGS[@]}" -o "$BIN/$name" "${src[@]}"
   elfcheck "$BIN/$name" "$layout"
-  # No SSE in a pre-23 program (CONTRACT §A.5, §A.8): the disassembly names no vector register or op.
-  n=$("$OBJDUMP" -d "$BIN/$name" | grep -c -E 'xmm|ymm|movaps|movups|movdqa|movdqu|fxsave|cvt' || true)
-  if [[ "$n" != 0 ]]; then
+  # No SSE in a pre-25 program (CONTRACT §A.5, §A.8): the disassembly names no vector register or op.
+  sse=$("$OBJDUMP" -d "$BIN/$name" | grep -E 'xmm|ymm|movaps|movups|movdqa|movdqu|fxsave|cvt' || true)
+  n=$(printf '%s' "$sse" | grep -c . || true)
+  if [[ "$layout" == flat-sse ]]; then
+    other=$(printf '%s' "$sse" | grep -v -E 'movq[[:space:]]+([^,]+,[[:space:]]*%xmm[01]|%xmm[01],[[:space:]]*%r[a-z0-9]+)[[:space:]]*$' | grep -c . || true)
+    if [[ "$other" != 0 ]]; then
+      echo "build.sh: $name: $other SSE lines besides the allowed movq to/from xmm0/xmm1; must be 0" >&2
+      exit 1
+    fi
+    echo "  $name: $n allowed SSE lines (layout flat-sse: movq to/from xmm0/xmm1 only)"
+  elif [[ "$n" != 0 ]]; then
     echo "build.sh: $name: $n SSE/x87-state instruction lines in the disassembly; must be 0" >&2
     exit 1
   fi
 done
+
+# bin/boot.archive (CONTRACT §A.7): magic 0x5B007B00A2C4 (u64 LE), count (u32 LE), then per
+# entry {name: 56 bytes NUL-padded, offset: u64 LE, size: u64 LE}; offsets from the file's
+# start; each file's data 8-aligned, zero padding between. Entries sorted by name (bytewise);
+# no timestamps, so the bytes follow from the binaries alone.
+python3 -I - "$BIN" "${ARCHIVE[@]}" <<'PY'
+import struct, sys
+bindir, names = sys.argv[1], sorted(sys.argv[2:])
+HDR, ENT = 12, 72
+out = bytearray(struct.pack("<QI", 0x5B007B00A2C4, len(names)))
+off = (HDR + ENT * len(names) + 7) & ~7
+data = bytearray()
+for n in names:
+    enc, b = n.encode(), open(f"{bindir}/{n}", "rb").read()
+    if not 0 < len(enc) < 56: sys.exit(f"build.sh: archive name {n!r} must be 1-55 bytes")
+    out += enc.ljust(56, b"\0") + struct.pack("<QQ", off, len(b))
+    pad = (-len(b)) % 8
+    data += b + bytes(pad)
+    off += len(b) + pad
+out += bytes((-len(out)) % 8) + data
+open(f"{bindir}/boot.archive", "wb").write(out)
+PY
+
+# Read the archive back, independently of the writer, and match every entry to bin/<name>.
+python3 -I - "$BIN" "${ARCHIVE[@]}" <<'PY'
+import struct, sys
+bindir, want = sys.argv[1], sorted(sys.argv[2:])
+d = open(f"{bindir}/boot.archive", "rb").read()
+def die(m): print(f"build.sh: boot.archive: {m}", file=sys.stderr); sys.exit(1)
+magic, count = struct.unpack_from("<QI", d, 0)
+if magic != 0x5B007B00A2C4: die(f"magic {magic:#x}")
+if count != len(want): die(f"count {count}, want {len(want)}")
+seen = []
+for i in range(count):
+    raw, off, size = struct.unpack_from("<56sQQ", d, 12 + 72 * i)
+    name = raw.rstrip(b"\0").decode()
+    if b"\0" in raw.rstrip(b"\0") or off % 8 or off + size > len(d): die(f"entry {i} ({name!r}) malformed")
+    if d[off:off + size] != open(f"{bindir}/{name}", "rb").read(): die(f"{name}: bytes differ from bin/{name}")
+    seen.append(name)
+    print(f"  boot.archive[{i}] {name:<15} offset={off:#07x} size={size}")
+if seen != want: die(f"names {seen}, want {want} (sorted)")
+print(f"  boot.archive: {len(d)} bytes, {count} entries, each equal to bin/<name>")
+PY
 
 # SHA256SUMS lists every file in bin/ except itself (and its .tmp), sorted, in sha256sum's format.
 if command -v sha256sum >/dev/null; then sum=(sha256sum); else sum=(shasum -a 256); fi
 ( cd "$BIN" && find . -maxdepth 1 -type f ! -name 'SHA256SUMS*' | sed 's|^\./||' | LC_ALL=C sort \
     | while read -r f; do "${sum[@]}" "$f"; done ) > "$BIN/SHA256SUMS.tmp"
 mv "$BIN/SHA256SUMS.tmp" "$BIN/SHA256SUMS"
-echo "build.sh: zig $have; wrote $(wc -l < "$BIN/SHA256SUMS" | tr -d ' ') program(s) to bin/"
+echo "build.sh: zig $have; wrote $(wc -l < "$BIN/SHA256SUMS" | tr -d " ") file(s) to bin/ (${#PROGRAMS[@]} programs and boot.archive)"
 cat "$BIN/SHA256SUMS"

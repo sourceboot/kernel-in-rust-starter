@@ -18,7 +18,7 @@ pub mod flags {
     pub const USER: u64 = 1 << 2;
     /// PS: in a PDPT or PD entry, this entry maps a 1 GiB or 2 MiB page.
     pub const HUGE: u64 = 1 << 7;
-    /// Bit 9 is ignored by the hardware; the course reserves it for lab 22's
+    /// Bit 9 is ignored by the hardware; the course reserves it for lab 24's
     /// copy-on-write mark.
     pub const COW: u64 = 1 << 9;
     pub const NX: u64 = 1 << 63;

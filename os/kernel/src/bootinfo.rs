@@ -1,8 +1,10 @@
 //! BootInfo v2 — the frozen seam between any bootloader and this kernel.
 //!
 //! Flat, C-ABI, no pointers to bootloader-owned memory except where stated.
-//! Arc B's hand-written bootloader must be able to produce this struct
-//! byte-for-byte, which is why nothing here references Limine types.
+//! Nothing here references Limine types on purpose: the shim in `boot/` is the
+//! only writer today, and a writer in another language (or a learner's own
+//! loader, should a later course add one) must be able to produce it
+//! byte-for-byte from this file alone.
 
 /// "SB" + boot + version 2. The magic names the handoff protocol, not the
 /// struct's length: fields appended at the end (as `kernel_phys`/`kernel_virt`/

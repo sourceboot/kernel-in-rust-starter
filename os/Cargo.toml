@@ -7,3 +7,11 @@
 [workspace]
 resolver = "2"
 members = ["kernel", "boot"]
+
+# The floor, not the pin: `channel = "stable"` floats (CONTRACT A.1-2, ruled
+# 2026-10-17). `#[unsafe(naked)]` / `naked_asm!` are stable since 1.88, and
+# rustup does not update a channel the machine already has, so without this a
+# learner on an older stable would meet an error on the trampolines instead of
+# cargo's plain "package `kernel` requires rustc 1.88".
+[workspace.package]
+rust-version = "1.88"

@@ -1,8 +1,10 @@
 //! Lab 05 — the page-fault seam. This file is yours.
 //!
 //! `idt::dispatch` calls `fault` for every `#PF` with CR2 and the error code
-//! the CPU pushed. In lab 05 nothing can be resolved yet, so `fault`
-//! classifies the fault and returns `Kill`; `dispatch` reports it and halts.
+//! the CPU pushed, before any handler registered for vector 14. In lab 05
+//! nothing can be resolved yet, so `fault` classifies the fault and returns
+//! `Kill`, and remembers the last `Kill` it returned for `last_kill`;
+//! `dispatch` reports it and halts.
 //! Later labs give `fault` arms behind the same signature.
 //!
 //! Fill in the body; keep the signature and the types — later labs and the
@@ -56,5 +58,10 @@ pub mod pf {
 /// Decide what a page fault at `addr` means.
 pub fn fault(addr: VirtAddr, error: u64, tf: &TrapFrame) -> FaultOutcome {
     let _ = (addr, error, tf);
-    todo!("lab 05 step 5 — fault: classify by the error code and the address, return Kill")
+    todo!("lab 05 step 5 — fault: classify by the error code and the address, remember the Kill for last_kill, return it")
+}
+
+/// The last `Kill` that `fault` returned, if it has returned one.
+pub fn last_kill() -> Option<Kill> {
+    todo!("lab 05 step 5 — last_kill: the Kill that fault returned last")
 }

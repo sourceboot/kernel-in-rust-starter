@@ -1,6 +1,6 @@
 /*
  * user/hi/hi.c -- lab 09's program, and the course's retention device:
- * labs 12, 13, 14, 15, 17, 21 and 22 run it again (DESIGN.md).
+ * labs 12, 13, 14, 15, 17, 23 and 24 run it again (DESIGN.md).
  *
  * Protocol (CONTRACT §A.3): argv = ["hi", <nonce: 32 hex>, <index: decimal>].
  * It reads its own CS, prints the line Part C fixes,

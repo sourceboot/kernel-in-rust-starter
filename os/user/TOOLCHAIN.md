@@ -41,7 +41,7 @@ a finding, not a re-commit.
 `build.sh` holds the one copy. Measured on the pin, 2026-10-16:
 
 - **`-target x86_64-linux-musl -static -O2 -nostdlib -ffreestanding -mgeneral-regs-only
-  -fno-stack-protector`**: CONTRACT §A.8's line for labs 09–22. Its own `_start` (`crt0.c`), its
+  -fno-stack-protector`**: CONTRACT §A.8's line for labs 09–24. Its own `_start` (`crt0.c`), its
   own syscall stubs (`sys.h`), no libc.
 - **`-mno-sse -mno-sse2 -mno-mmx -msoft-float`**: §A.8's named fallback, because **`zig cc
   0.17.0` does not honour `-mgeneral-regs-only` on x86-64**. Under `-###` it lowers the flag to

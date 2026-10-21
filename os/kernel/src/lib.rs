@@ -26,7 +26,7 @@ pub mod serial; // 02
 pub mod panic; // 03
 pub mod gdt; // 04
 pub mod idt; // 05
-pub mod mm; // 05 (the fault seam), 12, 22, 23
+pub mod mm; // 05 (the fault seam), 12, 24, 25
 pub mod irq; // 06
 pub mod kbd; // 06
 pub mod time; // 06
@@ -49,7 +49,7 @@ pub mod blk {
 }
 pub mod fs {
     //! The file-system layer: the VFS trait and the boot archive (13), ext2
-    //! (17, 18), the log (18, 19), the mount walk, /proc and /dev (20).
+    //! (17–20), the log (18, 21), the mount walk, /proc and /dev (22).
     pub mod archive;
     pub mod devfs;
     pub mod ext2;
@@ -58,7 +58,7 @@ pub mod fs {
     pub mod procfs;
     pub mod vfs;
 }
-pub mod cow; // 22
+pub mod cow; // 24
 
 use core::sync::atomic::{AtomicU32, Ordering};
 

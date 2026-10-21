@@ -2,7 +2,19 @@
 //! BootInfo's memory map and kernel range. Two rows share one survey: it
 //! allocates until the pool is empty, checks every frame it got against the
 //! memory map, dirties each one, and frees them all — so a later `alloc`
-//! that does not zero shows up in `frames.alloc.count`.
+//! that does not zero shows up in `frames.alloc.count`. `frames.kernel_image`
+//! also holds the drain to the pool's own counts: it must hand out exactly the
+//! free count `stats()` reported, and at most a sixteenth of the total may be
+//! held back (the count array's frames) — a pool that keeps a few dozen
+//! frames and reports the map's recount as its total is refused (sk07-forger-1,
+//! 2026-10-18). The survey drains while it holds one frame, after freeing
+//! another, so a pool that reuses a freed frame only once nothing is held
+//! comes up short (sk07-forger-5, 2026-10-18). It then gives back the lower
+//! half of what it took, by address, while the rest is still held, and drains
+//! again: every one must come back, so a pool that recycles freed frames
+//! through a small cache is refused (sk07-forger-6, 2026-10-18). A cache of
+//! half the pool or more is the catalogued residual: at that size it is a
+//! working free list for everything this course asks of it.
 
 #![no_std]
 #![no_main]
@@ -42,6 +54,9 @@ struct Survey {
     dups: u64,
     free_before: u64,
     free_after: u64,
+    total: u64,
+    redrain: u64,
+    half: u64,
 }
 
 static SEEN: SpinLock<[u64; TRACK / 64]> = SpinLock::new([0; TRACK / 64]);
@@ -54,7 +69,11 @@ fn survey() -> Survey {
     }
     let k = bi().kernel_range();
     let mut seen = SEEN.lock();
-    let mut s = Survey { got: 0, below_1m: 0, in_kernel: 0, not_usable: 0, untracked: 0, dups: 0, free_before: frame::stats().free as u64, free_after: 0 };
+    // Hold one frame across a freed one, so the drain sees whether a frame
+    // freed while another is held goes back to the pool.
+    let held = frame::alloc();
+    if let Some(a) = frame::alloc() { frame::free(a); }
+    let mut s = Survey { got: 0, below_1m: 0, in_kernel: 0, not_usable: 0, untracked: 0, dups: 0, free_before: frame::stats().free as u64, free_after: 0, redrain: 0, half: 0, total: frame::stats().total as u64 };
     while let Some(f) = frame::alloc() {
         let pa = f.0 .0;
         s.got += 1;
@@ -85,6 +104,31 @@ fn survey() -> Survey {
             }
         }
     }
+    // Give back the lower half of what the drain took (by address) while
+    // `held` and the upper half are still out, then drain again: every one of
+    // them, freed while frames were held, must come back.
+    let mut left = s.got / 2;
+    s.half = left;
+    for (w, word) in seen.iter_mut().enumerate() {
+        let mut bits = *word;
+        while bits != 0 && left > 0 {
+            let b = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            *word &= !(1u64 << b);
+            left -= 1;
+            frame::free(Frame(PhysAddr(((w * 64 + b) as u64) * PAGE_SIZE)));
+        }
+        if left == 0 {
+            break;
+        }
+    }
+    while let Some(f) = frame::alloc() {
+        s.redrain += 1;
+        let i = (f.0 .0 / PAGE_SIZE) as usize;
+        if i < TRACK {
+            seen[i / 64] |= 1 << (i % 64);
+        }
+    }
     for (w, word) in seen.iter_mut().enumerate() {
         let mut bits = *word;
         while bits != 0 {
@@ -95,6 +139,7 @@ fn survey() -> Survey {
         *word = 0;
     }
     s.free_after = frame::stats().free as u64;
+    if let Some(h) = held { frame::free(h); }
     kernel::ktap::note(format_args!(
         "frames survey: {} frames allocated before the pool ran dry; {} below 1 MiB, {} inside the kernel image, {} outside usable memory, {} handed out twice",
         s.got, s.below_1m, s.in_kernel, s.not_usable, s.dups
@@ -144,6 +189,9 @@ ktest!("frames.kernel_image", fn frames_kernel_image(t: &mut TestCtx) {
     t.expect_eq("frames handed out inside the kernel image", s.in_kernel, 0);
     t.expect_eq("frames handed out outside usable memory", s.not_usable, 0);
     t.expect_eq("free frames after every surveyed frame was freed", s.free_after, s.free_before);
+    t.expect_eq("frames the survey drained, against the free count it started from", s.got, s.free_before);
+    t.expect_eq("frames a second drain got back, of the half given back while the rest was held", s.redrain, s.half);
+    t.expect(s.got >= s.total - s.total / 16, "the survey drained the pool: at most a sixteenth of the total held back");
 });
 
 ktest!("frames.alloc.count", fn frames_alloc_count(t: &mut TestCtx) {

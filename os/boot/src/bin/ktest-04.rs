@@ -60,6 +60,31 @@ fn tss_base() -> u64 {
     ((lo >> 16) & 0xff_ffff) | (((lo >> 56) & 0xff) << 24) | ((hi & 0xffff_ffff) << 32)
 }
 
+// Bracket the whole image (boot/linker.ld); only their addresses matter.
+extern "C" {
+    static __kernel_start: u8;
+    static __kernel_end: u8;
+}
+
+/// The learner's TSS is a `static`, so the descriptor's base (all three base
+/// fields, the high half's bits 63:32 included) must land inside the kernel
+/// image. Checked before any row reads the TSS through it: a wrong base reads
+/// unmapped memory, which with no IDT is a reset (sk04-ladder "outside",
+/// TPM ruling 2026-10-18).
+fn tss_in_image() -> bool {
+    let (lo, hi) = (core::ptr::addr_of!(__kernel_start) as u64, core::ptr::addr_of!(__kernel_end) as u64);
+    let b = tss_base();
+    b >= lo && b.checked_add(104).is_some_and(|e| e <= hi)
+}
+
+fn tss_base_fail(t: &mut kernel::ktap::TestCtx) -> bool {
+    if tss_in_image() {
+        return false;
+    }
+    t.fail(format_args!("the TSS descriptor's base: observed {:#x}, expected the address of a TSS inside the kernel", tss_base()));
+    true
+}
+
 fn segs() -> (u16, u16, u16, u16) {
     let (cs, ss, ds, tr): (u16, u16, u16, u16);
     // SAFETY: reading segment registers and the task register has no effect.
@@ -84,6 +109,7 @@ ktest!("gdt.layout", fn layout(t: &mut TestCtx) {
     let td = desc(6);
     t.expect(present(td) && access(td) & 0x1f == 0x0b, "0x30 is a present, busy 64-bit TSS (ltr ran)");
     t.expect((td & 0xffff) >= 103, "the TSS limit covers 104 bytes");
+    tss_base_fail(t);
     let (cs, ss, ds, tr) = segs();
     t.expect_eq("CS after init", cs as u64, sel::KCODE as u64);
     t.expect_eq("SS after init", ss as u64, sel::KDATA as u64);
@@ -110,6 +136,9 @@ fn tss_u64(off: u64) -> u64 {
 
 ktest!("tss.rsp0", fn rsp0(t: &mut TestCtx) {
     let (k, _, _) = shim::stacks();
+    if tss_base_fail(t) {
+        return;
+    }
     t.expect_eq("TSS.rsp0 (offset 4) after init", tss_u64(4), k.0);
     gdt::set_rsp0(VirtAddr(k.0 - 0x100));
     t.expect_eq("TSS.rsp0 after set_rsp0", tss_u64(4), k.0 - 0x100);
@@ -118,6 +147,9 @@ ktest!("tss.rsp0", fn rsp0(t: &mut TestCtx) {
 
 ktest!("tss.ist1", fn ist1(t: &mut TestCtx) {
     let (_, i, _) = shim::stacks();
+    if tss_base_fail(t) {
+        return;
+    }
     t.expect_eq("TSS.ist[0] (offset 0x24) after init", tss_u64(0x24), i.0);
 });
 
