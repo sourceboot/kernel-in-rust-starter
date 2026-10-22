@@ -63,7 +63,7 @@
 //! renamed over, truncated or written through this trait: `-EPERM`.
 //!
 //! The kernel keeps no calendar: a time written to an inode is `EPOCH`
-//! plus the seconds since boot.
+//! plus whole seconds of `time::now_ns()`.
 //!
 //! Fill in the bodies; keep the signatures — later labs and the course's
 //! tests use them. Add private fields and helpers as you need them.

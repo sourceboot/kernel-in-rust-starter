@@ -25,18 +25,67 @@
 //!     `../boot/init` from `/dev`'s root; `/dev/null/` is `-ENOTDIR` and
 //!     `/proc/nosuch` `-ENOENT`. Lab 13's walk (the longest-prefix mount,
 //!     decided once) fails six of them (measured 2026-10-17). Last in the
-//!     file: `/bin/ls /proc` prints `meminfo mounts sboot uptime` and one
-//!     name per pid the kernel has, `ls`'s own among them, and `/bin/ls
-//!     /dev` exactly `console null tty zero` — `getdents64` on the mounted
-//!     roots, not on ext2's empty directories under them.
+//!     file: `/bin/ls /proc` prints `meminfo mounts sboot uptime` (and
+//!     `self`, if the kernel lists it, as Linux does) and one name per pid:
+//!     `ls`'s own, every pid `proc::each` has both before `ls` starts and
+//!     after it ends, and no number that is neither; and `/bin/ls /dev`
+//!     exactly `console null tty zero` — `getdents64` on the mounted roots,
+//!     not on ext2's empty directories under them.
 //!   2 `proc.pid.cmdline` (U, derived) — `/bin/cat` started with argv
-//!     `cat - <1–3 nonce-derived words>` and a pipe as its fd 0 whose write
-//!     end this file holds and writes nothing to, so `cat` sleeps in `read`
-//!     and stays alive; its pid is what `exec::spawn` returned. A second
-//!     `/bin/cat /proc/<pid>/cmdline` must print the argv, each string
-//!     followed by one NUL, and exit 0 — read while the first is alive
-//!     (checked before and after). Then the write end is dropped and the
-//!     first `cat` ends.
+//!     `cat - <1–3 nonce-derived words> t<12 hex digits>` and a pipe as its
+//!     fd 0 whose write end this file holds and writes nothing to, so `cat`
+//!     sleeps in `read` and stays alive; its pid is what `exec::spawn`
+//!     returned. The last word comes from the time-stamp counter and the PM
+//!     timer at that moment, so no kernel can derive it; it travels the
+//!     same way as the others (exec's argv) and is printed only in a
+//!     failure line after the row has read it back. An older `cat -` with
+//!     argv `cat - t<12 hex digits>` is started first and lives through the
+//!     reads. A second `/bin/cat /proc/<pid>/cmdline` must print the argv,
+//!     each string followed by one NUL, and exit 0 — read while the first is
+//!     alive (checked before and after); then the same for the older one, so
+//!     a cmdline taken from any one live process fails (slice 5b fix round
+//!     2). `/proc/<pid>/status` is read as `key: value` lines in any
+//!     order with any whitespace; only `Pid` (the pid) and `PPid` (its ppid
+//!     in `proc::each`) are graded — `Name` and `State` are not. Then both
+//!     write ends are dropped and both `cat`s end. Then `/proc/self`: a
+//!     program with argv `probe t<12 hex digits>` forks; fd 0 is a pipe this
+//!     file holds the write end of, fd 31 another whose read end it holds.
+//!     Each process reads `/proc/self/status` and `/proc/self/cmdline`, then
+//!     asks `getpid` and `getppid`, writes a byte to fd 31 and `wait4(-1)`s
+//!     (the child's answers `-ECHILD`); before its reads the child waits on
+//!     fd 0. The parent reads first; on its byte this file reads the
+//!     child's `/proc/<pid>/status` (Pid the child, PPid the parent — a
+//!     reader that is not the target); then a second program forks and
+//!     waits, and `/bin/cat /proc/<pid>/status` (a process reading another's)
+//!     must give the same Pid and PPid (round 3); then this file writes the
+//!     child's byte. Each
+//!     `/proc/self/status`'s `Pid` and `PPid` must be that process's own
+//!     `getpid` and `getppid`; the parent's cmdline its own argv. A `self`
+//!     that is the newest pid fails in the parent, one pinned to any one pid
+//!     or to the last caller of `getpid` fails in the child, a `PPid` that
+//!     is the reader's parent fails from outside, and a status that reports
+//!     the reader's own numbers, or a PPid kept only for the newest fork,
+//!     fails in cat's read (slice 5b fix rounds 1–3). Last, with the older
+//!     `cat` (pid 1) still alive: a program forks child A and waits; `cat`
+//!     reads A's status (PPid the program); the program forks child B, so
+//!     a pid (that `cat`'s) falls between the forks and B's pid less one is
+//!     not its parent, and `cat` reads B's status (PPid the program); B's
+//!     own `getppid`, asked while the program waits, must be the program
+//!     (round 6); the program ends without waiting; other programs fork
+//!     12–20 times (drawn), then one forks and stays alive with its child;
+//!     `cat` reads A's and B's status again, and each `PPid` must now be
+//!     lab 14's heir (pid 1 while it runs), as must A's and B's `getppid`.
+//!     A PPid worked out from the pid, from a list of the last eight forks
+//!     or fewer, or from the newest live process that forked fails (rounds
+//!     4–6); one from a list of 32 forks, or a table indexed by pid % 64,
+//!     passes (no pid read here reaches 64; for the catalogue, G987). A PPid kept
+//!     beside the record, or from an earlier read, and handed to pid 1 when
+//!     its parent ends behaves correctly, since orphans go only to pid 1 and
+//!     pids are never reused: that design is right, and passes. Then (round
+//!     7) a program G forks M and waits; M forks O and ends while G runs,
+//!     and `cat` reads O's status: PPid must be the heir, not G. (O's
+//!     `getppid` is asked only after the pipes close, when G may have ended
+//!     too, so only the status read is a check of a live grandparent.)
 //!   3 `proc.meminfo.moves` (derived) — `/proc/meminfo` read through the
 //!     learner's `read_at`, interrupts off: `MemTotal` and `MemFree` equal
 //!     `frame::stats()` × 4 kB; this file takes N frames itself with
@@ -50,22 +99,62 @@
 //!   5 `stat.st_dev.differs` (plain) — a program's `stat` of `/`, `/boot`,
 //!     `/proc`, `/dev` gives four different `st_dev`s, each the root's own
 //!     `stat().dev`; of `/tmp`, `/boot/init`, `/proc/meminfo`, `/proc/sboot`,
-//!     `/dev/null` the `st_dev` of the mount each is in.
+//!     `/dev/null` the `st_dev` of the mount each is in. Then `rename("/tmp/k22
+//!     mv a", "/tmp/k22 mv b")` (a file this file made) is 0 and `stat` of
+//!     the new name gives ext2's `st_dev`: lab 20's ext2 decides a directory
+//!     is its own by comparing stats, so an `st_dev` only some of ext2's
+//!     stats carry makes every rename `-EXDEV` (slice 5b fix round 1).
 //!   6 `dev.null.zero` (plain) — a program: `/dev/null` reads 0 bytes and
 //!     takes a 100-byte write; `/dev/zero` fills a 4096-byte buffer this
 //!     file filled with 0xa5 with zeros and takes a write; `stat` gives
 //!     `S_IFCHR | 0666` and `st_rdev` 1:3 and 1:5; `open("/dev/null",
-//!     O_WRONLY | O_CREAT | O_TRUNC)` (a shell's `>`) succeeds.
+//!     O_WRONLY | O_CREAT | O_TRUNC)` (a shell's `>`) succeeds. The program's
+//!     fd 0 is the console object itself (`FileRef::open(FileObj::CONSOLE,
+//!     O_RDWR | O_NONBLOCK)`, made here): two 256-byte reads drain its queue,
+//!     and its `ioctl(TIOCGWINSZ)` is the expected window size (lab 09's
+//!     `console.winsz` pins it). `/dev/tty` and `/dev/console`, each opened
+//!     `O_RDWR | O_NONBLOCK`, are the console object: a one-byte `read` is
+//!     `-EAGAIN` and `ioctl(TIOCGWINSZ)` is 0 with fd 0's 8 bytes, no
+//!     literal size (slice 5b fix round 1). Then this file opens each
+//!     through devfs's `lookup` and `FileRef::open_inode(.., O_WRONLY)`: the
+//!     open file's object must be `FileObj::CONSOLE`, and a `# t<8 hex>`
+//!     line written to it must come back over COM1's loopback (rounds 1b, 2).
 //!   7 `proc.sboot.nonce` (plain) — `/bin/cat /proc/sboot/nonce` prints the
 //!     run's nonce as this file reads it from `ktap::nonce()`, then a
 //!     newline.
 //!   8 `mount.syscall` (U, plain) — a program: `mount("proc", "/tmp/k22
 //!     proc", "proc", 0, 0)` is 0, `/tmp/k22 proc/meminfo` then opens and
 //!     reads as `/proc/meminfo` does, and `stat` of the mount point gives a
-//!     device that is neither ext2's nor `/proc`'s; the same mount again is
-//!     `-EBUSY`, type `"ext2"` and `"nofs"` `-ENODEV`, a relative target
-//!     `-EINVAL`, a missing one `-ENOENT`, a file `-ENOTDIR`. Each failure
-//!     line names the `mount(...)` call and what it returned.
+//!     device unlike every mount's already in the table (the boot's four,
+//!     round 4b); `mount("devfs",
+//!     "/tmp/k22\td\\ev", "devfs", 0, 0)` (a tab and a backslash in the
+//!     name) is 0, `stat` of `<it>/null` gives `st_rdev` 1:3 and `stat` of the
+//!     mount point a device unlike every earlier mount's (rounds 2, 4b); two more `devfs` mounts at `/tmp/k22-<8 hex>-a` and `-b`
+//!     (drawn for the run), one before the refusals and one after, are 0
+//!     and each mount point's `stat` a device unlike every one before it:
+//!     the boot's four mounts' and each earlier new mount's
+//!     (rounds 3, 4, 4b; with the boot's four that fills lab 13's eight-mount
+//!     table, so a device counter that repeats only after four `devfs`
+//!     mounts passes); at the program's end each new mount point is
+//!     stat'ed again, and a node in it (`meminfo`, `null`), and all three
+//!     must give the same device (round 5), as must `fstat` of the new
+//!     /proc's meminfo opened (round 6; `null` dropped in round 7, since a
+//!     device may open as an object of its own, as the console does); `..`
+//!     out of /proc and /dev must be `/`'s file and `..` out of each new
+//!     mount `/tmp`'s, `st_dev` and `st_ino` both, in a drawn order (round
+//!     7; a device looked up by mount-point name for `stat` and `fstat`
+//!     both, with `..` resolved in the name, passes: for the catalogue,
+//!     G987); the same proc mount again is `-EBUSY`, type `"ext2"`
+//!     and `"nofs"` `-ENODEV`, a relative target `-EINVAL`, a missing one
+//!     `-ENOENT`, a file `-ENOTDIR`. Each failure line names the
+//!     `mount(...)` call and what it returned. `/proc/mounts` (read through
+//!     `/proc`'s root) after the program is exactly its lines before it, then
+//!     `proc /tmp/k22\040proc proc rw 0 0`, `devfs /tmp/k22\011d\134ev
+//!     devfs rw 0 0` and the two drawn `devfs` lines: what was mounted is
+//!     recorded, in order, escaped, and a
+//!     refused mount records nothing; the lines before are row 4's business,
+//!     so a table that drops a boot-time mount fails row 4 alone (slice 5b
+//!     fix round 1).
 
 #![no_std]
 #![no_main]
@@ -84,7 +173,7 @@ use core::sync::atomic::Ordering;
 
 use kernel::addr::VirtAddr;
 use kernel::blk::ata::{self, Ata, BlockDevice};
-use kernel::console::{Fd, FileRef};
+use kernel::console::{Fd, FileObj, FileRef};
 use kernel::exec;
 use kernel::fs::archive::Archive;
 use kernel::fs::devfs::DevFs;
@@ -125,11 +214,52 @@ const MOUNTS: [(&str, &str, &str); 4] =
 /// Row 8's mount point, made in ext2's `/tmp`.
 const PROC_AT_NAME: &str = "k22 proc";
 const PROC_AT: &str = "/tmp/k22 proc";
+/// Row 8's second mount point, for a `devfs`.
+const DEV_AT_NAME: &str = "k22\td\\ev";
+const DEV_AT: &str = "/tmp/k22\td\\ev";
+/// Two more new `/dev`s go at names drawn for the run (`more_devs`).
+/// Row 5's file, renamed inside ext2's `/tmp`.
+const MV_FROM: &str = "k22 mv a";
+const MV_TO: &str = "k22 mv b";
 
 /// A probe's data segment, and how much of it a probe may use.
 const DATA: u64 = 0x0110_0000;
 const MAX_STEPS: usize = 64;
 const RESULTS: usize = 8 * MAX_STEPS;
+/// `FileObj::as_file` (lab 17 on) and `FileObj::as_pipe` (lab 15 on) where
+/// the cut has them: method lookup takes an inherent method of `FileObj`
+/// before this trait's, which is on `&FileObj`, so on an earlier cut every
+/// object answers `None` and this file still builds (as ktest-17's).
+trait SlotOf {
+    #[allow(dead_code)]
+    fn as_file(self) -> Option<u32>;
+    #[allow(dead_code)]
+    fn as_pipe(self) -> Option<(u32, bool)>;
+}
+
+impl SlotOf for &FileObj {
+    fn as_file(self) -> Option<u32> {
+        None
+    }
+    fn as_pipe(self) -> Option<(u32, bool)> {
+        None
+    }
+}
+
+/// `FileRef::open_inode` (lab 17 on) where the cut has it: a path to an
+/// associated function takes the inherent one first, so on a cut before lab
+/// 17 this answers `-ENOSYS` and this file still builds (as ktest-17's).
+trait OpenInodeOf {
+    #[allow(dead_code)]
+    fn open_inode(ino: InodeRef, flags: u32) -> Result<FileRef, Errno>;
+}
+
+impl OpenInodeOf for FileRef {
+    fn open_inode(_: InodeRef, _: u32) -> Result<FileRef, Errno> {
+        Err(38)
+    }
+}
+
 /// How long a program may run before its output is taken as it stands.
 const RUN_MS: u64 = 10_000;
 
@@ -137,8 +267,18 @@ const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
 const SYS_OPEN: u64 = 2;
 const SYS_STAT: u64 = 4;
+const SYS_FSTAT: u64 = 5;
 const SYS_IOCTL: u64 = 16;
+const SYS_DUP2: u64 = 33;
+const SYS_GETPID: u64 = 39;
+const SYS_FORK: u64 = 57;
+const SYS_WAIT4: u64 = 61;
+const SYS_RENAME: u64 = 82;
+const SYS_GETPPID: u64 = 110;
 const SYS_MOUNT: u64 = 165;
+/// Row 2's turn pipe: its write end in the forking program's table, at
+/// the top (`NFD` = 32); its read end is fd 0.
+const TURN_FD: u64 = 31;
 const O_RDONLY: u64 = 0;
 const O_WRONLY: u64 = 1;
 const O_RDWR: u64 = 2;
@@ -190,6 +330,15 @@ impl Clock {
     }
 }
 
+/// A number no one knows before this moment: the time-stamp counter and
+/// the PM timer, mixed. Row 2 puts it in an argv; it is printed only after
+/// the row has read it back.
+fn unpublished() -> u64 {
+    // SAFETY: rdtsc reads a counter; no memory is touched.
+    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
+    ktap::splitmix64(tsc ^ (pm() as u64) << 40) & 0xffff_ffff_ffff
+}
+
 fn ticks() -> u64 {
     time::TICKS.load(Ordering::Relaxed)
 }
@@ -236,16 +385,20 @@ fn errno_text(e: Errno) -> String {
         5 => "EIO",
         8 => "ENOEXEC",
         9 => "EBADF",
+        10 => "ECHILD",
+        11 => "EAGAIN",
         12 => "ENOMEM",
         13 => "EACCES",
         14 => "EFAULT",
         16 => "EBUSY",
+        18 => "EXDEV",
         19 => "ENODEV",
         20 => "ENOTDIR",
         21 => "EISDIR",
         22 => "EINVAL",
         23 => "ENFILE",
         24 => "EMFILE",
+        25 => "ENOTTY",
         29 => "ESPIPE",
         30 => "EROFS",
         36 => "ENAMETOOLONG",
@@ -481,7 +634,6 @@ fn status_text(s: Option<i32>) -> String {
 struct Ran {
     out: Vec<u8>,
     exit: Option<i32>,
-    ms: u64,
 }
 
 fn res(out: &[u8], k: usize) -> i64 {
@@ -573,15 +725,23 @@ fn drain(what: &str, r: &FileRef, pid: Pid) -> Ran {
     let _ = yield_until(500, || exit_of(pid).is_some());
     let exit = exit_of(pid);
     if !ended {
-        note(format_args!("{what}: pid {} had not closed its output after {ms} ms ({})", pid.0, status_text(exit)));
+        note(format_args!("{what}: pid {} had not closed its output after {ms} ms; the limit is {RUN_MS} ms ({})", pid.0, status_text(exit)));
     }
-    Ran { out, exit, ms }
+    Ran { out, exit }
 }
 
 /// Run `path` with `argv` and a pipe as fds 1 and 2; what it wrote.
 fn run(what: &str, path: &str, argv: &[&str]) -> Result<Ran, String> {
+    run_with(what, path, argv, &[])
+}
+
+/// `run`, with `fds` in its table as well.
+fn run_with(what: &str, path: &str, argv: &[&str], fds: &[(usize, &FileRef)]) -> Result<Ran, String> {
     let (r, w) = out_pipe(what)?;
-    let pid = start_with(what, || exec::spawn(path, argv, &[]), &[(1, &w), (2, &w)]);
+    let mut all: Vec<(usize, &FileRef)> = alloc::vec![(1, &w), (2, &w)];
+    all.extend_from_slice(fds);
+    let pid = start_with(what, || exec::spawn(path, argv, &[]), &all);
+    drop(all);
     drop(w);
     Ok(drain(what, &r, pid?))
 }
@@ -599,21 +759,36 @@ struct Fs {
 /// A program assembled here, written to ext2's `/tmp/k22-<what>` and run;
 /// its data segment as it wrote it back.
 fn run_probe(fs: &Fs, what: &str, p: Probe) -> Result<Vec<u8>, String> {
+    run_probe_as(fs, what, p, &["probe"], &[], 1)
+}
+
+/// `run_probe` with `argv`, `fds` in its table besides 1 and 2, and
+/// `copies` data segments expected back (a probe that forks writes two).
+fn run_probe_as(fs: &Fs, what: &str, p: Probe, argv: &[&str], fds: &[(usize, &FileRef)], copies: usize) -> Result<Vec<u8>, String> {
+    let (path, len) = install(fs, what, p)?;
+    let ran = run_with(what, &path, argv, fds)?;
+    ran_whole(what, ran, len * copies)
+}
+
+/// A program assembled here, written to ext2's `/tmp/k22-<what>`: its path
+/// and the length of one copy of its data segment.
+fn install(fs: &Fs, what: &str, p: Probe) -> Result<(String, usize), String> {
     let (elf, len) = p.elf();
     let name = format!("k22-{what}");
     let f = quiet(|| fs.tmp.create(&name, 0o755)).map_err(|e| format!("{what}: create(\"/tmp/{name}\") returned {}", errno_text(e)))?;
     match quiet(|| f.write_at(0, &elf)) {
-        Ok(n) if n == elf.len() => {}
-        other => return Err(format!("{what}: write_at of the program's {} bytes returned {other:?}", elf.len())),
+        Ok(n) if n == elf.len() => Ok((format!("/tmp/{name}"), len)),
+        other => Err(format!("{what}: write_at of the program's {} bytes returned {other:?}", elf.len())),
     }
-    let path = format!("/tmp/{name}");
-    let ran = run(what, &path, &["probe"])?;
+}
+
+/// What a program wrote, if it exited 0 having written `len` bytes.
+fn ran_whole(what: &str, ran: Ran, len: usize) -> Result<Vec<u8>, String> {
     if ran.exit != Some(0) || ran.out.len() != len {
         return Err(format!(
-            "{what}: the program wrote {} of its {len} bytes and ended {} after {} ms",
+            "{what}: the program wrote {} of its {len} bytes and ended {}",
             ran.out.len(),
-            status_text(ran.exit),
-            ran.ms
+            status_text(ran.exit)
         ));
     }
     Ok(ran.out)
@@ -778,76 +953,609 @@ fn cross_row(fs: Option<&Fs>) -> Row {
 
 // ── Row 2: proc.pid.cmdline ──────────────────────────────────────────────
 
-fn cmdline_row(fs: Option<&Fs>) {
-    let mut r = Row::new(CMDLINE_ID);
-    let d = r.derived(CMDLINE_ID);
-    let Some(_fs) = fs else { return unmounted(r, 2) };
-    let words: Vec<String> = (0..1 + d % 3).map(|i| format!("w{:012x}", ktap::splitmix64(d ^ i) & 0xffff_ffff_ffff)).collect();
-    let mut argv: Vec<&str> = alloc::vec!["cat", "-"];
-    argv.extend(words.iter().map(|w| w.as_str()));
+/// `key: value` lines, any order, any whitespace around the value: the
+/// value of `key`, if one line has it.
+fn field<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    text.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        (k.trim() == key).then(|| v.trim())
+    })
+}
+
+/// A status file's `Pid` and `PPid` against the two numbers expected.
+fn status_check(r: &mut Row, whose: &str, text: &[u8], pid: u64, ppid: u64) {
+    let text = String::from_utf8_lossy(text);
+    for (key, want) in [("Pid", pid), ("PPid", ppid)] {
+        let got = field(&text, key);
+        if got.and_then(|v| v.parse::<u64>().ok()) != Some(want) {
+            r.fail(format_args!("{CMDLINE_ID}: {whose} reads {text:?}: its {key} line is {got:?}, expected {key}: {want}"));
+        }
+    }
+}
+
+/// `/bin/cat` with `argv`: fd 0 a pipe whose write end comes back (nothing
+/// is ever written to it, so cat sleeps in `read`), fds 1 and 2 another
+/// pipe. (pid, that write end, the output's read end.)
+fn sleeper(argv: &[&str]) -> Result<(Pid, FileRef, FileRef), String> {
+    let (stdin_r, stdin_w) = pipe::open(0).map_err(|e| format!("pipe::open(0) returned {}", errno_text(e)))?;
+    let (out_r, out_w) = out_pipe("cat -")?;
+    let started = start_with("cat -", || exec::spawn("/bin/cat", argv, &[]), &[(0, &stdin_r), (1, &out_w), (2, &out_w)]);
+    drop(stdin_r);
+    drop(out_w);
+    Ok((started?, stdin_w, out_r))
+}
+
+/// Each string of `argv`, then a NUL.
+fn nul_joined(argv: &[&str]) -> Vec<u8> {
     let mut want = Vec::new();
-    for a in &argv {
+    for a in argv {
         want.extend_from_slice(a.as_bytes());
         want.push(0);
     }
-    // The first cat: fd 0 a pipe this file holds the write end of (nothing
-    // is ever written: cat sleeps in read), fds 1 and 2 another pipe.
-    let (stdin_r, stdin_w) = match pipe::open(0) {
-        Ok(p) => p,
-        Err(e) => {
-            r.fail(format_args!("{CMDLINE_ID}: pipe::open(0) returned {}", errno_text(e)));
-            return r.finish(2);
-        }
-    };
-    let (out_r, out_w) = match out_pipe("cat -") {
-        Ok(p) => p,
+    want
+}
+
+fn cmdline_row(fs: Option<&Fs>) {
+    let mut r = Row::new(CMDLINE_ID);
+    let d = r.derived(CMDLINE_ID);
+    let Some(fs) = fs else { return unmounted(r, 2) };
+    let mut words: Vec<String> = (0..1 + d % 3).map(|i| format!("w{:012x}", ktap::splitmix64(d ^ i) & 0xffff_ffff_ffff)).collect();
+    // One word more that no one can know before this moment.
+    words.push(format!("t{:012x}", unpublished()));
+    let mut argv: Vec<&str> = alloc::vec!["cat", "-"];
+    argv.extend(words.iter().map(|w| w.as_str()));
+    let want = nul_joined(&argv);
+    // An older cat first, with a word of its own, alive while the newer
+    // one's files are read: a cmdline taken from some other live process
+    // than the one named fails on one of the two.
+    let other = format!("t{:012x}", unpublished());
+    let older_argv = ["cat", "-", other.as_str()];
+    let older = match sleeper(&older_argv) {
+        Ok(s) => s,
         Err(why) => {
-            r.fail(format_args!("{CMDLINE_ID}: {why}"));
+            r.fail(format_args!("{CMDLINE_ID}: an older cat -: {why}"));
             return r.finish(2);
         }
     };
-    let started = start_with("cat -", || exec::spawn("/bin/cat", &argv, &[]), &[(0, &stdin_r), (1, &out_w), (2, &out_w)]);
-    drop(stdin_r);
-    drop(out_w);
-    let pid = match started {
-        Ok(p) => p,
+    let (pid, stdin_w, out_r) = match sleeper(&argv) {
+        Ok(s) => s,
         Err(why) => {
             r.fail(format_args!("{CMDLINE_ID}: {why}"));
             return r.finish(2);
         }
     };
     let _ = yield_until(50, || false);
-    let alive_before = exit_of(pid).is_none();
-    let path = format!("/proc/{}/cmdline", pid.0);
-    let reader = run("cat cmdline", "/bin/cat", &["cat", &path]);
-    let alive_after = exit_of(pid).is_none();
-    r.expect(alive_before && alive_after, &format!("pid {} (cat -) alive while its cmdline was read", pid.0));
-    match reader {
-        Ok(ran) => {
-            if ran.exit != Some(0) {
-                r.fail(format_args!("{CMDLINE_ID}: cat {path} ended {}; it wrote {:?}", status_text(ran.exit), String::from_utf8_lossy(&ran.out)));
+    for (who, at, argv) in [("cat -", pid, &argv[..]), ("an older cat -", older.0, &older_argv[..])] {
+        let want = nul_joined(argv);
+        let alive_before = exit_of(at).is_none();
+        let path = format!("/proc/{}/cmdline", at.0);
+        let reader = run("cat cmdline", "/bin/cat", &["cat", &path]);
+        let alive_after = exit_of(at).is_none();
+        r.expect(alive_before && alive_after, &format!("pid {} ({who}) alive while its cmdline was read", at.0));
+        match reader {
+            Ok(ran) => {
+                if ran.exit != Some(0) {
+                    r.fail(format_args!("{CMDLINE_ID}: cat {path} ended {}; it wrote {:?}", status_text(ran.exit), String::from_utf8_lossy(&ran.out)));
+                }
+                if ran.out != want {
+                    r.fail(format_args!(
+                        "{CMDLINE_ID}: cat {path} ({who}'s) printed {:?} ({} bytes), expected {:?} ({} bytes: each argv string, then a NUL)",
+                        String::from_utf8_lossy(&ran.out),
+                        ran.out.len(),
+                        String::from_utf8_lossy(&want),
+                        want.len()
+                    ));
+                }
             }
-            if ran.out != want {
-                r.fail(format_args!(
-                    "{CMDLINE_ID}: cat {path} printed {:?} ({} bytes), expected {:?} ({} bytes: each argv string, then a NUL)",
-                    String::from_utf8_lossy(&ran.out),
-                    ran.out.len(),
-                    String::from_utf8_lossy(&want),
-                    want.len()
-                ));
-            }
+            Err(why) => r.fail(format_args!("{CMDLINE_ID}: {why}")),
         }
-        Err(why) => r.fail(format_args!("{CMDLINE_ID}: {why}")),
     }
-    let status = quiet(|| vfs::walk(&vfs::root()?, &format!("/proc/{}/status", pid.0))).and_then(|f| read_all(&f));
-    if let Ok(s) = status {
-        note(format_args!("{CMDLINE_ID}: /proc/{}/status reads {:?}", pid.0, String::from_utf8_lossy(&s)));
+    // Its status file: Pid, and the parent from the process table.
+    let mut ppid = None;
+    quiet(|| {
+        proc::each(|p| {
+            if p.pid == pid {
+                ppid = Some(p.ppid.0);
+            }
+        })
+    });
+    let spath = format!("/proc/{}/status", pid.0);
+    match (quiet(|| vfs::walk(&vfs::root()?, &spath)).and_then(|f| read_all(&f)), ppid) {
+        (Ok(s), Some(pp)) => status_check(&mut r, &spath, &s, pid.0, pp),
+        (Ok(_), None) => r.fail(format_args!("{CMDLINE_ID}: pid {} is not in proc::each", pid.0)),
+        (Err(e), _) => r.fail(format_args!("{CMDLINE_ID}: reading {spath} returned {}", errno_text(e))),
     }
     note(format_args!("{CMDLINE_ID}: argv was {} strings, {} bytes with their NULs", argv.len(), want.len()));
     drop(stdin_w);
     let first = drain("cat -", &out_r, pid);
-    note(format_args!("{CMDLINE_ID}: with its stdin closed, cat - (pid {}) ended {} after {} ms", pid.0, status_text(first.exit), first.ms));
+    note(format_args!("{CMDLINE_ID}: with its stdin closed, cat - (pid {}) ended {}", pid.0, status_text(first.exit)));
+    self_check(fs, &mut r);
+    // The older cat is still alive: it is the run's first process, pid 1
+    // (`NEXT_PID` starts at 1), so an orphan goes to it (lab 14's rule).
+    family_check(fs, &mut r);
+    chain_check(fs, &mut r);
+    let (older_pid, older_in, older_out) = older;
+    drop(older_in);
+    let _ = drain("an older cat -", &older_out, older_pid);
     r.finish(2);
+}
+
+/// An orphan whose grandparent still runs. A program (G) forks M and waits
+/// on fd 3; M waits on fd 0 (a pipe only M reads), then moves that pipe to
+/// its fd 3 with `dup2`, forks O and ends, while O waits on fd 0. `exit`
+/// hands O to lab 14's heir (pid 1 while it runs), not to G, which still
+/// runs: `cat` reads O's status, whose PPid must be the heir. O's `getppid`
+/// is asked after the pipes close, when G may have ended as well, so it is
+/// held to the heir too but checks a live grandparent only when G outlives it.
+fn chain_check(fs: &Fs, r: &mut Row) {
+    let word = format!("c{:012x}", unpublished());
+    let mut p = Probe::new();
+    let (tok, _) = p.buf(8);
+    let k_m = p.call(SYS_FORK, &[]);
+    // M's fork answer is 0, so it reads fd 0 and waits; G's is a pid, not an fd.
+    p.call(SYS_READ, &[A::R(k_m), tok, A::I(1)]);
+    // In M, fd 3 becomes fd 0's pipe; in G this fails and fd 3 stays its own.
+    p.call(SYS_DUP2, &[A::R(k_m), A::I(3)]);
+    p.call(SYS_READ, &[A::I(3), tok, A::I(1)]);
+    let k_o = p.call(SYS_FORK, &[]);
+    p.call(SYS_READ, &[A::R(k_o), tok, A::I(1)]);
+    let k_ppid = p.call(SYS_GETPPID, &[]);
+    const WHAT: &str = "a program whose child forks and ends while the program waits";
+    let (path, len) = match install(fs, "chain", p) {
+        Ok(it) => it,
+        Err(why) => return r.fail(format_args!("{CMDLINE_ID}: {WHAT}: {why}")),
+    };
+    let pipes = (pipe::open(0), pipe::open(0), out_pipe("chain"));
+    let ((m_r, m_w), (g_r, g_w), (out_r, out_w)) = match pipes {
+        (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+        (Err(e), _, _) | (_, Err(e), _) => return r.fail(format_args!("{CMDLINE_ID}: pipe::open(0) returned {}", errno_text(e))),
+        (_, _, Err(why)) => return r.fail(format_args!("{CMDLINE_ID}: {why}")),
+    };
+    let started = start_with("chain", || exec::spawn(&path, &["probe", &word], &[]), &[(0, &m_r), (1, &out_w), (2, &out_w), (3, &g_r)]);
+    drop((m_r, g_r, out_w));
+    let g = match started {
+        Ok(g) => g,
+        Err(why) => return r.fail(format_args!("{CMDLINE_ID}: {WHAT}: {why}")),
+    };
+    let mut kids = None;
+    let mut heir = 0;
+    'run: {
+        let mut m = None;
+        if !yield_until(RUN_MS, || {
+            quiet(|| proc::each(|q| if q.ppid == g { m = Some(q.pid) }));
+            m.is_some()
+        }) {
+            r.fail(format_args!("{CMDLINE_ID}: {WHAT}: pid {} had no fork child within {RUN_MS} ms ({})", g.0, status_text(exit_of(g))));
+            break 'run;
+        }
+        let m = m.unwrap_or(g);
+        // Both of M's reads.
+        let _ = m_w.write(b"12");
+        let mut o = None;
+        if !yield_until(RUN_MS, || {
+            quiet(|| {
+                proc::each(|q| {
+                    if q.exit.is_none() && q.pid != g && q.pid != m && q.argv.iter().map(|a| a.as_str()).eq(["probe", word.as_str()]) {
+                        o = Some(q.pid);
+                    }
+                })
+            });
+            o.is_some() && exit_of(m).is_some()
+        }) {
+            r.fail(format_args!("{CMDLINE_ID}: {WHAT}: pid {}'s child, pid {}, had not forked and ended within {RUN_MS} ms ({})", g.0, m.0, status_text(exit_of(m))));
+            break 'run;
+        }
+        let o = o.unwrap_or(g);
+        kids = Some((m, o));
+        if exit_of(g).is_some() {
+            r.fail(format_args!("{CMDLINE_ID}: {WHAT}: pid {} ended {} while it waited on fd 3", g.0, status_text(exit_of(g))));
+            break 'run;
+        }
+        quiet(|| {
+            proc::each(|q| {
+                if q.pid == Pid(1) && q.exit.is_none() {
+                    heir = 1;
+                }
+            })
+        });
+        note(format_args!("{CMDLINE_ID}: pid {}'s child {} forked {} and ended while pid {} waited; the heir is pid {heir}", g.0, m.0, o.0, g.0));
+        let spath = format!("/proc/{}/status", o.0);
+        match run("cat status", "/bin/cat", &["cat", &spath]) {
+            Ok(ran) if ran.exit == Some(0) => status_check(r, &format!("cat {spath} (pid {}'s child, whose parent pid {} has ended while pid {} runs)", m.0, m.0, g.0), &ran.out, o.0, heir),
+            Ok(ran) => r.fail(format_args!("{CMDLINE_ID}: cat {spath} ended {}; it wrote {:?}", status_text(ran.exit), String::from_utf8_lossy(&ran.out))),
+            Err(why) => r.fail(format_args!("{CMDLINE_ID}: {why}")),
+        }
+    }
+    // The pipes close: O reads the end of fd 0, G of fd 3 and forks once
+    // more. Four copies of the data: G's, M's, O's and G's second child's.
+    drop((m_w, g_w));
+    let ran = drain("chain", &out_r, g);
+    let Some((m, o)) = kids else { return };
+    let out = match ran_whole("chain", ran, 4 * len) {
+        Ok(out) => out,
+        Err(why) => return r.fail(format_args!("{CMDLINE_ID}: {WHAT}: {why} (four copies of its data)")),
+    };
+    let mut seen = false;
+    for seg in out.chunks(len) {
+        if res(seg, k_m) == 0 && res(seg, k_o) == 0 {
+            seen = true;
+            if res(seg, k_ppid) != heir as i64 {
+                r.fail(format_args!("{CMDLINE_ID}: {WHAT}: in pid {}, whose parent pid {} ended while pid {} ran, getppid() returned {}; expected {heir}", o.0, m.0, g.0, answer(res(seg, k_ppid))));
+            }
+        }
+    }
+    if !seen {
+        r.fail(format_args!("{CMDLINE_ID}: {WHAT}: no copy of its data holds fork() answers 0 and 0 (pid {}'s)", o.0));
+    }
+}
+
+/// Who a fork child's parent is, read by `cat` while the parent runs and
+/// after it ends. A program forks child A, which waits on fd 0 (a pipe this
+/// file holds the write end of), and itself waits on fd 3 (another such
+/// pipe). `cat` reads A's status; that `cat` takes a pid, so the program's
+/// second fork, child B, is not one past its parent. Then fd 3's byte: the
+/// program forks B, which waits on fd 0, and waits on fd 3 again; `cat`
+/// reads B's status (its parent alive, and not B's pid less one). B asks
+/// `getppid` and writes a byte to fd 4 before it waits, so it asks while
+/// its parent runs. Then fd 3's last byte: the program ends without
+/// waiting, and `exit` hands A and B to pid 1 while pid 1 runs (to pid 0
+/// otherwise; lab 14's rule). Other programs fork a number of times drawn
+/// for the run, and one more forks and stays alive with its child; `cat`
+/// reads A's and B's status again: each `PPid` must now be that heir. A
+/// parent worked out from the pid, from a list of the last eight forks, or
+/// from the newest live process that forked names the wrong process. (A
+/// parent kept beside the record, or from an earlier read, and handed to
+/// pid 1 when it ends, is correct here: orphans go only to pid 1, and pids
+/// are never reused.)
+fn family_check(fs: &Fs, r: &mut Row) {
+    let word = format!("t{:012x}", unpublished());
+    let mut p = Probe::new();
+    let (tok, _) = p.buf(8);
+    // In a child the fork's answer is 0, so it reads fd 0 and waits; in the
+    // program it is the child's pid, an fd it does not have, so it does not.
+    let k_f1 = p.call(SYS_FORK, &[]);
+    p.call(SYS_READ, &[A::R(k_f1), tok, A::I(1)]);
+    p.call(SYS_READ, &[A::I(3), tok, A::I(1)]);
+    let k_f2 = p.call(SYS_FORK, &[]);
+    // B asks who its parent is while the parent runs, then says so on fd 4
+    // (the program writes a byte there too).
+    let k_early = p.call(SYS_GETPPID, &[]);
+    p.call(SYS_WRITE, &[A::I(4), tok, A::I(1)]);
+    p.call(SYS_READ, &[A::R(k_f2), tok, A::I(1)]);
+    p.call(SYS_READ, &[A::I(3), tok, A::I(1)]);
+    let k_ppid = p.call(SYS_GETPPID, &[]);
+    const WHAT: &str = "a program that forks twice and ends while both children wait on a pipe";
+    let (path, len) = match install(fs, "family", p) {
+        Ok(it) => it,
+        Err(why) => return r.fail(format_args!("{CMDLINE_ID}: {WHAT}: {why}")),
+    };
+    let mut q = Probe::new();
+    q.call(SYS_FORK, &[]);
+    q.call(SYS_WAIT4, &[A::I(u64::MAX), A::I(0), A::I(0)]);
+    let (fpath, flen) = match install(fs, "forks", q) {
+        Ok(it) => it,
+        Err(why) => return r.fail(format_args!("{CMDLINE_ID}: a program that forks and waits: {why}")),
+    };
+    // One that forks and stays: its child waits on fd 0, it waits on fd 3.
+    let mut h = Probe::new();
+    let (htok, _) = h.buf(8);
+    let k_h = h.call(SYS_FORK, &[]);
+    h.call(SYS_READ, &[A::R(k_h), htok, A::I(1)]);
+    h.call(SYS_READ, &[A::I(3), htok, A::I(1)]);
+    h.call(SYS_WAIT4, &[A::I(u64::MAX), A::I(0), A::I(0)]);
+    let (hpath, hlen) = match install(fs, "holder", h) {
+        Ok(it) => it,
+        Err(why) => return r.fail(format_args!("{CMDLINE_ID}: a program that forks and stays: {why}")),
+    };
+    let pipes = (pipe::open(0), pipe::open(0), out_pipe("family"), out_pipe("family's fd 4"));
+    let ((g0_r, g0_w), (g3_r, g3_w), (out_r, out_w), (s4_r, s4_w)) = match pipes {
+        (Ok(a), Ok(b), Ok(c), Ok(d)) => (a, b, c, d),
+        (Err(e), _, _, _) | (_, Err(e), _, _) => return r.fail(format_args!("{CMDLINE_ID}: pipe::open(0) returned {}", errno_text(e))),
+        (_, _, Err(why), _) | (_, _, _, Err(why)) => return r.fail(format_args!("{CMDLINE_ID}: {why}")),
+    };
+    let started = start_with("family", || exec::spawn(&path, &["probe", &word], &[]), &[(0, &g0_r), (1, &out_w), (2, &out_w), (3, &g3_r), (4, &s4_w)]);
+    drop((g0_r, g3_r, out_w, s4_w));
+    let pid = match started {
+        Ok(pid) => pid,
+        Err(why) => return r.fail(format_args!("{CMDLINE_ID}: {WHAT}: {why}")),
+    };
+    // A live process with the program's argv that is none of `not`.
+    let find = |not: &[Pid]| {
+        let mut c = None;
+        quiet(|| {
+            proc::each(|q| {
+                if q.exit.is_none() && !not.contains(&q.pid) && q.argv.iter().map(|a| a.as_str()).eq(["probe", word.as_str()]) {
+                    c = Some(q.pid);
+                }
+            })
+        });
+        c
+    };
+    let cat = |r: &mut Row, c: Pid, ppid: u64, when: &str| {
+        let spath = format!("/proc/{}/status", c.0);
+        match run("cat status", "/bin/cat", &["cat", &spath]) {
+            Ok(ran) if ran.exit == Some(0) => status_check(r, &format!("cat {spath} ({when})"), &ran.out, c.0, ppid),
+            Ok(ran) => r.fail(format_args!("{CMDLINE_ID}: cat {spath} ended {}; it wrote {:?}", status_text(ran.exit), String::from_utf8_lossy(&ran.out))),
+            Err(why) => r.fail(format_args!("{CMDLINE_ID}: {why}")),
+        }
+    };
+    let hpipes = (pipe::open(0), pipe::open(0), out_pipe("holder"));
+    let ((h0_r, h0_w), (h3_r, h3_w), (hout_r, hout_w)) = match hpipes {
+        (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+        (Err(e), _, _) | (_, Err(e), _) => return r.fail(format_args!("{CMDLINE_ID}: pipe::open(0) returned {}", errno_text(e))),
+        (_, _, Err(why)) => return r.fail(format_args!("{CMDLINE_ID}: {why}")),
+    };
+    let mut holder = None;
+    let mut kids = (None, None);
+    let mut heir = 0;
+    'run: {
+        let mut a = None;
+        if !yield_until(RUN_MS, || {
+            a = find(&[pid]);
+            a.is_some()
+        }) {
+            r.fail(format_args!("{CMDLINE_ID}: {WHAT}: no fork child of pid {} was alive within {RUN_MS} ms ({})", pid.0, status_text(exit_of(pid))));
+            break 'run;
+        }
+        let a = a.unwrap_or(pid);
+        kids.0 = Some(a);
+        cat(r, a, pid.0, &format!("pid {}'s first fork child, its parent waiting", pid.0));
+        let _ = g3_w.write(b"1");
+        let mut b = None;
+        if !yield_until(RUN_MS, || {
+            b = find(&[pid, a]);
+            b.is_some()
+        }) {
+            r.fail(format_args!("{CMDLINE_ID}: {WHAT}: pid {} had no second fork child alive within {RUN_MS} ms of fd 3's byte ({})", pid.0, status_text(exit_of(pid))));
+            break 'run;
+        }
+        let b = b.unwrap_or(pid);
+        kids.1 = Some(b);
+        // Two bytes on fd 4, the program's and B's: B has asked getppid.
+        let mut said = 0;
+        let mut byte = [0u8; 8];
+        if !yield_until(RUN_MS, || {
+            if let Ok(n) = s4_r.read(&mut byte) {
+                said += n;
+            }
+            said >= 2
+        }) {
+            r.fail(format_args!("{CMDLINE_ID}: {WHAT}: fd 4 had {said} of the 2 bytes the program and its second child write after the second fork within {RUN_MS} ms"));
+            break 'run;
+        }
+        cat(r, b, pid.0, &format!("pid {}'s second fork child, forked after another process started; its parent waiting", pid.0));
+        let _ = g3_w.write(b"2");
+        if !yield_until(RUN_MS, || exit_of(pid).is_some()) {
+            r.fail(format_args!("{CMDLINE_ID}: {WHAT}: pid {} had not ended within {RUN_MS} ms of fd 3's last byte ({})", pid.0, status_text(exit_of(pid))));
+            break 'run;
+        }
+        // Forks the reads have not seen, a number of them drawn for the run.
+        let n = 12 + unpublished() % 9;
+        for _ in 0..n {
+            if let Err(why) = run_with("forks", &fpath, &["probe"], &[]).and_then(|ran| ran_whole("forks", ran, 2 * flen)) {
+                r.fail(format_args!("{CMDLINE_ID}: a program that forks and waits: {why} (two copies of its data)"));
+                break 'run;
+            }
+        }
+        // Then one that forks and stays alive with its child while cat reads.
+        let started = start_with("holder", || exec::spawn(&hpath, &["probe"], &[]), &[(0, &h0_r), (1, &hout_w), (2, &hout_w), (3, &h3_r)]);
+        let hpid = match started {
+            Ok(hp) => hp,
+            Err(why) => {
+                r.fail(format_args!("{CMDLINE_ID}: a program that forks and stays: {why}"));
+                break 'run;
+            }
+        };
+        holder = Some(hpid);
+        let mut forked = false;
+        if !yield_until(RUN_MS, || {
+            quiet(|| proc::each(|q| forked |= q.ppid == hpid && q.exit.is_none()));
+            forked
+        }) {
+            r.fail(format_args!("{CMDLINE_ID}: a program that forks and stays (pid {}) had no live child within {RUN_MS} ms", hpid.0));
+            break 'run;
+        }
+        quiet(|| {
+            proc::each(|q| {
+                if q.pid == Pid(1) && q.exit.is_none() {
+                    heir = 1;
+                }
+            })
+        });
+        note(format_args!("{CMDLINE_ID}: fork children {} and {} of pid {}, read by cat while it waited and after it ended; their heir is pid {heir}", a.0, b.0, pid.0));
+        let when = format!("whose parent, pid {}, has ended; pid 1 {}", pid.0, if heir == 1 { "runs" } else { "has ended" });
+        cat(r, a, heir, &when);
+        cat(r, b, heir, &when);
+    }
+    // Everyone's turn: the pipes close, every read ends, and A forks once
+    // more on its way out. Four copies of the data: the program's, A's, B's
+    // and A's child's.
+    drop((g0_w, g3_w));
+    let ran = drain("family", &out_r, pid);
+    drop(s4_r);
+    drop((h0_r, h3_r, hout_w, h0_w, h3_w));
+    if let Some(hp) = holder {
+        if let Err(why) = ran_whole("holder", drain("holder", &hout_r, hp), 2 * hlen) {
+            r.fail(format_args!("{CMDLINE_ID}: a program that forks and stays: {why} (two copies of its data)"));
+        }
+    }
+    let (Some(a), Some(b)) = kids else { return };
+    let out = match ran_whole("family", ran, 4 * len) {
+        Ok(out) => out,
+        Err(why) => return r.fail(format_args!("{CMDLINE_ID}: {WHAT}: {why} (four copies of its data: its own, its two children's and the first child's child's)")),
+    };
+    // Which copy is whose, by its two fork answers.
+    for seg in out.chunks(len) {
+        let (f1, f2) = (res(seg, k_f1), res(seg, k_f2));
+        let (who, want) = if f1 == a.0 as i64 && f2 == b.0 as i64 {
+            continue;
+        } else if f1 == 0 && f2 > 0 {
+            ("its first child", heir as i64)
+        } else if f1 == a.0 as i64 && f2 == 0 {
+            ("its second child", heir as i64)
+        } else if f1 == 0 && f2 == 0 {
+            continue;
+        } else {
+            r.fail(format_args!("{CMDLINE_ID}: {WHAT}: a copy of its data holds fork() answers {} and {}; expected {} and {} in pid {}, 0 and a pid in its first child, {} and 0 in its second", answer(f1), answer(f2), a.0, b.0, pid.0, a.0));
+            continue;
+        };
+        if res(seg, k_ppid) != want {
+            r.fail(format_args!("{CMDLINE_ID}: {WHAT}: in {who}, getppid() after its parent ended returned {}; expected {want}", answer(res(seg, k_ppid))));
+        }
+        if f2 == 0 && f1 != 0 && res(seg, k_early) != pid.0 as i64 {
+            r.fail(format_args!("{CMDLINE_ID}: {WHAT}: in its second child, getppid() while pid {} waited returned {}; expected {}", pid.0, answer(res(seg, k_early)), pid.0));
+        }
+    }
+}
+
+/// `/proc` about a process that forked. A program forks; the parent reads
+/// `/proc/self/status` and `/proc/self/cmdline` while its child waits on a
+/// pipe this file holds the write end of, then asks getpid and getppid and
+/// writes a byte to a second pipe. Seeing that byte, this file reads the
+/// child's `/proc/<pid>/status` from outside it, then writes the child's
+/// byte; the child reads its own `/proc/self/status`, asks getpid and
+/// getppid, while the parent waits for it in `wait4`. Each process asks
+/// who it is only after its reads.
+fn self_check(fs: &Fs, r: &mut Row) {
+    let word = format!("t{:012x}", unpublished());
+    let mut p = Probe::new();
+    let status = p.str("/proc/self/status");
+    let cmdline = p.str("/proc/self/cmdline");
+    let (sb, sb_at) = p.buf(512);
+    let (cb, cb_at) = p.buf(256);
+    let (tok, _) = p.buf(8);
+    let z = A::I(0);
+    // The turn: `read(fork's answer, 1)` — in the child fd 0, the first
+    // pipe's read end, which waits for this file's byte; in the parent an
+    // fd named by the child's pid, which is not that end and does not wait.
+    let k_fork = p.call(SYS_FORK, &[]);
+    let k_turn = p.call(SYS_READ, &[A::R(k_fork), tok, A::I(1)]);
+    let k_sopen = p.call(SYS_OPEN, &[status, A::I(O_RDONLY), z]);
+    let k_sread = p.call(SYS_READ, &[A::R(k_sopen), sb, A::I(512)]);
+    let k_copen = p.call(SYS_OPEN, &[cmdline, A::I(O_RDONLY), z]);
+    let k_cread = p.call(SYS_READ, &[A::R(k_copen), cb, A::I(256)]);
+    let k_pid = p.call(SYS_GETPID, &[]);
+    let k_ppid = p.call(SYS_GETPPID, &[]);
+    let k_wake = p.call(SYS_WRITE, &[A::I(TURN_FD), tok, A::I(1)]);
+    p.call(SYS_WAIT4, &[A::I(u64::MAX), z, z]);
+    let seg = p.data.len();
+    const WHAT: &str = "a program that forks, then reads /proc/self in the parent while the child waits on a pipe, then in the child";
+    let (path, len) = match install(fs, "self", p) {
+        Ok(it) => it,
+        Err(why) => return r.fail(format_args!("{CMDLINE_ID}: {WHAT}: {why}")),
+    };
+    let (gate_r, gate_w) = match pipe::open(0) {
+        Ok(ends) => ends,
+        Err(e) => return r.fail(format_args!("{CMDLINE_ID}: pipe::open(0) returned {}", errno_text(e))),
+    };
+    let ((sig_r, sig_w), (out_r, out_w)) = match (out_pipe("self"), out_pipe("self")) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(why), _) | (_, Err(why)) => return r.fail(format_args!("{CMDLINE_ID}: {why}")),
+    };
+    let started = start_with(
+        "self",
+        || exec::spawn(&path, &["probe", &word], &[]),
+        &[(0, &gate_r), (1, &out_w), (2, &out_w), (TURN_FD as usize, &sig_w)],
+    );
+    drop((gate_r, sig_w, out_w));
+    let pid = match started {
+        Ok(pid) => pid,
+        Err(why) => return r.fail(format_args!("{CMDLINE_ID}: {WHAT}: {why}")),
+    };
+    // The parent's byte: it has read /proc/self and asked who it is.
+    let mut byte = [0u8; 1];
+    let signalled = yield_until(RUN_MS, || sig_r.read(&mut byte) == Ok(1));
+    let mut child = None;
+    quiet(|| {
+        proc::each(|q| {
+            if q.ppid == pid && q.exit.is_none() {
+                child = Some(q.pid);
+            }
+        })
+    });
+    match (signalled, child) {
+        (true, Some(c)) => {
+            let spath = format!("/proc/{}/status", c.0);
+            match quiet(|| vfs::walk(&vfs::root()?, &spath)).and_then(|f| read_all(&f)) {
+                Ok(text) => status_check(r, &format!("{spath} (pid {}'s fork child, read from outside it)", pid.0), &text, c.0, pid.0),
+                Err(e) => r.fail(format_args!("{CMDLINE_ID}: reading {spath} (pid {}'s fork child) returned {}", pid.0, errno_text(e))),
+            }
+            // Another program forks, so the child is no longer the newest
+            // fork; then a process, not this file, reads the child's status.
+            let mut q = Probe::new();
+            q.call(SYS_FORK, &[]);
+            q.call(SYS_WAIT4, &[A::I(u64::MAX), A::I(0), A::I(0)]);
+            if let Err(why) = run_probe_as(fs, "fork", q, &["probe"], &[], 2) {
+                r.fail(format_args!("{CMDLINE_ID}: a second program that forks and waits: {why} (two copies of its data)"));
+            }
+            match run("cat status", "/bin/cat", &["cat", &spath]) {
+                Ok(ran) if ran.exit == Some(0) => {
+                    status_check(r, &format!("cat {spath} (pid {}'s fork child, after another program forked)", pid.0), &ran.out, c.0, pid.0)
+                }
+                Ok(ran) => r.fail(format_args!("{CMDLINE_ID}: cat {spath} ended {}; it wrote {:?}", status_text(ran.exit), String::from_utf8_lossy(&ran.out))),
+                Err(why) => r.fail(format_args!("{CMDLINE_ID}: {why}")),
+            }
+        }
+        (true, None) => r.fail(format_args!("{CMDLINE_ID}: pid {} forked and wrote its byte, but proc::each has no live process whose parent it is", pid.0)),
+        (false, _) => r.fail(format_args!("{CMDLINE_ID}: {WHAT}: pid {} wrote no byte to fd {TURN_FD} after its reads in {RUN_MS} ms", pid.0)),
+    }
+    // The child's turn.
+    let _ = gate_w.write(b"g");
+    drop(gate_w);
+    let ran = drain("self", &out_r, pid);
+    drop(sig_r);
+    let out = match ran_whole("self", ran, 2 * len) {
+        Ok(out) => out,
+        Err(why) => return r.fail(format_args!("{CMDLINE_ID}: {WHAT}: {why} (two copies of its data, the child's and the parent's)")),
+    };
+    let (a, b) = out.split_at(seg);
+    // The child's fork() answer is 0, the parent's the child's pid.
+    let (kid, parent) = if res(a, k_fork) == 0 { (a, b) } else { (b, a) };
+    if res(kid, k_fork) != 0 || res(parent, k_fork) != res(kid, k_pid) || child.is_some_and(|c| res(kid, k_pid) != c.0 as i64) {
+        return r.fail(format_args!(
+            "{CMDLINE_ID}: fork() in a program returned {} and {}, and getpid() {} and {}; expected 0 in the child, the child's pid in the parent",
+            answer(res(a, k_fork)),
+            answer(res(b, k_fork)),
+            answer(res(a, k_pid)),
+            answer(res(b, k_pid))
+        ));
+    }
+    // The child waited for this file's byte; the parent wrote its own.
+    if res(kid, k_turn) != 1 || res(parent, k_wake) != 1 {
+        return r.fail(format_args!(
+            "{CMDLINE_ID}: the child's read of fd 0, a pipe, returned {}, and the parent's write to fd {TURN_FD}, another, {} (expected 1 each)",
+            answer(res(kid, k_turn)),
+            answer(res(parent, k_wake))
+        ));
+    }
+    for (who, seg) in [("the parent", parent), ("the child", kid)] {
+        let n = res(seg, k_sread);
+        let text = if (1..=512).contains(&n) { &seg[sb_at..sb_at + n as usize] } else { &[][..] };
+        if text.is_empty() {
+            r.fail(format_args!("{CMDLINE_ID}: in {who}, open then read of /proc/self/status returned {} and {}", answer(res(seg, k_sopen)), answer(n)));
+            continue;
+        }
+        let whose = format!("/proc/self/status in {who} (pid {})", res(seg, k_pid));
+        status_check(r, &whose, text, res(seg, k_pid) as u64, res(seg, k_ppid) as u64);
+    }
+    let want = nul_joined(&["probe", word.as_str()]);
+    let n = res(parent, k_cread);
+    let got = if (0..=256).contains(&n) { &parent[cb_at..cb_at + n as usize] } else { &[][..] };
+    if got == want.as_slice() {
+        note(format_args!(
+            "{CMDLINE_ID}: /proc/self read by a parent (pid {}) while its fork child waited on a pipe, the child's status read from outside and by cat after another fork, then /proc/self by the child (pid {}) while the parent waited for it",
+            res(parent, k_pid),
+            res(kid, k_pid)
+        ));
+    } else {
+        r.fail(format_args!(
+            "{CMDLINE_ID}: in the parent (pid {}), read of /proc/self/cmdline returned {} and {:?}, expected its own argv {:?}",
+            res(parent, k_pid),
+            answer(n),
+            String::from_utf8_lossy(got),
+            String::from_utf8_lossy(&want)
+        ));
+    }
 }
 
 // ── Row 3: proc.meminfo.moves ────────────────────────────────────────────
@@ -914,10 +1622,10 @@ fn meminfo_row(fs: Option<&Fs>) {
         }
         let (s2, m2) = steady(&mut buf)?;
         if s1.free as i64 - s2.free as i64 != held.len() as i64 {
-            bad.push(format!("frame::stats().free fell by {} after this file took {} frames", s1.free as i64 - s2.free as i64, held.len()));
+            bad.push(format!("frame::stats().free fell by {} after the test took {} frames", s1.free as i64 - s2.free as i64, held.len()));
         }
         if m1.1 as i64 - m2.1 as i64 != 4 * held.len() as i64 {
-            bad.push(format!("MemFree went {} → {} kB ({:+} kB) after this file took {} frames; expected {} kB less", m1.1, m2.1, m2.1 as i64 - m1.1 as i64, held.len(), 4 * held.len()));
+            bad.push(format!("MemFree went {} → {} kB ({:+} kB) after the test took {} frames; expected {} kB less", m1.1, m2.1, m2.1 as i64 - m1.1 as i64, held.len(), 4 * held.len()));
         }
         for f in held.drain(..) {
             frame::free(f);
@@ -1003,8 +1711,24 @@ fn stdev_row(fs: Option<&Fs>) {
         p.call(SYS_STAT, &[s, b]);
         at.push(off);
     }
+    // A rename inside ext2's /tmp: ext2 decides a directory is its own by
+    // its stat, st_dev included (lab 20).
+    let made = quiet(|| fs.tmp.create(MV_FROM, 0o644)).map(|_| ());
+    let (from, to) = (format!("/tmp/{MV_FROM}"), format!("/tmp/{MV_TO}"));
+    let (from_a, to_a) = (p.str(&from), p.str(&to));
+    let (mv_st, mv_at) = p.buf(144);
+    let k_mv = p.call(SYS_RENAME, &[from_a, to_a]);
+    let k_mvst = p.call(SYS_STAT, &[to_a, mv_st]);
+    if let Err(e) = made {
+        r.fail(format_args!("{STDEV_ID}: ext2's /tmp create({MV_FROM:?}) returned {}", errno_text(e)));
+    }
     match run_probe(fs, "stat", p) {
         Ok(out) => {
+            r.expect_res(&format!("rename({from:?}, {to:?}), both in ext2's /tmp,"), res(&out, k_mv), 0);
+            r.expect_res(&format!("stat({to:?}) after it"), res(&out, k_mvst), 0);
+            if res(&out, k_mvst) == 0 && le64(&out, mv_at) != fs.ext.stat().dev {
+                r.fail(format_args!("{STDEV_ID}: stat({to:?}) gives st_dev {}, ext2's root {}", le64(&out, mv_at), fs.ext.stat().dev));
+            }
             let mut dev = [0u64; 9];
             for (k, path) in paths.iter().enumerate() {
                 r.expect_res(&format!("stat({path:?})"), res(&out, k), 0);
@@ -1039,12 +1763,20 @@ fn dev_row(fs: Option<&Fs>) {
     let Some(fs) = fs else { return unmounted(r, 6) };
     let mut r = r;
     let mut p = Probe::new();
-    let (null, zero, tty) = (p.str("/dev/null"), p.str("/dev/zero"), p.str("/dev/tty"));
+    let (null, zero) = (p.str("/dev/null"), p.str("/dev/zero"));
+    let ttys = [p.str("/dev/tty"), p.str("/dev/console")];
     let (b, b_at) = p.filled(4096, 0xa5);
     let (w, _) = p.filled(128, 0x5a);
     let (st1, st1_at) = p.buf(144);
     let (st2, st2_at) = p.buf(144);
-    let (ws, ws_at) = p.buf(8);
+    let (one, _) = p.buf(8);
+    let (drain_b, _) = p.buf(256);
+    let (ws0, ws0_at) = p.buf(8);
+    let ws = [p.buf(8), p.buf(8)];
+    // fd 0 is the console object itself, opened here O_RDWR|O_NONBLOCK:
+    // its queue is drained, and its window size is the one expected.
+    let k_drain = [p.call(SYS_READ, &[A::I(0), drain_b, A::I(256)]), p.call(SYS_READ, &[A::I(0), drain_b, A::I(256)])];
+    let k_ws0 = p.call(SYS_IOCTL, &[A::I(0), A::I(TIOCGWINSZ), ws0]);
     let k_null = p.call(SYS_OPEN, &[null, A::I(O_RDWR), A::I(0)]);
     let k_nread = p.call(SYS_READ, &[A::R(k_null), b, A::I(64)]);
     let k_nwrite = p.call(SYS_WRITE, &[A::R(k_null), w, A::I(100)]);
@@ -1056,9 +1788,25 @@ fn dev_row(fs: Option<&Fs>) {
     let k_st2 = p.call(SYS_STAT, &[zero, st2]);
     let k_trunc = p.call(SYS_OPEN, &[null, A::I(O_WRONLY | O_CREAT | O_TRUNC), A::I(0o644)]);
     let k_twrite = p.call(SYS_WRITE, &[A::R(k_trunc), w, A::I(7)]);
-    let k_tty = p.call(SYS_OPEN, &[tty, A::I(O_WRONLY), A::I(0)]);
-    let k_win = p.call(SYS_IOCTL, &[A::R(k_tty), A::I(TIOCGWINSZ), ws]);
-    match run_probe(fs, "dev", p) {
+    // Both terminals: opened O_RDWR|O_NONBLOCK, a one-byte read (the
+    // console object answers -EAGAIN: its queue is empty), then the
+    // window size, which must be fd 0's.
+    let k_ttys: Vec<(usize, usize, usize)> = (0..2)
+        .map(|i| {
+            let k_open = p.call(SYS_OPEN, &[ttys[i], A::I(O_RDWR | O_NONBLOCK as u64), A::I(0)]);
+            let k_read = p.call(SYS_READ, &[A::R(k_open), one, A::I(1)]);
+            let k_win = p.call(SYS_IOCTL, &[A::R(k_open), A::I(TIOCGWINSZ), ws[i].0]);
+            (k_open, k_read, k_win)
+        })
+        .collect();
+    let console = match FileRef::open(FileObj::CONSOLE, O_RDWR as u32 | O_NONBLOCK) {
+        Ok(f) => f,
+        Err(e) => {
+            r.fail(format_args!("{DEV_ID}: console::FileRef::open(FileObj::CONSOLE, O_RDWR|O_NONBLOCK) returned {}", errno_text(e)));
+            return r.finish(6);
+        }
+    };
+    match run_probe_as(fs, "dev", p, &["probe"], &[(0, &console)], 1) {
         Ok(out) => {
             let fd_ok = |v: i64| (3..32).contains(&v);
             r.expect(fd_ok(res(&out, k_null)), &format!("open(\"/dev/null\", O_RDWR) returned {}, expected an fd", answer(res(&out, k_null))));
@@ -1078,17 +1826,127 @@ fn dev_row(fs: Option<&Fs>) {
             }
             r.expect(fd_ok(res(&out, k_trunc)), &format!("open(\"/dev/null\", O_WRONLY|O_CREAT|O_TRUNC) returned {}, expected an fd", answer(res(&out, k_trunc))));
             r.expect_res("write of 7 bytes through it", res(&out, k_twrite), 7);
-            note(format_args!(
-                "{DEV_ID}: not graded: open(\"/dev/tty\", O_WRONLY) {}, ioctl(TIOCGWINSZ) {} ({} rows, {} columns)",
-                answer(res(&out, k_tty)),
-                answer(res(&out, k_win)),
-                le64(&out, ws_at) & 0xffff,
-                (le64(&out, ws_at) >> 16) & 0xffff
-            ));
+            let drained = k_drain.map(|k| answer(res(&out, k)));
+            r.expect_res(&format!("ioctl(0, TIOCGWINSZ) on the console fd this program was given (its reads returned {} and {})", drained[0], drained[1]), res(&out, k_ws0), 0);
+            let want = le64(&out, ws0_at);
+            for (i, name) in ["/dev/tty", "/dev/console"].into_iter().enumerate() {
+                let (k_open, k_read, k_win) = k_ttys[i];
+                let at = ws[i].1;
+                r.expect(fd_ok(res(&out, k_open)), &format!("open(\"{name}\", O_RDWR|O_NONBLOCK) returned {}, expected an fd", answer(res(&out, k_open))));
+                r.expect_res(&format!("read({name}, 1) with O_NONBLOCK and no input waiting"), res(&out, k_read), -11);
+                r.expect_res(&format!("ioctl({name}, TIOCGWINSZ)"), res(&out, k_win), 0);
+                let got = le64(&out, at);
+                if got != want {
+                    r.fail(format_args!(
+                        "{DEV_ID}: ioctl({name}, TIOCGWINSZ) gives {} rows, {} columns; the console fd 0 gives {} rows, {} columns: not the console object",
+                        got & 0xffff,
+                        (got >> 16) & 0xffff,
+                        want & 0xffff,
+                        (want >> 16) & 0xffff
+                    ));
+                }
+            }
         }
         Err(why) => r.fail(format_args!("{DEV_ID}: {why}")),
     }
+    drop(console);
+    console_writes(fs, &mut r);
     r.finish(6);
+}
+
+/// COM1, the serial line every console in the course writes to (lab 02).
+const COM1: u16 = 0x3f8;
+
+fn port_in(port: u16) -> u8 {
+    let v: u8;
+    // SAFETY: a port read touches no memory.
+    unsafe { asm!("in al, dx", out("al") v, in("dx") port, options(nomem, nostack, preserves_flags)) };
+    v
+}
+
+fn port_out(port: u16, v: u8) {
+    // SAFETY: a port write touches no memory; COM1 is the serial line.
+    unsafe { asm!("out dx, al", in("dx") port, in("al") v, options(nomem, nostack, preserves_flags)) };
+}
+
+/// Spin until `done` or a bounded number of tries.
+fn port_wait(done: impl Fn() -> bool) {
+    let mut n = 0u32;
+    while !done() && n < 1_000_000 {
+        n += 1;
+        core::hint::spin_loop();
+    }
+}
+
+/// `f.write(line)` with COM1 in loopback (MCR bit 4), interrupts off and
+/// COM1's received-data interrupt off (IER bit 0, restored after, as the MCR
+/// is): the bytes the write puts on the serial line come back in the UART's
+/// receive FIFO (16 bytes) instead of leaving the machine; with interrupts
+/// off nothing else in the kernel runs to take them unless its own write
+/// lets an interrupt in. The IER clear is
+/// defensive and unpinned: 8350b9fff's window, without it, already scored
+/// an IRQ 4 receive 10/10, also one whose write lets an interrupt in
+/// (CONTRACT §B.2-22 row 6). Its answer, and those bytes.
+fn looped(f: &FileRef, line: &[u8]) -> (Result<usize, Errno>, Vec<u8>) {
+    quiet(|| {
+        let mut back = Vec::with_capacity(32);
+        let ier = port_in(COM1 + 1);
+        port_out(COM1 + 1, ier & !1);
+        port_wait(|| port_in(COM1 + 5) & 0x40 != 0);
+        let mcr = port_in(COM1 + 4);
+        port_out(COM1 + 2, 0xC7);
+        while port_in(COM1 + 5) & 1 != 0 && back.len() < 32 {
+            back.push(port_in(COM1));
+        }
+        back.clear();
+        port_out(COM1 + 4, mcr | 0x10);
+        let w = f.write(line);
+        port_wait(|| port_in(COM1 + 5) & 0x40 != 0);
+        while port_in(COM1 + 5) & 1 != 0 && back.len() < 32 {
+            back.push(port_in(COM1));
+        }
+        port_out(COM1 + 4, mcr);
+        port_out(COM1 + 1, ier);
+        (w, back)
+    })
+}
+
+/// Row 6's last part: `/dev/tty` and `/dev/console`, opened here through
+/// devfs, each write a `# t<word>` line with a word from no published
+/// source (§A.1-5); the serial line must carry it (a CR before the LF, or
+/// not).
+fn console_writes(fs: &Fs, r: &mut Row) {
+    for name in ["tty", "console"] {
+        let line = format!("# t{:08x}\n", unpublished() & 0xffff_ffff);
+        let f = match quiet(|| fs.devfs.lookup(name)).and_then(|ino| FileRef::open_inode(ino, O_WRONLY as u32)) {
+            Ok(f) => f,
+            Err(e) => {
+                r.fail(format_args!("{DEV_ID}: /dev/{name}: lookup then FileRef::open_inode(.., O_WRONLY) returned {}", errno_text(e)));
+                continue;
+            }
+        };
+        if f.object != FileObj::CONSOLE {
+            let what = match (f.object.as_file(), f.object.as_pipe()) {
+                (Some(slot), _) => format!("a file slot ({slot})"),
+                (_, Some((slot, w))) => format!("a pipe's {} end (slot {slot})", if w { "write" } else { "read" }),
+                _ => format!("{:?}", f.object),
+            };
+            r.fail(format_args!("{DEV_ID}: FileRef::open_inode on /dev/{name} gave an open file on {what}, not the console object"));
+        }
+        let (w, back) = looped(&f, line.as_bytes());
+        drop(f);
+        let got: Vec<u8> = back.iter().copied().filter(|&c| c != b'\r').collect();
+        if w != Ok(line.len()) || got != line.as_bytes() {
+            r.fail(format_args!(
+                "{DEV_ID}: a write of {line:?} to /dev/{name} returned {} and the console's serial line carried {:?}; expected the line itself",
+                match w {
+                    Ok(n) => format!("{n}"),
+                    Err(e) => errno_text(e),
+                },
+                String::from_utf8_lossy(&back)
+            ));
+        }
+    }
 }
 
 // ── Row 7: proc.sboot.nonce ──────────────────────────────────────────────
@@ -1125,9 +1983,17 @@ fn syscall_row(fs: Option<&Fs>) {
     let r = Row::new(SYSCALL_ID);
     let Some(fs) = fs else { return unmounted(r, 8) };
     let mut r = r;
-    if let Err(e) = quiet(|| fs.tmp.mkdir(PROC_AT_NAME, 0o755)) {
-        r.fail(format_args!("{SYSCALL_ID}: ext2's /tmp mkdir({PROC_AT_NAME:?}) returned {}", errno_text(e)));
-        return r.finish(8);
+    // Two more new /dev's at names drawn for this run. With the boot's four
+    // mounts, the new /proc and the first new /dev, they fill lab 13's
+    // table of MAX_MOUNTS (8), so this is as many as a kernel must hold.
+    let tag = unpublished() & 0xffff_ffff;
+    let more_names = [format!("k22-{tag:08x}-a"), format!("k22-{tag:08x}-b")];
+    let more: Vec<String> = more_names.iter().map(|n| format!("/tmp/{n}")).collect();
+    for name in [PROC_AT_NAME, DEV_AT_NAME, &*more_names[0], &*more_names[1]] {
+        if let Err(e) = quiet(|| fs.tmp.mkdir(name, 0o755)) {
+            r.fail(format_args!("{SYSCALL_ID}: ext2's /tmp mkdir({name:?}) returned {}", errno_text(e)));
+            return r.finish(8);
+        }
     }
     let mut p = Probe::new();
     let (proc_, x, tmp, ext2, nofs, missing, init, rel) =
@@ -1141,6 +2007,18 @@ fn syscall_row(fs: Option<&Fs>) {
     let k_open = p.call(SYS_OPEN, &[meminfo, A::I(O_RDONLY), z]);
     let k_read = p.call(SYS_READ, &[A::R(k_open), b, A::I(256)]);
     let k_stat = p.call(SYS_STAT, &[at, st]);
+    let (devfs_, dev_at) = (p.str("devfs"), p.str(DEV_AT));
+    let dev_null = p.str(&format!("{DEV_AT}/null"));
+    let (nst, nst_at) = p.buf(144);
+    let k_dmount = p.call(SYS_MOUNT, &[devfs_, dev_at, devfs_, z, z]);
+    let k_nstat = p.call(SYS_STAT, &[dev_null, nst]);
+    let (dst, dst_at) = p.buf(144);
+    let k_dstat = p.call(SYS_STAT, &[dev_at, dst]);
+    let (d2_at, d3_at) = (p.str(&more[0]), p.str(&more[1]));
+    let (d2st, d2st_at) = p.buf(144);
+    let (d3st, d3st_at) = p.buf(144);
+    let k_d2mount = p.call(SYS_MOUNT, &[devfs_, d2_at, devfs_, z, z]);
+    let k_d2stat = p.call(SYS_STAT, &[d2_at, d2st]);
     let refusals: [(String, [A; 3], i64); 6] = [
         (format!("mount(\"proc\", {PROC_AT:?}, \"proc\", 0, 0) a second time"), [proc_, at, proc_], -EBUSY),
         (String::from("mount(\"x\", \"/tmp\", \"ext2\", 0, 0)"), [x, tmp, ext2], -ENODEV),
@@ -1150,6 +2028,51 @@ fn syscall_row(fs: Option<&Fs>) {
         (String::from("mount(\"proc\", \"/boot/init\", \"proc\", 0, 0) (a file)"), [proc_, init, proc_], -ENOTDIR),
     ];
     let ks: Vec<usize> = refusals.iter().map(|(_, a, _)| p.call(SYS_MOUNT, &[a[0], a[1], a[2], z, z])).collect();
+    // The last new /dev after the refusals, so they meet seven mounts and
+    // never a full table.
+    let k_d3mount = p.call(SYS_MOUNT, &[devfs_, d3_at, devfs_, z, z]);
+    let k_d3stat = p.call(SYS_STAT, &[d3_at, d3st]);
+    // Each new mount once more, at the end: its root a second time and a
+    // node in it, so a mount must keep one device for all its stats; then
+    // the new /proc's meminfo opened and fstat'd, which must give its path's
+    // device too (a device node may open as an object of its own, as the
+    // console does, so only meminfo is compared).
+    let mut steady: Vec<(String, String, usize, usize, usize, usize)> = Vec::new();
+    let mut held: Vec<(String, usize, usize, usize, usize, usize)> = Vec::new();
+    for (at, inner) in [(String::from(PROC_AT), "meminfo"), (String::from(DEV_AT), "null"), (more[0].clone(), "null"), (more[1].clone(), "null")] {
+        let path = format!("{at}/{inner}");
+        let ((a2, a2_at), (n2, n2_at)) = (p.buf(144), p.buf(144));
+        let (sa, sp) = (p.str(&at), p.str(&path));
+        let k1 = p.call(SYS_STAT, &[sa, a2]);
+        let k2 = p.call(SYS_STAT, &[sp, n2]);
+        if inner == "meminfo" {
+            let (f2, f2_at) = p.buf(144);
+            let ko = p.call(SYS_OPEN, &[sp, A::I(O_RDONLY), z]);
+            let kf = p.call(SYS_FSTAT, &[A::R(ko), f2]);
+            held.push((path.clone(), k2, n2_at, ko, kf, f2_at));
+        }
+        steady.push((at, path, k1, a2_at, k2, n2_at));
+    }
+    // `..` out of a mount's root is the directory that holds the mount point: /proc's
+    // and /dev's give /, each new mount's gives /tmp, in an order drawn for
+    // the run; each must be that directory's file, st_dev and st_ino both.
+    let mut ups: Vec<(String, &str)> = alloc::vec![(String::from("/proc/.."), "/"), (String::from("/dev/.."), "/")];
+    for at in [String::from(PROC_AT), String::from(DEV_AT), more[0].clone(), more[1].clone()] {
+        ups.push((format!("{at}/.."), "/tmp"));
+    }
+    let turn = (unpublished() % ups.len() as u64) as usize;
+    ups.rotate_left(turn);
+    let mut climbs: Vec<(String, &str, usize, usize, usize, usize)> = Vec::new();
+    for (up, base) in ups {
+        let ((ub, ub_at), (bb, bb_at)) = (p.buf(144), p.buf(144));
+        let (su, sb) = (p.str(&up), p.str(base));
+        let ku = p.call(SYS_STAT, &[su, ub]);
+        let kb = p.call(SYS_STAT, &[sb, bb]);
+        climbs.push((up, base, ku, ub_at, kb, bb_at));
+    }
+    // /proc/mounts before the program, to compare with after it.
+    let table = || quiet(|| fs.procfs.lookup("mounts")).and_then(|f| read_all(&f)).map(|t| String::from(String::from_utf8_lossy(&t)));
+    let before = table();
     match run_probe(fs, "mount", p) {
         Ok(out) => {
             r.expect_res(&format!("mount(\"proc\", {PROC_AT:?}, \"proc\", 0, 0)"), res(&out, k_mount), 0);
@@ -1168,15 +2091,109 @@ fn syscall_row(fs: Option<&Fs>) {
                 }
             }
             r.expect_res(&format!("stat({PROC_AT:?})"), res(&out, k_stat), 0);
-            let dev = le64(&out, st_at);
-            if dev == fs.ext.stat().dev || dev == fs.procfs.stat().dev {
-                r.fail(format_args!("{SYSCALL_ID}: stat({PROC_AT:?}) gives st_dev {dev}: ext2's or /proc's, not a new /proc's"));
+            // Every mount in the table holds a file system of its own, and
+            // anonymous numbers are global: each new mount's device must be
+            // unlike every one mounted before it, the boot's four included
+            // (round 4b; the boot's four among themselves are row 5's).
+            let mut seen: Vec<(String, u64)> = Vec::new();
+            seen.push((String::from("ext2's at /"), fs.ext.stat().dev));
+            seen.push((String::from("the boot archive's at /boot"), fs.arch.stat().dev));
+            seen.push((String::from("/proc's"), fs.procfs.stat().dev));
+            seen.push((String::from("/dev's"), fs.devfs.stat().dev));
+            let own = |r: &mut Row, seen: &mut Vec<(String, u64)>, at: &str, what: &str, d: u64| {
+                for (whose, other) in seen.iter() {
+                    if d == *other {
+                        r.fail(format_args!("{SYSCALL_ID}: stat({at:?}) gives st_dev {d}, the same as {whose}; expected a device of its own"));
+                    }
+                }
+                seen.push((format!("the new {what}'s at {at:?}"), d));
+            };
+            if res(&out, k_stat) == 0 {
+                own(&mut r, &mut seen, PROC_AT, "/proc", le64(&out, st_at));
+            }
+            r.expect_res(&format!("mount(\"devfs\", {DEV_AT:?}, \"devfs\", 0, 0)"), res(&out, k_dmount), 0);
+            r.expect_res(&format!("stat({:?}) after it", format!("{DEV_AT}/null")), res(&out, k_nstat), 0);
+            if res(&out, k_nstat) == 0 {
+                r.expect_eq(&format!("stat({:?}).st_rdev", format!("{DEV_AT}/null")), le64(&out, nst_at + 40), 1 << 8 | 3);
+            }
+            // The new /dev's: each a device of its own too.
+            r.expect_res(&format!("stat({DEV_AT:?})"), res(&out, k_dstat), 0);
+            if res(&out, k_dstat) == 0 {
+                own(&mut r, &mut seen, DEV_AT, "/dev", le64(&out, dst_at));
+            }
+            for (at, km, kst, sat) in [(&more[0], k_d2mount, k_d2stat, d2st_at), (&more[1], k_d3mount, k_d3stat, d3st_at)] {
+                r.expect_res(&format!("mount(\"devfs\", {at:?}, \"devfs\", 0, 0)"), res(&out, km), 0);
+                r.expect_res(&format!("stat({at:?})"), res(&out, kst), 0);
+                if res(&out, kst) == 0 {
+                    own(&mut r, &mut seen, at, "/dev", le64(&out, sat));
+                }
+            }
+            let firsts = [(k_stat, st_at), (k_dstat, dst_at), (k_d2stat, d2st_at), (k_d3stat, d3st_at)];
+            for ((at, path, k1, o1, k2, o2), (k0, o0)) in steady.iter().zip(firsts) {
+                r.expect_res(&format!("stat({at:?}) a second time"), res(&out, *k1), 0);
+                r.expect_res(&format!("stat({path:?})"), res(&out, *k2), 0);
+                if res(&out, k0) == 0 && res(&out, *k1) == 0 && res(&out, *k2) == 0 {
+                    let (d0, d1, d2) = (le64(&out, o0), le64(&out, *o1), le64(&out, *o2));
+                    if d0 != d1 || d0 != d2 {
+                        r.fail(format_args!(
+                            "{SYSCALL_ID}: stat({at:?}) gives st_dev {d0}, then {d1} at the program's end, and stat({path:?}) gives {d2}; expected one device for the whole mount"
+                        ));
+                    }
+                }
+            }
+            for (path, k2, o2, ko, kf, of) in &held {
+                let fd = res(&out, *ko);
+                if !(3..32).contains(&fd) {
+                    r.fail(format_args!("{SYSCALL_ID}: open({path:?}, O_RDONLY) returned {}, expected an fd", answer(fd)));
+                    continue;
+                }
+                r.expect_res(&format!("fstat of {path:?} opened"), res(&out, *kf), 0);
+                if res(&out, *kf) == 0 && res(&out, *k2) == 0 {
+                    let (dp, df) = (le64(&out, *o2), le64(&out, *of));
+                    if dp != df {
+                        r.fail(format_args!("{SYSCALL_ID}: stat({path:?}) gives st_dev {dp}, and fstat of it opened gives {df}; expected the same device"));
+                    }
+                }
+            }
+            for (up, base, ku, uo, kb, bo) in &climbs {
+                r.expect_res(&format!("stat({up:?})"), res(&out, *ku), 0);
+                r.expect_res(&format!("stat({base:?})"), res(&out, *kb), 0);
+                if res(&out, *ku) == 0 && res(&out, *kb) == 0 {
+                    let (ud, ui, bd, bi) = (le64(&out, *uo), le64(&out, uo + 8), le64(&out, *bo), le64(&out, bo + 8));
+                    if (ud, ui) != (bd, bi) {
+                        r.fail(format_args!("{SYSCALL_ID}: stat({up:?}) gives st_dev {ud} st_ino {ui}, and stat({base:?}) gives st_dev {bd} st_ino {bi}; expected the same file"));
+                    }
+                }
             }
             for ((what, _, want), k) in refusals.iter().zip(&ks) {
                 r.expect_res(what, res(&out, *k), *want);
             }
         }
         Err(why) => r.fail(format_args!("{SYSCALL_ID}: {why}")),
+    }
+    // The table after: what it read before, then the four mounts that
+    // succeeded, in order, a space in a mount point written \040; the
+    // refused ones add nothing. What it read before holds the four mounts
+    // this file made, so a table that lists only its newest mounts fails.
+    match (before, table()) {
+        (Ok(b), Ok(a)) => {
+            let floor: Vec<String> = MOUNTS.iter().map(|(s, t, f)| format!("{} {} {} rw 0 0", esc(s), esc(t), esc(f))).collect();
+            let absent: Vec<&String> = floor.iter().filter(|l| !b.lines().any(|x| x == l.as_str())).collect();
+            if !absent.is_empty() {
+                r.fail(format_args!("{SYSCALL_ID}: /proc/mounts read {b:?} before these mount calls; expected the four mounts already made among its lines (missing {absent:?})"));
+            }
+            let mut want: Vec<String> = b.lines().map(String::from).collect();
+            want.push(format!("proc {} proc rw 0 0", esc(PROC_AT)));
+            want.push(format!("devfs {} devfs rw 0 0", esc(DEV_AT)));
+            for at in &more {
+                want.push(format!("devfs {} devfs rw 0 0", esc(at)));
+            }
+            let got: Vec<&str> = a.lines().collect();
+            if got != want {
+                r.fail(format_args!("{SYSCALL_ID}: /proc/mounts read {b:?} before these mount calls and {a:?} after; expected the lines before, then {:?}", &want[want.len() - 4..]));
+            }
+        }
+        (Err(e), _) | (_, Err(e)) => r.fail(format_args!("{SYSCALL_ID}: /proc's mounts around these mount calls: lookup then read_at returned {}", errno_text(e))),
     }
     r.finish(8);
 }
@@ -1192,6 +2209,11 @@ fn dents_check(fs: Option<&Fs>, mut r: Row) {
                 return r.finish(1);
             }
         };
+        // The pids the kernel has before ls starts and after it ends: each
+        // one in both lists must be in the listing, and no other number but
+        // ls's own.
+        let mut before = Vec::new();
+        quiet(|| proc::each(|p| before.push(format!("{}", p.pid.0))));
         let started = start_with("ls /proc", || exec::spawn("/bin/ls", &["ls", "/proc"], &[]), &[(1, &lw), (2, &lw)]);
         drop(lw);
         match started {
@@ -1201,16 +2223,24 @@ fn dents_check(fs: Option<&Fs>, mut r: Row) {
                 quiet(|| proc::each(|p| pids.push(format!("{}", p.pid.0))));
                 let text = String::from_utf8_lossy(&ran.out);
                 let names: Vec<&str> = text.lines().collect();
-                let words: Vec<&str> = names.iter().copied().filter(|n| !n.bytes().all(|c| c.is_ascii_digit())).collect();
-                let stray: Vec<&str> = names.iter().copied().filter(|n| n.bytes().all(|c| c.is_ascii_digit()) && !pids.iter().any(|p| p == n)).collect();
+                // procfs's four names must all be there; other names
+                // (`self`, as Linux lists it) may be too.
+                let absent: Vec<&str> = ["meminfo", "mounts", "sboot", "uptime"].into_iter().filter(|w| !names.contains(w)).collect();
+                let numbers = names.iter().filter(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit())).count();
                 let own = format!("{}", pid.0);
-                if ran.exit != Some(0) || words != ["meminfo", "mounts", "sboot", "uptime"] || !names.contains(&own.as_str()) || !stray.is_empty() {
+                let stray: Vec<&str> = names
+                    .iter()
+                    .copied()
+                    .filter(|n| n.bytes().all(|c| c.is_ascii_digit()) && *n != own && !pids.iter().chain(&before).any(|p| p == n))
+                    .collect();
+                let missing: Vec<&str> = before.iter().filter(|b| pids.contains(b) && !names.contains(&b.as_str())).map(|b| b.as_str()).collect();
+                if ran.exit != Some(0) || !absent.is_empty() || !names.contains(&own.as_str()) || !stray.is_empty() || !missing.is_empty() {
                     r.fail(format_args!(
-                        "{CROSS_ID}: ls /proc printed {text:?} and ended {}; expected meminfo, mounts, sboot, uptime and one directory per pid the kernel has (ls's own, {own}, among them) — getdents64 on /proc lists procfs's, not ext2's empty /proc",
+                        "{CROSS_ID}: ls /proc printed {text:?} and ended {}; expected meminfo, mounts, sboot, uptime (missing {absent:?}) and one directory per pid the kernel has (ls's own, {own}, among them; missing {missing:?}, no such pid {stray:?}) — getdents64 on /proc lists procfs's, not ext2's empty /proc",
                         status_text(ran.exit)
                     ));
                 } else {
-                    note(format_args!("{CROSS_ID}: ls /proc: procfs's four names and {} pid directories", names.len() - 4));
+                    note(format_args!("{CROSS_ID}: ls /proc: procfs's four names, {numbers} pid directories and {} other names", names.len() - 4 - numbers));
                 }
             }
             Err(why) => r.fail(format_args!("{CROSS_ID}: {why}")),
@@ -1290,7 +2320,6 @@ unsafe extern "C" fn _start() -> ! {
     serial::init();
     ktap::begin(PLAN);
     prelude();
-    let mut c = Clock::new();
     let fs = setup();
     let walks = cross_row(fs.as_ref());
     cmdline_row(fs.as_ref());
@@ -1301,7 +2330,6 @@ unsafe extern "C" fn _start() -> ! {
     nonce_row(fs.as_ref());
     syscall_row(fs.as_ref());
     dents_check(fs.as_ref(), walks);
-    note(format_args!("the rows took {} ms", c.ms()));
     sched::yield_now();
     quiet(ktap::end);
     halt()

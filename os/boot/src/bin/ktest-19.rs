@@ -192,6 +192,45 @@ impl Clock {
     }
 }
 
+/// The time the learner's inode stamps use: `EPOCH` plus whole seconds of
+/// `time::now_ns`.
+fn guest_now() -> u64 {
+    kernel::fs::ext2::EPOCH as u64 + kernel::time::now_ns() / 1_000_000_000
+}
+
+/// Moves the guest clock forward to the middle of guest second `t`, through
+/// `time::TICKS` with interrupts off (lab 06's `clock.hours` sets `TICKS`
+/// the same way), and never back: 1000 ticks at a time to second `t - 1`,
+/// one at a time across into `t`, then 500 more. No wait (fix round 3,
+/// sk19-forger-rv2-5); half a second either side of the unlink (fix round
+/// 4, sk19-forger-rv3-5), so an inode clock off `now_ns` by less than that,
+/// such as `TICKS / 1000`, lands in the same second. False when the clock
+/// does not follow `TICKS`.
+fn clock_forward(t: u64) -> bool {
+    let add = |n: u64| {
+        let on = irq_off();
+        time::TICKS.fetch_add(n, Ordering::Relaxed);
+        irq_restore(on);
+    };
+    for _ in 0..1000 {
+        if guest_now() + 1 >= t {
+            break;
+        }
+        add(1000);
+    }
+    for _ in 0..3000 {
+        if guest_now() >= t {
+            break;
+        }
+        add(1);
+    }
+    if guest_now() < t {
+        return false;
+    }
+    add(500);
+    guest_now() == t
+}
+
 fn ticks() -> u64 {
     time::TICKS.load(Ordering::Relaxed)
 }
@@ -427,7 +466,7 @@ fn raw_block(b: u64) -> Result<Box<[u8; BLOCK_SIZE]>, String> {
     if raw_disk_block(P2_BLOCK0 + b, &mut buf) {
         Ok(buf)
     } else {
-        Err(format!("this vehicle's own read of fs block {b} failed"))
+        Err(format!("the test's own read of fs block {b} failed"))
     }
 }
 
@@ -449,7 +488,7 @@ impl Raw {
         let sb = raw_block(0)?;
         let s = &sb[1024..2048];
         if le16(s, 56) != 0xef53 {
-            return Err(String::from("fs block 0 holds no ext2 superblock (magic) as this vehicle reads it"));
+            return Err(String::from("fs block 0 holds no ext2 superblock (magic) as the test reads it"));
         }
         let gd = raw_block(1)?;
         Ok(Raw {
@@ -750,7 +789,7 @@ fn mount_rest(proxy: Arc<Proxy>) {
         Err(e) => note(format_args!("vfs: Archive::new over the boot archive returned {}", errno_text(e))),
     }
     if let Err(e) = vfs::mount("/ktest", Arc::new(KtestDir)) {
-        note(format_args!("vfs: mount(\"/ktest\", this vehicle's directory) returned {}", errno_text(e)));
+        note(format_args!("vfs: mount(\"/ktest\", the test's directory) returned {}", errno_text(e)));
     }
 }
 
@@ -1007,7 +1046,6 @@ fn status_text(s: Option<i32>) -> String {
 struct Ran {
     out: Vec<u8>,
     exit: Option<i32>,
-    ms: u64,
 }
 
 /// Start a program with `start` (interrupts off), give it a pipe as fds 1
@@ -1077,9 +1115,9 @@ fn run(what: &str, start: impl FnOnce() -> Result<Pid, Errno>) -> Result<Ran, St
     let _ = yield_until(500, || exit_of(pid).is_some());
     let exit = exit_of(pid);
     if !ended {
-        note(format_args!("{what}: pid {} had not closed its output after {ms} ms ({})", pid.0, status_text(exit)));
+        note(format_args!("{what}: pid {} had not closed its output after {ms} ms; the limit is {RUN_MS} ms ({})", pid.0, status_text(exit)));
     }
-    Ok(Ran { out, exit, ms })
+    Ok(Ran { out, exit })
 }
 
 /// A probe run: its data segment as it wrote it, or why there is none.
@@ -1089,10 +1127,9 @@ fn run_probe(what: &str, p: Probe) -> Result<Vec<u8>, String> {
     let ran = run(what, || exec::spawn(&path, &["probe"], &[]))?;
     if ran.exit != Some(0) || ran.out.len() != len {
         return Err(format!(
-            "{what}: the probe wrote {} of its {len} bytes and ended {} after {} ms",
+            "{what}: the probe wrote {} of its {len} bytes and ended {}",
             ran.out.len(),
-            status_text(ran.exit),
-            ran.ms
+            status_text(ran.exit)
         ));
     }
     Ok(ran.out)
@@ -1347,6 +1384,51 @@ fn truncate_row(raw: &Raw) -> String {
         })),
     }
     drop(ino);
+    // A directory is refused by truncate itself, before any change (fix
+    // round 1, O-1; a shrink since fix round 2, sk19-forger-rv-3): the
+    // image's /lost+found (4 blocks) cut must come back -EISDIR with nothing
+    // changed (below); and /tmp at its own size, which no shrink-only
+    // refusal catches.
+    match at("/tmp") {
+        Ok(t) => match t.truncate(t.stat().size) {
+            Err(e) if e == EISDIR as Errno => {}
+            Ok(()) => r.fail(format_args!("{TRUNC_ID}: truncate of /tmp (a directory) to its own size returned 0, expected -21 (EISDIR)")),
+            Err(e) => r.fail(format_args!("{TRUNC_ID}: truncate of /tmp (a directory) to its own size returned {}, expected -21 (EISDIR)", errno_text(e))),
+        },
+        Err(why) => r.fail(format_args!("{TRUNC_ID}: {why}")),
+    }
+    // Fix round 3 (sk19-forger-rv2-3): /lost+found is cut to one block, to
+    // 12 bytes (inside its first record block) and grown by a block; fix
+    // round 4 (sk19-forger-rv3-2/-3) adds a length from the nonce and, last,
+    // 0. Each must be refused with its size, i_blocks, records, both bitmaps
+    // and the counts as they were.
+    if let Some((lfi, lf)) = raw_at(&mut r, raw, "/lost+found") {
+        let recs = got(&mut r, raw.records(lfi, &lf));
+        if let Some(pre) = got(&mut r, alloc_state(raw)) {
+            let size = le32(&lf, 4);
+            let any = 1 + (d >> 33) % MAX_SIZE;
+            for (len, what) in [(4096, "to one block"), (12, "to 12 bytes"), (size + 4096, "a block longer"), (any, "to a length from this run's input"), (0, "to nothing")] {
+                match at("/lost+found") {
+                    Ok(t) => match t.truncate(len) {
+                        Err(e) if e == EISDIR as Errno => {}
+                        Ok(()) => r.fail(format_args!("{TRUNC_ID}: truncate({len}) of /lost+found (a directory of 4 blocks, {what}) returned 0, expected -21 (EISDIR)")),
+                        Err(e) => r.fail(format_args!("{TRUNC_ID}: truncate({len}) of /lost+found (a directory of 4 blocks, {what}) returned {}, expected -21 (EISDIR)", errno_text(e))),
+                    },
+                    Err(why) => r.fail(format_args!("{TRUNC_ID}: {why}")),
+                }
+                if let Some((_, now)) = raw_at(&mut r, raw, "/lost+found") {
+                    r.expect_eq(&format!("/lost+found: i_size on the disk after its refused truncate({len})"), le32(&now, 4), size);
+                    r.expect_eq(&format!("/lost+found: i_blocks on the disk after its refused truncate({len})"), le32(&now, 28), le32(&lf, 28));
+                    if let (Some(a), Some(b)) = (recs.as_ref(), got(&mut r, raw.records(lfi, &now))) {
+                        r.expect(*a == b, &format!("/lost+found: its records on the disk after its refused truncate({len}) read back as before"));
+                    }
+                }
+            }
+            if let Some(after) = got(&mut r, alloc_state(raw)) {
+                same_state(&mut r, "after the refused truncates of /lost+found", &after, &pre, true);
+            }
+        }
+    }
     // Through the syscalls: O_TRUNC on a file that is there.
     let mut pl = Plan::new();
     let (p, log, tmp) = (pl.p.str(&path), pl.p.str("/.sboot-log"), pl.p.str("/tmp"));
@@ -1370,6 +1452,7 @@ fn truncate_row(raw: &Raw) -> String {
     if let Some((_, i)) = raw_at(&mut r, raw, "/.sboot-log") {
         r.expect(le32(&i, 4) > 0, "/.sboot-log: i_size on the disk not 0 after the refused O_TRUNC");
     }
+    tree_sweep(&mut r, raw, &path, d);
     dind_case(&mut r, raw, &format!("{path}.d"), d);
     r.finish(1);
     path
@@ -1381,6 +1464,220 @@ fn truncate_row(raw: &Raw) -> String {
 /// block, an indirect block and the double indirect block taken — then
 /// `truncate(0)`: all three given back, `i_block[13]` and `i_blocks` 0 on
 /// the disk, the block bitmap and the free counts as before the write.
+/// Blocks a file needs on the disk for these data blocks: the data, the
+/// indirect block under `i_block[12]`, and the double indirect block with
+/// one child per 1024 blocks under `i_block[13]` (the lesson's layout).
+fn blocks_needed(data: &BTreeSet<u64>) -> u64 {
+    let ind = data.iter().any(|&b| (12..DIND_FIRST).contains(&b)) as u64;
+    let kids: BTreeSet<u64> = data.iter().filter(|&&b| b >= DIND_FIRST).map(|&b| (b - DIND_FIRST) / 1024).collect();
+    let dind = !kids.is_empty() as u64;
+    data.len() as u64 + ind + dind + kids.len() as u64
+}
+
+/// Fix round 5 (sk19-forger-rv4-1/-2): the boundary class, not one boundary
+/// a round. For each pointer tree a cut can land in (`i_block[12]`'s,
+/// `i_block[13]`'s child 0, and its child k, 1..=64 from the nonce) a file
+/// of its own gets the block below the tree, the tree's first two blocks, a
+/// nonce-placed middle block m and the block before it, and the tree's last
+/// block; then it is cut to m blocks, to base + 1 and to base. After each
+/// cut every written block below the cut is mapped and reads back, every
+/// one at or past it is unmapped, and `i_blocks` and both free counts move
+/// by what the kept blocks need. Then the file is cut to nothing.
+///
+/// Fix round 6 (sk19-forger-rv5): each file also holds one block in the tree
+/// past its own, and child 0's file one in a child 256..=509 (a pointer walk
+/// bounded by a 1 KiB block's 256 entries never reaches it); the cuts add
+/// base + 64 and base + 2. After each cut no pointer the file gave back is
+/// left in the inode or the double indirect block, and every block it gave
+/// back is clear in the block bitmap; the file stops there if one is.
+///
+/// Fix round 7 (sk19-forger-rv6): two cuts in each file are not block
+/// multiples. One ends in a hole between m and the tree's last block (the
+/// file must take no block for it); the other ends inside block m, so the
+/// file is grown back over that block and its bytes past the cut read as
+/// zeros. First, a sparse file is left for row 5 to unlink: a hole at block
+/// 0, direct blocks d and 11, one block under `i_block[12]` and one in a
+/// child 256..=509 under `i_block[13]`, all drawn from the nonce.
+fn tree_sweep(r: &mut Row, raw: &Raw, path: &str, d: u64) {
+    let tmp = match vfs::root().and_then(|root| vfs::walk(&root, "/tmp")) {
+        Ok(t) => t,
+        Err(e) => return r.fail(format_args!("{TRUNC_ID}: /tmp through the mount returned {}", errno_text(e))),
+    };
+    let u = splitmix(d ^ 0x5eed_0007);
+    let uname = format!("{}.u", &path["/tmp/".len()..]);
+    let uf = match tmp.create(&uname, 0o644) {
+        Ok(f) => f,
+        Err(e) => return r.fail(format_args!("{TRUNC_ID}: create(\"{uname}\") in /tmp returned {} (lab 18's call)", errno_text(e))),
+    };
+    for b in [1 + u % 10, 11, 12 + (u >> 4) % 1024, DIND_FIRST + (256 + (u >> 14) % 254) * 1024 + (u >> 24) % 1024] {
+        match uf.write_at(b * 4096, &mix(u ^ b, 4096)) {
+            Ok(4096) => {}
+            Ok(n) => return r.fail(format_args!("{TRUNC_ID}: write_at of one block at file block {b} of /tmp/{uname} wrote {n} (lab 18's call)")),
+            Err(e) => return r.fail(format_args!("{TRUNC_ID}: write_at at file block {b} of /tmp/{uname} returned {} (lab 18's call)", errno_text(e))),
+        }
+    }
+    drop(uf);
+    let k = 1 + (d >> 20) % 64;
+    for (t, base) in [(0u64, 12u64), (1, DIND_FIRST), (2, DIND_FIRST + k * 1024)] {
+        let name = format!("{}.s{t}", &path["/tmp/".len()..]);
+        let file = format!("/tmp/{name}");
+        let f = match tmp.create(&name, 0o644) {
+            Ok(f) => f,
+            Err(e) => return r.fail(format_args!("{TRUNC_ID}: create(\"{name}\") in /tmp returned {} (lab 18's call)", errno_text(e))),
+        };
+        let m = base + 2 + (d >> (24 + 8 * t)) % 1020;
+        let e = splitmix(d ^ (0x5eed_0006 + t));
+        let mut written: BTreeSet<u64> = [base - 1, base, base + 1, m - 1, m, base + 1023, base + 1024 + e % 1024].into_iter().collect();
+        if t == 1 {
+            written.insert(DIND_FIRST + (256 + (e >> 10) % 254) * 1024 + (e >> 20) % 1024);
+        }
+        let h = m + 1 + (e >> 30) % (base + 1022 - m);
+        let mut cuts = alloc::vec![h * 4096 + 1 + (e >> 40) % 4095, m * 4096 + 1 + (e >> 52) % 4095, (base + 64) * 4096, (base + 2) * 4096, (base + 1) * 4096, base * 4096];
+        cuts.sort_unstable_by(|a, b| b.cmp(a));
+        cuts.dedup();
+        let mut tails: BTreeMap<u64, usize> = BTreeMap::new();
+        let bytes = |b: u64| mix(d ^ b.wrapping_mul(0x9E37_79B9_7F4A_7C15), 4096);
+        let want = |b: u64, tails: &BTreeMap<u64, usize>| {
+            let mut v = bytes(b);
+            if let Some(&t) = tails.get(&b) {
+                v[t..].fill(0);
+            }
+            v
+        };
+        for &b in &written {
+            match f.write_at(b * 4096, &bytes(b)) {
+                Ok(4096) => {}
+                Ok(n) => return r.fail(format_args!("{TRUNC_ID}: write_at of one block at file block {b} of {file} wrote {n} (lab 18's call)")),
+                Err(e) => return r.fail(format_args!("{TRUNC_ID}: write_at at file block {b} of {file} returned {} (lab 18's call)", errno_text(e))),
+            }
+        }
+        let mut held = written.clone();
+        let mut back = alloc::vec![0u8; 4096];
+        for cut in cuts {
+            let Some(mid) = got(r, alloc_state(raw)) else { return };
+            let Some(owned) = owned_blocks(r, raw, &file, &held) else { return };
+            let (x, tail) = (cut / 4096, (cut % 4096) as usize);
+            if let Err(e) = f.truncate(cut) {
+                return r.fail(format_args!("{TRUNC_ID}: truncate({cut}) of {file} (a cut in file block {x}) returned {}", errno_text(e)));
+            }
+            let kept: BTreeSet<u64> = held.iter().copied().filter(|&b| b < x || (tail > 0 && b == x)).collect();
+            let gone = blocks_needed(&held) - blocks_needed(&kept);
+            if let Some((_, i)) = raw_at(r, raw, &file) {
+                r.expect_eq(&format!("{file}: i_blocks on the disk after truncate({cut}) ({} data blocks kept)", kept.len()), le32(&i, 28), 8 * blocks_needed(&kept));
+                for &b in &written {
+                    match got(r, raw.bmap(&i, b)) {
+                        Some(0) if kept.contains(&b) => r.fail(format_args!("{TRUNC_ID}: {file}: file block {b} unmapped on the disk after truncate({cut}), which keeps it")),
+                        Some(n) if !kept.contains(&b) && n != 0 => r.fail(format_args!("{TRUNC_ID}: {file}: file block {b} still maps block {n} on the disk after truncate({cut})")),
+                        _ => {}
+                    }
+                }
+            }
+            if tail > 0 {
+                // Grown back over block x: no block taken, the bytes past
+                // the cut zeros (a hole reads as zeros too).
+                let grown = (x + 1) * 4096;
+                if let Err(e) = f.truncate(grown) {
+                    return r.fail(format_args!("{TRUNC_ID}: truncate({grown}) of {file}, growing it back after truncate({cut}), returned {}", errno_text(e)));
+                }
+                if let Some((_, i)) = raw_at(r, raw, &file) {
+                    r.expect_eq(&format!("{file}: i_blocks on the disk after truncate({cut}) and a grow back to {grown}"), le32(&i, 28), 8 * blocks_needed(&kept));
+                }
+                if kept.contains(&x) {
+                    tails.insert(x, tail);
+                }
+                let expect = if kept.contains(&x) { want(x, &tails) } else { alloc::vec![0u8; 4096] };
+                match f.read_at(x * 4096, &mut back) {
+                    Ok(4096) => r.expect_bytes(&format!("{file}: file block {x} read back after truncate({cut}) and a grow back to {grown}"), &back, &expect),
+                    Ok(n) => r.fail(format_args!("{TRUNC_ID}: read_at of file block {x} of {file} after a grow back to {grown} read {n} bytes, expected 4096")),
+                    Err(e) => r.fail(format_args!("{TRUNC_ID}: read_at of file block {x} of {file} after a grow back to {grown} returned {}", errno_text(e))),
+                }
+            }
+            for &b in kept.iter().filter(|&&b| tail == 0 || b != x) {
+                match f.read_at(b * 4096, &mut back) {
+                    Ok(4096) => r.expect_bytes(&format!("{file}: file block {b} read back after truncate({cut})"), &back, &want(b, &tails)),
+                    Ok(n) => r.fail(format_args!("{TRUNC_ID}: read_at of file block {b} of {file} after truncate({cut}) read {n} bytes, expected 4096")),
+                    Err(e) => r.fail(format_args!("{TRUNC_ID}: read_at of file block {b} of {file} after truncate({cut}) returned {}", errno_text(e))),
+                }
+            }
+            if let Some(after) = got(r, alloc_state(raw)) {
+                r.expect_eq(&format!("s_free_blocks_count after truncate({cut}) of {file}: {gone} more"), after.2[0], mid.2[0] + gone);
+                r.expect_eq(&format!("bg_free_blocks_count after truncate({cut}) of {file}: {gone} more"), after.2[2], mid.2[2] + gone);
+            }
+            if !given_back(r, raw, &file, cut, &owned, &kept) {
+                return;
+            }
+            held = kept;
+        }
+        if let Err(e) = f.truncate(0) {
+            return r.fail(format_args!("{TRUNC_ID}: truncate(0) of {file} returned {}", errno_text(e)));
+        }
+        if let Some((_, i)) = raw_at(r, raw, &file) {
+            r.expect_eq(&format!("{file}: i_blocks on the disk after truncate(0)"), le32(&i, 28), 0);
+        }
+    }
+}
+
+/// The blocks a file's tree holds on the disk for the file blocks `held`:
+/// (what each is, its block number, the file blocks it serves).
+fn owned_blocks(r: &mut Row, raw: &Raw, file: &str, held: &BTreeSet<u64>) -> Option<Vec<(String, u64, Vec<u64>)>> {
+    let (_, i) = raw_at(r, raw, file)?;
+    let mut out = Vec::new();
+    for &b in held {
+        out.push((format!("file block {b}"), got(r, raw.bmap(&i, b))?, alloc::vec![b]));
+    }
+    let ind: Vec<u64> = held.iter().copied().filter(|&b| (12..DIND_FIRST).contains(&b)).collect();
+    if !ind.is_empty() {
+        out.push((String::from("i_block[12]'s indirect block"), le32(&i, 88), ind));
+    }
+    let dind: Vec<u64> = held.iter().copied().filter(|&b| b >= DIND_FIRST).collect();
+    if !dind.is_empty() {
+        let top = le32(&i, 92);
+        let blk = got(r, raw_block(top))?;
+        let kids: BTreeSet<u64> = dind.iter().map(|&b| (b - DIND_FIRST) / 1024).collect();
+        for c in kids {
+            let under: Vec<u64> = dind.iter().copied().filter(|&b| (b - DIND_FIRST) / 1024 == c).collect();
+            out.push((format!("the double indirect block's child {c}"), le32(&blk[..], 4 * c as usize), under));
+        }
+        out.push((String::from("i_block[13]'s double indirect block"), top, dind));
+    }
+    Some(out)
+}
+
+/// After a cut to `cut` bytes keeping `kept`: every block of `owned` that
+/// serves no kept file block is clear in the block bitmap and named by no
+/// pointer the file still holds. False (the row failed) if one is not.
+fn given_back(r: &mut Row, raw: &Raw, file: &str, cut: u64, owned: &[(String, u64, Vec<u64>)], kept: &BTreeSet<u64>) -> bool {
+    let was = r.failed;
+    r.failed = false;
+    let Some((_, i)) = raw_at(r, raw, file) else { return false };
+    let Some((map, ..)) = got(r, alloc_state(raw)) else { return false };
+    let top = le32(&i, 92);
+    let dblk = if top != 0 { got(r, raw_block(top)) } else { None };
+    for (what, n, serves) in owned {
+        if *n == 0 || serves.iter().any(|b| kept.contains(b)) {
+            continue;
+        }
+        if bit(&map, *n) {
+            r.fail(format_args!("{TRUNC_ID}: {file}: {what} (block {n}) still taken in the block bitmap after truncate({cut}) gave it back"));
+        }
+        let named = match what.as_str() {
+            "i_block[12]'s indirect block" => le32(&i, 88),
+            "i_block[13]'s double indirect block" => top,
+            _ if what.starts_with("the double indirect block's child ") => {
+                let c = (serves[0] - DIND_FIRST) / 1024;
+                dblk.as_ref().map_or(0, |b| le32(&b[..], 4 * c as usize))
+            }
+            _ => 0,
+        };
+        if named != 0 {
+            r.fail(format_args!("{TRUNC_ID}: {file}: {what} is still named (block {named}) on the disk after truncate({cut}) gave it back; the file's later cuts are skipped"));
+        }
+    }
+    let ok = !r.failed;
+    r.failed |= was;
+    ok
+}
+
 fn dind_case(r: &mut Row, raw: &Raw, path: &str, d: u64) {
     let name = &path["/tmp/".len()..];
     let tmp = match vfs::root().and_then(|root| vfs::walk(&root, "/tmp")) {
@@ -1392,22 +1689,180 @@ fn dind_case(r: &mut Row, raw: &Raw, path: &str, d: u64) {
         Err(e) => return r.fail(format_args!("{TRUNC_ID}: create(\"{name}\") in /tmp returned {} (lab 18's call)", errno_text(e))),
     };
     let Some(before) = got(r, alloc_state(raw)) else { return };
-    let at_block = DIND_FIRST + (d >> 24) % 4;
-    let bytes = mix(d ^ 0x1036, 4096);
-    match f.write_at(at_block * 4096, &bytes) {
-        Ok(4096) => {}
-        Ok(n) => return r.fail(format_args!("{TRUNC_ID}: write_at of one block at file block {at_block} of {path} wrote {n} (lab 18's call)")),
-        Err(e) => return r.fail(format_args!("{TRUNC_ID}: write_at at file block {at_block} of {path} returned {} (lab 18's call)", errno_text(e))),
+    // Where the blocks go (fix round 2, sk19-forger-rv-1/-2), all from the
+    // nonce: p0 in the double indirect block's first indirect child (kept
+    // whole), p1 < p2 in child c (1..=64) with the cut between them, p3 in
+    // child c + 1 (cut whole). The cut keeps p0, p1, children 0 and c and the
+    // double indirect block; it gives back p2, p3 and child c + 1.
+    let c = 1 + (d >> 8) % 64;
+    let o1 = (d >> 16) % 1022;
+    let o2 = o1 + 1 + (d >> 28) % (1023 - o1);
+    let p0 = DIND_FIRST + (d >> 40) % 1024;
+    let p1 = DIND_FIRST + c * 1024 + o1;
+    let p2 = DIND_FIRST + c * 1024 + o2;
+    let p3 = DIND_FIRST + (c + 1) * 1024 + (d >> 50) % 1024;
+    let bytes: Vec<Vec<u8>> = (0..4u64).map(|k| mix(d ^ (0x1036 + k * 0x1000), 4096)).collect();
+    for (k, at_block) in [p0, p1, p2, p3].into_iter().enumerate() {
+        match f.write_at(at_block * 4096, &bytes[k]) {
+            Ok(4096) => {}
+            Ok(n) => return r.fail(format_args!("{TRUNC_ID}: write_at of one block at file block {at_block} of {path} wrote {n} (lab 18's call)")),
+            Err(e) => return r.fail(format_args!("{TRUNC_ID}: write_at at file block {at_block} of {path} returned {} (lab 18's call)", errno_text(e))),
+        }
+        if k == 0 {
+            if let Some((_, i)) = raw_at(r, raw, path) {
+                if le32(&i, 92) == 0 || le32(&i, 28) != 24 {
+                    return r.fail(format_args!("{TRUNC_ID}: {path} after a write at file block {at_block}: i_block[13] {}, i_blocks {} on the disk, expected a double indirect pointer and 24 (lab 18's write)", le32(&i, 92), le32(&i, 28)));
+                }
+            }
+        }
+    }
+    let Some(mid) = got(r, alloc_state(raw)) else { return };
+    let cut = (p1 + 1) * 4096;
+    if let Err(e) = f.truncate(cut) {
+        return r.fail(format_args!("{TRUNC_ID}: truncate({cut}) of {path} (a cut inside the double indirect range) returned {}", errno_text(e)));
     }
     if let Some((_, i)) = raw_at(r, raw, path) {
-        if le32(&i, 92) == 0 || le32(&i, 28) != 24 {
-            return r.fail(format_args!("{TRUNC_ID}: {path} after a write at file block {at_block}: i_block[13] {}, i_blocks {} on the disk, expected a double indirect pointer and 24 (lab 18's write)", le32(&i, 92), le32(&i, 28)));
+        r.expect(le32(&i, 92) != 0, &format!("{path}: i_block[13] on the disk kept after truncate({cut})"));
+        r.expect_eq(&format!("{path}: i_size on the disk after truncate({cut})"), le32(&i, 4), cut);
+        r.expect_eq(&format!("{path}: i_blocks on the disk after truncate({cut}) (two data blocks, two indirect blocks, the double indirect block)"), le32(&i, 28), 40);
+        for at_block in [p0, p1] {
+            if let Some(b) = got(r, raw.bmap(&i, at_block)) {
+                r.expect(b != 0, &format!("{path}: file block {at_block} still mapped on the disk after truncate({cut})"));
+            }
+        }
+        for at_block in [p2, p3] {
+            if let Some(b) = got(r, raw.bmap(&i, at_block)) {
+                r.expect_eq(&format!("{path}: file block {at_block} mapped on the disk after truncate({cut})"), b, 0);
+            }
+        }
+    }
+    if let Some(after) = got(r, alloc_state(raw)) {
+        r.expect_eq(&format!("s_free_blocks_count after truncate({cut}) of {path}: 3 more"), after.2[0], mid.2[0] + 3);
+        r.expect_eq(&format!("bg_free_blocks_count after truncate({cut}) of {path}: 3 more"), after.2[2], mid.2[2] + 3);
+    }
+    let mut back = alloc::vec![0u8; 4096];
+    for (k, at_block) in [p0, p1].into_iter().enumerate() {
+        match f.read_at(at_block * 4096, &mut back) {
+            Ok(4096) => r.expect_bytes(&format!("{path}: file block {at_block} read back after truncate({cut})"), &back, &bytes[k]),
+            Ok(n) => r.fail(format_args!("{TRUNC_ID}: read_at of file block {at_block} of {path} after truncate({cut}) read {n} bytes, expected 4096")),
+            Err(e) => r.fail(format_args!("{TRUNC_ID}: read_at of file block {at_block} of {path} after truncate({cut}) returned {}", errno_text(e))),
+        }
+    }
+    // Fix round 3 (sk19-forger-rv2-1/-2). A dense cut inside child c: p1+1
+    // and p1+2 written, the file cut to p1+2 blocks, so the first block past
+    // the cut is the one to go. Then a cut exactly at child c+1's first
+    // block, with a block written at a nonce offset in it: that block and
+    // child c+1 go, child c stays whole.
+    let (q1, q2) = (p1 + 1, p1 + 2);
+    let qb = DIND_FIRST + (c + 1) * 1024 + (d >> 34) % 1024;
+    // Fix round 4 (sk19-ladder-rv3-1): nothing past the cut may still be
+    // mapped before the next writes, or they would go through a pointer
+    // block the file gave back, or take a block it still names; the case
+    // stops there with the row red.
+    if let Some((_, i)) = raw_at(r, raw, path) {
+        // The double indirect block's entry for child c + 1, cut whole, is
+        // 0 (sk19-forger-rv4-4: a child zeroed but still named).
+        if let Some(blk) = got(r, raw_block(le32(&i, 92))) {
+            let e = le32(&blk[..], (c as usize + 1) * 4);
+            if e != 0 {
+                return r.fail(format_args!("{TRUNC_ID}: {path}: the double indirect block's entry {} still names block {e} on the disk after the cut to {} blocks gave that child back; the file's later cuts are skipped", c + 1, p1 + 1));
+            }
+        }
+        for at_block in [p2, p3, q1, q2, qb] {
+            match got(r, raw.bmap(&i, at_block)) {
+                Some(0) => {}
+                Some(b) => return r.fail(format_args!("{TRUNC_ID}: {path}: file block {at_block}, past the cut to {} blocks, still maps block {b} on the disk; the file's later cuts are skipped", p1 + 1)),
+                None => return,
+            }
+        }
+    }
+    for (at_block, k) in [(q1, 2), (q2, 3)] {
+        match f.write_at(at_block * 4096, &bytes[k]) {
+            Ok(4096) => {}
+            Ok(n) => return r.fail(format_args!("{TRUNC_ID}: write_at of one block at file block {at_block} of {path} wrote {n} (lab 18's call)")),
+            Err(e) => return r.fail(format_args!("{TRUNC_ID}: write_at at file block {at_block} of {path} returned {} (lab 18's call)", errno_text(e))),
+        }
+    }
+    let Some(mid) = got(r, alloc_state(raw)) else { return };
+    let cut = q2 * 4096;
+    if let Err(e) = f.truncate(cut) {
+        return r.fail(format_args!("{TRUNC_ID}: truncate({cut}) of {path} (a cut between two neighbouring blocks) returned {}", errno_text(e)));
+    }
+    if let Some((_, i)) = raw_at(r, raw, path) {
+        r.expect_eq(&format!("{path}: i_blocks on the disk after truncate({cut}) (three data blocks, two indirect blocks, the double indirect block)"), le32(&i, 28), 48);
+        if let Some(b) = got(r, raw.bmap(&i, q1)) {
+            r.expect(b != 0, &format!("{path}: file block {q1} still mapped on the disk after truncate({cut})"));
+        }
+        if let Some(b) = got(r, raw.bmap(&i, q2)) {
+            r.expect_eq(&format!("{path}: file block {q2} mapped on the disk after truncate({cut})"), b, 0);
+        }
+    }
+    if let Some(after) = got(r, alloc_state(raw)) {
+        r.expect_eq(&format!("s_free_blocks_count after truncate({cut}) of {path}: 1 more"), after.2[0], mid.2[0] + 1);
+        r.expect_eq(&format!("bg_free_blocks_count after truncate({cut}) of {path}: 1 more"), after.2[2], mid.2[2] + 1);
+    }
+    match f.write_at(qb * 4096, &bytes[3]) {
+        Ok(4096) => {}
+        Ok(n) => return r.fail(format_args!("{TRUNC_ID}: write_at of one block at file block {qb} of {path} wrote {n} (lab 18's call)")),
+        Err(e) => return r.fail(format_args!("{TRUNC_ID}: write_at at file block {qb} of {path} returned {} (lab 18's call)", errno_text(e))),
+    }
+    let Some(mid) = got(r, alloc_state(raw)) else { return };
+    let cut = (DIND_FIRST + (c + 1) * 1024) * 4096;
+    if let Err(e) = f.truncate(cut) {
+        return r.fail(format_args!("{TRUNC_ID}: truncate({cut}) of {path} (a cut at an indirect block's first block) returned {}", errno_text(e)));
+    }
+    if let Some((_, i)) = raw_at(r, raw, path) {
+        r.expect_eq(&format!("{path}: i_blocks on the disk after truncate({cut}) (three data blocks, two indirect blocks, the double indirect block)"), le32(&i, 28), 48);
+        if let Some(b) = got(r, raw.bmap(&i, qb)) {
+            r.expect_eq(&format!("{path}: file block {qb} mapped on the disk after truncate({cut})"), b, 0);
+        }
+        if let Some(b) = got(r, raw.bmap(&i, q1)) {
+            r.expect(b != 0, &format!("{path}: file block {q1} still mapped on the disk after truncate({cut})"));
+        }
+    }
+    if let Some(after) = got(r, alloc_state(raw)) {
+        r.expect_eq(&format!("s_free_blocks_count after truncate({cut}) of {path}: 2 more"), after.2[0], mid.2[0] + 2);
+        r.expect_eq(&format!("bg_free_blocks_count after truncate({cut}) of {path}: 2 more"), after.2[2], mid.2[2] + 2);
+    }
+    // Fix round 4 (sk19-forger-rv3-1): cuts at exactly the first block of a
+    // top pointer tree. Blocks 0 and 12 written, the file cut to 1036 blocks
+    // (all of i_block[13]'s tree goes: three data blocks, two indirect, the
+    // double indirect), then to 12 blocks (block 12 and i_block[12]'s block).
+    for at_block in [0u64, 12] {
+        match f.write_at(at_block * 4096, &bytes[0]) {
+            Ok(4096) => {}
+            Ok(n) => return r.fail(format_args!("{TRUNC_ID}: write_at of one block at file block {at_block} of {path} wrote {n} (lab 18's call)")),
+            Err(e) => return r.fail(format_args!("{TRUNC_ID}: write_at at file block {at_block} of {path} returned {} (lab 18's call)", errno_text(e))),
+        }
+    }
+    for (blocks, slot, left, freed) in [(DIND_FIRST, 13usize, 24u64, 6u64), (12, 12, 8, 2)] {
+        let Some(mid) = got(r, alloc_state(raw)) else { return };
+        let cut = blocks * 4096;
+        if let Err(e) = f.truncate(cut) {
+            return r.fail(format_args!("{TRUNC_ID}: truncate({cut}) of {path} (a cut at the first block under i_block[{slot}]) returned {}", errno_text(e)));
+        }
+        if let Some((_, i)) = raw_at(r, raw, path) {
+            r.expect_eq(&format!("{path}: i_block[{slot}] on the disk after truncate({cut})"), le32(&i, 40 + 4 * slot), 0);
+            r.expect_eq(&format!("{path}: i_blocks on the disk after truncate({cut})"), le32(&i, 28), left);
+        }
+        if let Some(after) = got(r, alloc_state(raw)) {
+            r.expect_eq(&format!("s_free_blocks_count after truncate({cut}) of {path}: {freed} more"), after.2[0], mid.2[0] + freed);
+            r.expect_eq(&format!("bg_free_blocks_count after truncate({cut}) of {path}: {freed} more"), after.2[2], mid.2[2] + freed);
+        }
+    }
+    // Both top trees again, for the cut to nothing below.
+    for at_block in [12, p0] {
+        match f.write_at(at_block * 4096, &bytes[0]) {
+            Ok(4096) => {}
+            Ok(n) => return r.fail(format_args!("{TRUNC_ID}: write_at of one block at file block {at_block} of {path} wrote {n} (lab 18's call)")),
+            Err(e) => return r.fail(format_args!("{TRUNC_ID}: write_at at file block {at_block} of {path} returned {} (lab 18's call)", errno_text(e))),
         }
     }
     if let Err(e) = f.truncate(0) {
         return r.fail(format_args!("{TRUNC_ID}: truncate(0) of {path} (a block through the double indirect) returned {}", errno_text(e)));
     }
     if let Some((_, i)) = raw_at(r, raw, path) {
+        r.expect_eq(&format!("{path}: i_block[12] on the disk after truncate(0)"), le32(&i, 88), 0);
         r.expect_eq(&format!("{path}: i_block[13] on the disk after truncate(0)"), le32(&i, 92), 0);
         r.expect_eq(&format!("{path}: i_blocks on the disk after truncate(0) (the data, indirect and double indirect blocks given back)"), le32(&i, 28), 0);
     }
@@ -1432,7 +1887,23 @@ fn unlink_row(raw: &Raw, trunc: &str, left: &mut Left) {
     let fb = pl.fd("open(/tmp/u19b, O_WRONLY|O_CREAT|O_EXCL)", SYS_OPEN, &[b, i(O_WRONLY | O_CREAT | O_EXCL), i(0o600)]);
     pl.is("close", SYS_CLOSE, &[A::R(fb)], 0);
     pl.run(&mut r, "u19a");
-    let ia = raw_at(&mut r, raw, "/tmp/u19a").map(|x| x.0);
+    let ia = raw_at(&mut r, raw, "/tmp/u19a").map(|x| (x.0, le32(&x.1, 12)));
+    // The guest clock is moved forward before the unlink to i_ctime + 2 + a
+    // number of seconds (0..600) from the PM timer's low bits (fix rounds 2
+    // and 3: sk19-ladder-rv-1, sk19-forger-rv2-4/-5), so a deletion time of
+    // now is far from i_ctime, and no stand-in a fixed distance from it fits.
+    // The jump runs on this thread between learner operations (every
+    // program above has ended, no disk command is open, the vehicle's own
+    // bounds are on the PM timer), and its size is printed only after the
+    // row has read i_dtime back (TPM interim 18, the carried-bytes rule).
+    let mut clock_stuck: Option<u64> = None;
+    if let Some((_, ctime)) = ia {
+        let to = ctime + 2 + (pm() as u64 >> 4) % 600;
+        if !clock_forward(to) {
+            r.failed = true;
+            clock_stuck = Some(to);
+        }
+    }
     raw_at(&mut r, raw, "/tmp/u19b");
     let tail = format!("{trunc}/");
     let mut pl = Plan::new();
@@ -1446,7 +1917,9 @@ fn unlink_row(raw: &Raw, trunc: &str, left: &mut Left) {
     pl.is("open(/tmp/u19a) after its unlink", SYS_OPEN, &[a, i(O_RDONLY)], -ENOENT);
     pl.is("unlink(/tmp/u19a) again", SYS_UNLINK, &[a], -ENOENT);
     pl.is("unlink(/tmp/u19b) (empty)", SYS_UNLINK, &[b], 0);
+    let t0 = guest_now();
     pl.run(&mut r, "u19b");
+    let t1 = guest_now();
     if let Some(after) = got(&mut r, alloc_state(raw)) {
         same_state(&mut r, "after the unlinks", &after, &before, true);
     }
@@ -1456,13 +1929,19 @@ fn unlink_row(raw: &Raw, trunc: &str, left: &mut Left) {
         }
         left.gone.push(format!("/tmp/{name}"));
     }
-    if let Some(ia) = ia {
+    if let Some((ia, ctime)) = ia {
         if let Some(i) = got(&mut r, raw.inode(ia)) {
             r.expect_eq("/tmp/u19a's inode on the disk after its unlink: i_links_count", links(&i), 0);
             r.expect_eq("/tmp/u19a's inode on the disk after its unlink: i_blocks", le32(&i, 28), 0);
             r.expect(le32(&i, 20) != 0, "/tmp/u19a's inode on the disk after its unlink: i_dtime set");
+            let dtime = le32(&i, 20);
+            r.expect(dtime > ctime && dtime >= t0 && dtime <= t1, &format!("/tmp/u19a's inode on the disk after its unlink: i_dtime {dtime} after its i_ctime {ctime} and within the guest time around the unlink, {t0}..={t1}"));
         }
     }
+    if let Some(to) = clock_stuck {
+        note(format_args!("{UNLINK_ID}: the guest clock (EPOCH + whole seconds of time::now_ns) did not reach the middle of second {to} with time::TICKS moved forward"));
+    }
+    first_in_block(&mut r, raw);
     // One file that stays, for row 3.
     let keep = mix(0x5B00_0019_0003, 3 * 4096 + 77);
     let mut pl = Plan::new();
@@ -1475,6 +1954,56 @@ fn unlink_row(raw: &Raw, trunc: &str, left: &mut Left) {
     left.files.push((String::from("/tmp/u19k"), keep));
     left.files.push((String::from(trunc), Vec::new()));
     r.finish(2);
+}
+
+/// Row 2's first-record case (fix round 1, O-2): names made in /tmp
+/// through the learner's `create` until the directory takes a new block,
+/// then the record at byte 0 of that block unlinked through the learner's
+/// `unlink` — it must be gone from the disk — and the other names after it.
+fn first_in_block(r: &mut Row, raw: &Raw) {
+    let tmp = match at("/tmp") {
+        Ok(t) => t,
+        Err(why) => return r.fail(format_args!("{UNLINK_ID}: {why}")),
+    };
+    let size = |r: &mut Row| raw_at(r, raw, "/tmp").map(|(_, i)| le32(&i, 4));
+    let Some(s0) = size(r) else { return };
+    let mut made: Vec<String> = Vec::new();
+    loop {
+        if made.len() == 40 {
+            return r.fail(format_args!("{UNLINK_ID}: 40 names of 242 bytes made in /tmp and its size on the disk is still {s0}"));
+        }
+        let name = format!("u19f{:02}{}", made.len(), "x".repeat(236));
+        match tmp.create(&name, 0o644) {
+            Ok(_) => made.push(name),
+            Err(e) => return r.fail(format_args!("{UNLINK_ID}: create of a 242-byte name in /tmp returned {} (lab 18's call)", errno_text(e))),
+        }
+        match size(r) {
+            Some(s) if s > s0 => break,
+            Some(_) => {}
+            None => return,
+        }
+    }
+    let Some((dir, di)) = raw_at(r, raw, "/tmp") else { return };
+    let last = le32(&di, 4) / 4096 - 1;
+    let Some(blk) = got(r, raw.bmap(&di, last).and_then(raw_block)) else { return };
+    let (fino, nl) = (le32(&blk[..], 0), blk[6] as usize);
+    let first = String::from_utf8_lossy(&blk[8..8 + nl]).into_owned();
+    if fino == 0 || !made.contains(&first) {
+        return r.fail(format_args!("{UNLINK_ID}: the record at byte 0 of /tmp's new block on the disk is not one of the names just made"));
+    }
+    match tmp.unlink(&first) {
+        Ok(()) => {
+            if let Some(Some(_)) = got(r, raw.find(dir, &first)) {
+                r.fail(format_args!("{UNLINK_ID}: a name whose record is the first of its directory block is still a record of /tmp on the disk after its unlink"));
+            }
+        }
+        Err(e) => r.fail(format_args!("{UNLINK_ID}: unlink of the name first in /tmp's new block returned {}", errno_text(e))),
+    }
+    for name in made.iter().filter(|n| **n != first) {
+        if let Err(e) = tmp.unlink(name) {
+            return r.fail(format_args!("{UNLINK_ID}: unlink of a 242-byte name in /tmp returned {}", errno_text(e)));
+        }
+    }
 }
 
 // ── Row 3: ext2.remount.persists ─────────────────────────────────────────
@@ -1588,12 +2117,31 @@ fn txn_row(raw: &Raw, control: Vec<String>, fs: Option<&Arc<Ext2>>) {
 
 // ── Row 5: ext2.freemaps.agree ───────────────────────────────────────────
 
-fn free_row(raw: &Raw, control: Result<Vec<String>, String>) {
+fn free_row(raw: &Raw, control: Result<Vec<String>, String>, trunc: &str, mounted: bool) {
     let mut r = Row::new(FREE_ID);
     match control {
         Ok(v) if v.is_empty() => {}
-        Ok(v) => r.fail(format_args!("{FREE_ID}: this file's check of the disk as written, before the mount, disagrees (the vehicle is wrong): {}", v.join("; "))),
+        Ok(v) => r.fail(format_args!("{FREE_ID}: this file's check of the disk as written, before the mount, disagrees (the test is wrong): {}", v.join("; "))),
         Err(why) => r.fail(format_args!("{FREE_ID}: the check before the mount: {why}")),
+    }
+    // Fix round 7 (sk19-forger-rv6-1/-2): row 1's sparse file (a hole
+    // before its last direct block, an indirect block, a double indirect
+    // child), unlinked on the second mount; the walk below then holds every
+    // block it had, pointer blocks too, to the bitmap.
+    let uname = format!("{}.u", &trunc["/tmp/".len()..]);
+    if mounted {
+        match vfs::root().and_then(|root| vfs::walk(&root, "/tmp")) {
+            Ok(tmp) => {
+                if tmp.lookup(&uname).is_ok() {
+                    if let Err(e) = tmp.unlink(&uname) {
+                        r.fail(format_args!("{FREE_ID}: unlink(\"{uname}\") in /tmp on the second mount (a file with holes and blocks under both pointer trees) returned {}", errno_text(e)));
+                    }
+                } else {
+                    note(format_args!("{FREE_ID}: /tmp/{uname} is not there to unlink (row 1 stopped before making it)"));
+                }
+            }
+            Err(e) => r.fail(format_args!("{FREE_ID}: /tmp on the second mount returned {}", errno_text(e))),
+        }
     }
     match scan(raw) {
         Ok(s) => {
@@ -1710,15 +2258,22 @@ unsafe extern "C" fn _start() -> ! {
     };
     let proxy = Arc::new(Proxy(SpinLock::new(Some(root))));
     mount_rest(proxy.clone());
-    note(format_args!("vfs: / is this vehicle's root over ext2 on partition 2, /boot the boot archive ({ARCHIVE_LEN} bytes), /ktest this vehicle's programs"));
+    note(format_args!("vfs: / is the test's root over ext2 on partition 2, /boot the boot archive ({ARCHIVE_LEN} bytes), /ktest the test's programs"));
     let mut left = Left { files: Vec::new(), gone: Vec::new() };
+    // The PM counter wraps every ~4.69 s, so the clock is read after each
+    // row (sk19-ladder-rv2-4); a single row past that still under-counts.
+    c.us();
     let trunc = truncate_row(&raw);
+    c.us();
     unlink_row(&raw, &trunc, &mut left);
+    c.us();
     let fs2 = remount_row(&spy, &proxy, fs, &left);
+    c.us();
     txn_row(&raw, control, fs2.as_ref());
-    free_row(&raw, pre);
+    c.us();
+    free_row(&raw, pre, &trunc, fs2.is_some());
     drop(fs2);
-    note(format_args!("the rows took {} ms; the drive saw {} reads and {} writes", c.ms(), spy.reads.load(Ordering::Relaxed), writes().len()));
+    note(format_args!("the drive saw {} reads and {} writes", spy.reads.load(Ordering::Relaxed), writes().len()));
     sched::yield_now();
     quiet(ktap::end);
     halt()

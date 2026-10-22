@@ -1,6 +1,7 @@
 //! The scaffold's boot handshake — lab 00's evidence channel. Provided.
 //!
-//! Two fixed lines on COM1, printed by `kernel_main` before your code runs:
+//! Two fixed lines on COM1, printed by `kernel_main` before your code runs
+//! (after the one boot-marker line the provided shim prints through `line` at every entry):
 //! one when the provided kernel comes up, one when the bootloader's framebuffer
 //! handoff checks out. Lab 00 ("Welcome to the machine") grades by looking for
 //! them: if they arrive, your toolchain built a bootable ISO and QEMU ran it —

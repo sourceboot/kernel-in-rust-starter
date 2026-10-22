@@ -10,6 +10,14 @@
 //! interrupts off and popped only once the whole burst is in. And `now_ns`
 //! hours into uptime is graded by `clock.hours`, which sets `TICKS` for one
 //! read with interrupts off and puts it back (2026-10-18, slice 3 vrow06).
+//! Forger round 1 (2026-10-21): `pic.eoi` also reads the master ISR inside
+//! one tick (auto-EOI reads clear), `kbd.fifo`'s full ring must hold 63 or
+//! 64, and `clock.monotonic` counts the IRQ 0 deliveries itself, through the
+//! same borrowed IDT copy, and holds `TICKS` to that count (round 2: the PM
+//! timer bound stays beside it as a sanity check, never the pin). Round 3
+//! (2026-10-21 17:45): `pit.ticks` has no count floor (0 ticks, or 1 with
+//! IRQ 0 still in service, is all it refuses), and `clock.monotonic`'s wait
+//! ends when the CPU has taken the chosen ticks, the PM timer only its guard.
 
 #![no_std]
 #![no_main]
@@ -17,8 +25,8 @@
 #[path = "../shim.rs"]
 mod shim;
 
-use core::arch::asm;
-use core::sync::atomic::Ordering;
+use core::arch::{asm, naked_asm};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use kernel::sync::SpinLock;
 use kernel::time::{self, TICKS};
@@ -161,54 +169,39 @@ ktest!("pit.ticks", fn pit_ticks(t: &mut TestCtx) {
         if c.pm { "PM-timer" } else { "TSC" },
         (status >> 4) & 3
     ));
+    // The count refuses only what the read-back cannot see (ruled 2026-10-21
+    // 17:45, forger round 3): no tick at all, and exactly one tick with IRQ 0
+    // still in service, the PIC waiting for an EOI. The in-service bit is read
+    // from the PIC (OCW3), never inferred from the count. No floor above one:
     // QEMU delivers fewer ticks than the PIT raises when its host timer runs
-    // late (63-67 per 100 ms on the mini over 31 runs, 2026-10-16/17;
-    // 100 of 100 on a Linux host's QEMU 10.2.1, 2026-10-17): the floor
-    // catches a dead or 18.2 Hz PIT, and the readback checks the rate.
-    if n < 25 {
-        // The failure line carries the read-back beside the count, so a red
-        // on a loaded host reads as the host's timer (count low, read-back
-        // right) and not as the learner's PIT (ruled 2026-10-17, CONTRACT
-        // §B.2-06).
-        if n <= 1 && (mode == 2 || mode == 3) && peak > 1193 {
-            // A rate generator that ticked at most once while counting down
-            // from ABOVE 1193 is a slow channel, not a stuck PIC: a reload of
-            // 0 counts from 65,536 (18.2 Hz, one tick per 55 ms), so 100 ms
-            // holds one tick with every EOI sent. The peak is read first, so
-            // this line never blames the EOI for the reload (2026-10-18, s06
-            // vehicle finding (a)).
+    // late (63-67 per 100 ms on the mini at load 3-7; 1, 2, 2 and 9 on honest
+    // kernels at load 24-37; 100 of 100 on a Linux host's QEMU 10.2.1), and
+    // the 18.2 Hz default (1-2 per 100 ms) is the peak row's to refuse: its
+    // reload reads back above 1193 on every boot. CONTRACT appendix (10) has
+    // the measurements.
+    let (imr, isr, ifl) = pic_state();
+    if n == 1 && isr & 1 != 0 {
+        t.fail(format_args!("a tick arrives and is acknowledged: counted 1 in 100 ms — the first tick arrived and no other, and IRQ 0 is still in service (master ISR {isr:#04x}): the PIC is waiting for an EOI that never came"));
+    } else if n == 0 {
+        // No tick: RFLAGS.IF, the master IMR and the read-back say which part
+        // is missing. The peak is read before the handler is blamed, so a
+        // slow channel is never reported as a missing handler (2026-10-18, s06
+        // vehicle finding (a); since forger round 3 no count condition, so the
+        // slow-channel line is the only one beside a read-back above 1193).
+        if !ifl {
+            t.fail(format_args!("a tick arrives: counted 0 in 100 ms, with interrupts off after irq::init (RFLAGS.IF clear) — `sti` never ran"));
+        } else if imr & 1 != 0 {
+            t.fail(format_args!("a tick arrives: counted 0 in 100 ms, with IRQ 0 masked (master IMR {imr:#04x})"));
+        } else if !(mode & 3 == 2 || mode & 3 == 3) {
             t.fail(format_args!(
-                "at least 25 ticks in 100 ms: counted {n}, from a channel in mode {mode} whose count peaked at {peak}, above 1193 — channel 0 is reloading from more than 1193 (a reload of 0, or one that never reached channel 0's data port 0x40, counts from 65,536, 18.2 Hz), so the ticks are slow, not stopped"
+                "a tick arrives: counted 0 in 100 ms; the 8254 read-back says mode {mode}, not a rate generator (mode 2 or 3) — a one-shot or interrupt-on-terminal-count channel fires once; see the mode row below"
             ));
-        } else if n <= 1 && (mode == 2 || mode == 3) {
-            // A rate generator reloading from 1193 that ticked 0 or 1 times:
-            // the PIC's own registers and IF say which. Zero ticks is never
-            // the EOI (no tick ever arrived to acknowledge), and one tick is
-            // the EOI only while IRQ 0 is still in service: a correct kernel
-            // on a loaded host has measured 1 tick in 100 ms with IRQ 0 not
-            // in service, and that is the host's timer (2026-10-18, fix
-            // round sk06-ladder-6).
-            let (imr, isr, ifl) = pic_state();
-            if !ifl {
-                t.fail(format_args!("at least 25 ticks in 100 ms: counted {n}, with interrupts off after irq::init (RFLAGS.IF clear) — `sti` never ran"));
-            } else if imr & 1 != 0 {
-                t.fail(format_args!("at least 25 ticks in 100 ms: counted {n}, with IRQ 0 masked (master IMR {imr:#04x})"));
-            } else if n == 1 && isr & 1 != 0 {
-                t.fail(format_args!("at least 25 ticks in 100 ms: counted 1 — the first tick arrived and no other, and IRQ 0 is still in service (master ISR {isr:#04x}): the PIC is waiting for an EOI that never came"));
-            } else if n == 0 {
-                t.fail(format_args!("at least 25 ticks in 100 ms: counted 0, from a channel in mode {mode} with IRQ 0 open and interrupts on — no tick reached TICKS: the tick handler is not on vector IRQ_BASE, or does not add to TICKS"));
-            } else {
-                t.fail(format_args!("at least 25 ticks in 100 ms: counted {n}; the 8254 read-back says mode {mode}, count peaking at {peak}, IRQ 0 is open and not in service — if the read-back is right, the host's timer dropped the ticks"));
-            }
-        } else if n <= 1 {
+        } else if peak > 1193 {
             t.fail(format_args!(
-                "at least 25 ticks in 100 ms: counted {n}; the 8254 read-back says mode {mode}, not a rate generator (mode 2 or 3) — a one-shot or interrupt-on-terminal-count channel fires once; see the mode row below"
+                "a tick arrives: counted 0 in 100 ms, from a channel in mode {mode} whose count peaked at {peak}, above 1193 — channel 0 is reloading from more than 1193 (a reload of 0, or one that never reached channel 0's data port 0x40, counts from 65,536, 18.2 Hz), so the ticks are slow, not stopped"
             ));
         } else {
-            t.fail(format_args!(
-                "at least 25 ticks in 100 ms: counted {n}; the 8254 read-back says mode {mode}, access {}, count peaking at {peak} (1193 = 1 kHz) — if the read-back is right, the host's timer dropped the ticks",
-                (status >> 4) & 3
-            ));
+            t.fail(format_args!("a tick arrives: counted 0 in 100 ms, from a channel in mode {mode} with IRQ 0 open and interrupts on — no tick reached TICKS: the tick handler is not on vector IRQ_BASE, or does not add to TICKS"));
         }
     }
     t.expect(mode & 3 == 2 || mode & 3 == 3, "channel 0 runs as a rate generator (mode 2) or square wave (mode 3)");
@@ -252,31 +245,313 @@ ktest!("pic.eoi", fn pic_eoi(t: &mut TestCtx) {
     count_eq(t, "ISR samples with IRQ 0 still in service", stuck, 0);
     t.expect_eq("master IMR (only IRQ 0 and 1 unmasked)", kernel::serial::in8(0x21) as u64, 0xfc);
     t.expect_eq("slave IMR (all masked)", kernel::serial::in8(0xa1) as u64, 0xff);
+    if more {
+        in_service_probe(t, &mut c);
+    }
 });
+
+// ── pic.eoi's probe inside one tick (2026-10-21, forger round 1, F2) ───────
+// Between handlers an acknowledged IRQ 0 reads clear, and so does one the PIC
+// acknowledged by itself: with ICW4's auto-EOI bit set (0x03), the 8259
+// clears the in-service bit as the CPU takes the interrupt, so the tick runs
+// with an `eoi` that writes nothing. Inside a tick the two differ. The
+// vehicle loads a copy of the kernel's IDT whose IRQ 0 gate is its own
+// entry, takes one tick there, reads the master ISR (IRQ 0 must be in
+// service), calls the learner's `irq::eoi(0)`, reads it again (IRQ 0 must be
+// clear), and loads the kernel's IDT back. The kernel's table is never
+// written, and its handler misses that one tick.
+
+#[repr(C, packed)]
+struct Dtr {
+    limit: u16,
+    base: u64,
+}
+
+static PROBE_IDT: [[AtomicU64; 2]; 256] = [const { [AtomicU64::new(0), AtomicU64::new(0)] }; 256];
+/// 0 until the probe's tick: then 0x100 | the master ISR on entry, and the
+/// same after `eoi(0)`.
+static PROBE_IN: AtomicU32 = AtomicU32::new(0);
+static PROBE_OUT: AtomicU32 = AtomicU32::new(0);
+
+fn master_isr() -> u8 {
+    use kernel::serial::{in8, out8};
+    out8(0x20, 0x0b); // OCW3: the next read of the command port is the ISR
+    let isr = in8(0x20);
+    out8(0x20, 0x0a); // OCW3: back to the IRR, the power-on default
+    isr
+}
+
+/// The probe's tick, called from `probe_entry` with interrupts off (an
+/// interrupt gate). Every tick that lands here acknowledges itself through
+/// the learner's `eoi(0)`; only the first is recorded.
+extern "C" fn probe_tick() {
+    let isr_in = master_isr();
+    irq::eoi(0);
+    let isr_out = master_isr();
+    if PROBE_IN.load(Ordering::Relaxed) == 0 {
+        PROBE_OUT.store(0x100 | isr_out as u32, Ordering::Relaxed);
+        PROBE_IN.store(0x100 | isr_in as u32, Ordering::Release);
+    }
+}
+
+/// The probe's gate: saves the registers a call may clobber, calls
+/// `probe_tick`, returns from the interrupt. On entry rsp is 8 mod 16 (the
+/// CPU's five words on a 16-aligned stack); nine pushes make the call's
+/// alignment right.
+#[unsafe(naked)]
+extern "C" fn probe_entry() {
+    naked_asm!(
+        "push rax", "push rcx", "push rdx", "push rsi", "push rdi",
+        "push r8", "push r9", "push r10", "push r11",
+        "cld",
+        "call {f}",
+        "pop r11", "pop r10", "pop r9", "pop r8",
+        "pop rdi", "pop rsi", "pop rdx", "pop rcx", "pop rax",
+        "iretq",
+        f = sym probe_tick,
+    )
+}
+
+/// The borrowed IDT: with interrupts off, copy every gate of the kernel's
+/// loaded table into `PROBE_IDT`, let `irq0` rewrite the IRQ 0 gate (it gets
+/// the kernel's two words and returns the copy's), load the copy, and return
+/// the kernel's IDTR for `give_back_idt`. The kernel's table is only read.
+fn borrow_idt(irq0: impl FnOnce(u64, u64) -> (u64, u64)) -> Dtr {
+    let mut old = Dtr { limit: 0, base: 0 };
+    quiet(|| {
+        // SAFETY: sidt stores 10 bytes into `old`.
+        unsafe { asm!("sidt [{}]", in(reg) &mut old, options(nostack, preserves_flags)) };
+        let (base, limit) = (old.base, old.limit as usize);
+        for (v, g) in PROBE_IDT.iter().enumerate() {
+            let (lo, hi) = if v * 16 + 15 <= limit {
+                // SAFETY: the gate lies inside the loaded IDT's limit; a read.
+                unsafe {
+                    let p = (base as *const u64).add(v * 2);
+                    (core::ptr::read_volatile(p), core::ptr::read_volatile(p.add(1)))
+                }
+            } else {
+                (0, 0)
+            };
+            g[0].store(lo, Ordering::Relaxed);
+            g[1].store(hi, Ordering::Relaxed);
+        }
+        let v = irq::IRQ_BASE as usize;
+        let (lo, hi) = irq0(PROBE_IDT[v][0].load(Ordering::Relaxed), PROBE_IDT[v][1].load(Ordering::Relaxed));
+        PROBE_IDT[v][0].store(lo, Ordering::Relaxed);
+        PROBE_IDT[v][1].store(hi, Ordering::Relaxed);
+        let new = Dtr { limit: 256 * 16 - 1, base: PROBE_IDT.as_ptr() as u64 };
+        // SAFETY: the copy holds every gate of the kernel's table, with the
+        // IRQ 0 gate as `irq0` built it; interrupts are off until `quiet`
+        // returns.
+        unsafe { asm!("lidt [{}]", in(reg) &new, options(readonly, nostack, preserves_flags)) };
+    });
+    old
+}
+
+/// Load the kernel's own IDTR back, as `borrow_idt` saved it.
+fn give_back_idt(old: &Dtr) {
+    quiet(|| {
+        // SAFETY: the kernel's own IDTR, as sidt stored it.
+        unsafe { asm!("lidt [{}]", in(reg) old, options(readonly, nostack, preserves_flags)) };
+    });
+}
+
+/// An interrupt gate's two words for `h`, keeping `lo`'s selector, IST and
+/// type bits (16-47) and replacing the offset.
+fn gate_to(lo: u64, h: u64) -> (u64, u64) {
+    ((h & 0xffff) | (lo & 0x0000_ffff_ffff_0000) | ((h >> 16) & 0xffff) << 48, h >> 32)
+}
+
+fn in_service_probe(t: &mut kernel::ktap::TestCtx, c: &mut Clock) {
+    PROBE_IN.store(0, Ordering::Relaxed);
+    let old = borrow_idt(|_, _| {
+        let cs: u64;
+        // SAFETY: reads CS; nothing else.
+        unsafe { asm!("mov {:x}, cs", out(reg) cs, options(nomem, nostack, preserves_flags)) };
+        gate_to((cs & 0xffff) << 16 | 0x8e << 40, probe_entry as extern "C" fn() as usize as u64)
+    });
+    let landed = c.wait(200_000, || PROBE_IN.load(Ordering::Acquire) != 0);
+    give_back_idt(&old);
+    let (pin, pout) = (PROBE_IN.load(Ordering::Acquire), PROBE_OUT.load(Ordering::Relaxed));
+    if !landed {
+        t.fail(format_args!("no tick arrived in 200 ms on the vector IRQ_BASE while the in-service bit was read"));
+        return;
+    }
+    let (isr_in, isr_out) = (pin as u8, pout as u8);
+    t.note(format_args!("pic.eoi: inside a tick, the master ISR read {isr_in:#04x} on entry and {isr_out:#04x} after eoi(0)"));
+    if isr_in & 1 == 0 {
+        t.fail(format_args!(
+            "inside a tick, before any EOI, the master ISR read {isr_in:#04x}: IRQ 0 was not in service — the PIC acknowledged the tick by itself, which is auto-EOI (ICW4 bit 1 set, as in 0x03); with ICW4 = 0x01 the line stays in service until eoi(0)"
+        ));
+    } else if isr_out & 1 != 0 {
+        t.fail(format_args!(
+            "inside a tick, eoi(0) returned with IRQ 0 still in service (master ISR {isr_out:#04x}): eoi(0) wrote no EOI to the master's command port, 0x20"
+        ));
+    }
+    t.expect(isr_in & 1 != 0 && isr_out & 1 == 0, "inside a tick, IRQ 0 is in service until eoi(0) clears it");
+}
+
+// ── clock.monotonic's delivery count (2026-10-21, forger round 2, F4) ──────
+// For the wait, the vehicle borrows the IDT again (as pic.eoi's probe does)
+// and points the IRQ 0 gate at `count_entry`: one locked add to DELIVERED,
+// then a jump to the kernel's own IRQ 0 entry with the CPU's frame and every
+// register untouched, so the kernel's handler runs exactly as it would, EOI
+// and all. TICKS must then move by the number of ticks the CPU took: a host
+// that loses ticks lowers both counts alike (a tick that adds 2 to TICKS read
+// 1.3 times the PM timer on the mini at load 5 but under 1 with 24 hogs, so
+// the PM-timer bound alone was load-dependent). Since forger round 3 (ruled
+// 2026-10-21 17:45) the wait itself ends on delivery progress too: it ends
+// when the CPU has taken the chosen number of ticks, and the PM timer only
+// bounds it as a hang guard (MONO_GUARD_US) that prints "no timer progress".
+// TICKS, DELIVERED and now_ns are read together with interrupts off, so they
+// agree exactly on an honest kernel; the row allows 1 either way.
+
+/// IRQ 0 deliveries taken through `count_entry`.
+static DELIVERED: AtomicU64 = AtomicU64::new(0);
+/// The kernel's own IRQ 0 entry, from its IDT gate: where `count_entry` goes.
+static CHAIN: AtomicU64 = AtomicU64::new(0);
+
+/// The counting gate: count, then continue at the kernel's entry. `lock inc`
+/// changes only the arithmetic flags, which the frame's RFLAGS does not see.
+#[unsafe(naked)]
+extern "C" fn count_entry() {
+    naked_asm!(
+        "lock inc qword ptr [rip + {d}]",
+        "jmp qword ptr [rip + {c}]",
+        d = sym DELIVERED,
+        c = sym CHAIN,
+    )
+}
 
 ktest!("clock.monotonic", fn clock_monotonic(t: &mut TestCtx) {
     let n = 20 + t.pick("clock.monotonic", 100);
     let mut c = Clock::start();
-    let t0 = ticks();
-    c.wait(50_000, || ticks() > t0);
-    let (k0, ns0) = (ticks(), time::now_ns());
+    // The IRQ 0 gate's present bit (47): with none, no tick is counted, the
+    // wait below ends at its guard, and there is nothing to hold TICKS to.
+    let mut present = false;
+    let old = borrow_idt(|lo, hi| {
+        present = lo >> 47 & 1 == 1;
+        if !present {
+            return (lo, hi);
+        }
+        CHAIN.store((lo & 0xffff) | ((lo >> 48) & 0xffff) << 16 | hi << 32, Ordering::Relaxed);
+        gate_to(lo, count_entry as extern "C" fn() as usize as u64)
+    });
+    let (k0, e0, ns0, u0) = quiet(|| (ticks(), DELIVERED.load(Ordering::Relaxed), time::now_ns(), c.us()));
+    // The wait ends on delivery progress: when the CPU has taken n ticks.
+    // The PM timer is only its hang guard: no tick for MONO_STALL_US, or
+    // MONO_GUARD_US in all, ends it with a named line.
     let mut prev = ns0;
     let mut backwards = 0;
-    let reached = c.wait(n * 4_000 + 100_000, || {
+    let (mut seen, mut seen_u, mut gap) = (e0, u0, 0);
+    let mut stalled = false;
+    let (mut last_u, mut paused) = (u0, 0u64);
+    let reached = loop {
         let now = time::now_ns();
         if now < prev {
             backwards += 1;
         }
         prev = now;
-        ticks() >= k0 + n
-    });
-    let ns1 = time::now_ns();
+        let (e, u) = (DELIVERED.load(Ordering::Relaxed), c.us());
+        // This loop only spins: a jump of more than MONO_PAUSE_US between two
+        // of its own turns is time the host did not run this machine, so it
+        // does not count toward the stall (the 2 s ceiling still counts it).
+        if u - last_u > MONO_PAUSE_US {
+            seen_u += u - last_u;
+            paused += u - last_u;
+        }
+        last_u = u;
+        if e != seen {
+            gap = gap.max(u - seen_u);
+            (seen, seen_u) = (e, u);
+        }
+        if e >= e0 + n {
+            break true;
+        }
+        if u - seen_u >= MONO_STALL_US {
+            stalled = true;
+            break false;
+        }
+        if u - u0 >= MONO_GUARD_US {
+            break false;
+        }
+        core::hint::spin_loop();
+    };
+    let (k1, e1, ns1, u1) = quiet(|| (ticks(), DELIVERED.load(Ordering::Relaxed), time::now_ns(), c.us()));
+    give_back_idt(&old);
     let d = ns1.wrapping_sub(ns0);
-    t.note(format_args!("clock.monotonic: waited {n} ticks (chosen by this run's nonce); now_ns moved {d} ns"));
-    t.expect(reached, "the chosen number of ticks arrived");
+    let real = (u1 - u0) * 1000;
+    let (moved, taken) = (k1.wrapping_sub(k0), e1 - e0);
+    t.note(format_args!(
+        "clock.monotonic: waited {n} ticks (chosen by this run's nonce); TICKS moved {moved} while the CPU took IRQ 0 {taken} times; now_ns moved {d} ns in {real} ns of the {} clock; the longest stretch between two ticks was {gap} us; host pauses {paused} us, not counted toward the stall",
+        if c.pm { "PM-timer" } else { "TSC" }
+    ));
+    if stalled {
+        t.fail(format_args!(
+            "no timer progress: the CPU took IRQ 0 {taken} times of the {n} waited for, then none for {} ms — if pit.ticks or pic.eoi is red, the tick stopped and that row says why; if both pass, the tick is fine and the host paused this machine for that long (a sleeping or overloaded host): run it again",
+            MONO_STALL_US / 1000
+        ));
+    } else if !reached {
+        t.fail(format_args!(
+            "no timer progress: the CPU took IRQ 0 {taken} times of the {n} waited for in {} ms — the ticks come far below 1000 Hz: if pit.ticks's read-back shows a count peaking above 1193, that is the reload; if it peaks at 1193, the host is running this machine too slowly to grade: run it again on a quieter machine",
+            real / 1_000_000
+        ));
+    }
     count_eq(t, "now_ns readings that went backwards", backwards, 0);
-    t.expect(d + 1_000_000 >= n * 999_000 && d <= (n + 1) * 1_000_000, "now_ns moved by the ticks waited, at about 1 ms each");
+    t.expect(d + 1_000_000 >= taken * 999_000 && d <= (taken + 1) * 1_000_000, "now_ns moved by the ticks the CPU took, at about 1 ms each");
+    // The pin (forger round 2, F4): one count per tick the CPU took, 1
+    // either way as ruled (read together, an honest kernel's two are equal).
+    if present && moved > taken + 1 {
+        t.fail(format_args!(
+            "TICKS moved {moved} while the CPU took IRQ 0 {taken} times: TICKS grows by more than one per tick, or something besides the tick handler adds to it"
+        ));
+    } else if present && moved + 1 < taken {
+        t.fail(format_args!(
+            "TICKS moved {moved} while the CPU took IRQ 0 {taken} times: the tick handler does not add one to TICKS on every tick"
+        ));
+    }
+    t.expect(!present || moved.abs_diff(taken) <= 1, "TICKS moves by one for every tick the CPU takes");
+    // A sanity check beside the pin, never the pin: ticks can be lost, never
+    // gained (the PIT and the PM timer run off one clock in the machine), so
+    // now_ns may fall behind the PM timer and must not run ahead of it by
+    // more than MONO_SLACK. A host that loses ticks only lowers now_ns here,
+    // so this cannot refuse an honest kernel; on its own it missed a doubled
+    // tick wherever the host lost half its ticks (forger round 1, F4).
+    if reached && d > real + real / MONO_SLACK_DIV + MONO_SLACK_NS {
+        t.fail(format_args!(
+            "now_ns moved {d} ns while {real} ns passed on the PM timer: the clock runs {}.{:02} times real time — TICKS grows by more than one per tick, or something besides the tick adds to it",
+            d / real.max(1),
+            d % real.max(1) * 100 / real.max(1)
+        ));
+    }
+    t.expect(!reached || d <= real + real / MONO_SLACK_DIV + MONO_SLACK_NS, "now_ns runs no faster than real time");
 });
+
+/// clock.monotonic's margin over the PM timer: now_ns may lead it by
+/// 1/MONO_SLACK_DIV of the window plus MONO_SLACK_NS. Measured 2026-10-21
+/// (the mini, the rubric's comment on clock.monotonic has the numbers): an
+/// honest kernel reads 0.26–0.69 of PM time on the mini as its load rises,
+/// and about 0.99985 on Linux, where QEMU loses no ticks; 2 ms covers a
+/// tick merged at either end of the window.
+const MONO_SLACK_DIV: u64 = 50;
+const MONO_SLACK_NS: u64 = 2_000_000;
+
+/// clock.monotonic's hang guard (forger round 3, ruled 2026-10-21 17:45): the
+/// wait for the chosen ticks gives up, printing "no timer progress", after
+/// MONO_STALL_US with no tick at all or MONO_GUARD_US in all (PM-timer time).
+/// A broken tick ends the wait at the first, so its run still finishes inside
+/// the rubric's timeout; a slow one (the 18.2 Hz default, when the nonce asks
+/// for more ticks than it delivers in 2 s; pit.ticks' peak line refuses it
+/// either way) at the second. The
+/// honest kernels' longest wait and longest stretch between two ticks are in
+/// CONTRACT appendix (10): the guard did not fire on any honest boot measured
+/// there. Since the round-4 close-out (the round-3 TL review, finding 1, Fix A)
+/// a host pause — a jump of more than MONO_PAUSE_US between two turns of the
+/// spinning wait — does not count toward MONO_STALL_US (it fired on an honest
+/// kernel after one 700 ms pause before); MONO_GUARD_US is still host time.
+const MONO_STALL_US: u64 = 500_000;
+const MONO_GUARD_US: u64 = 2_000_000;
+const MONO_PAUSE_US: u64 = 20_000;
 
 /// `TICKS × 1193 × 10⁹` passes `u64::MAX` at 15,462,484 ticks (4 h 18 min).
 const U64_TICKS: u64 = 15_462_484;
@@ -392,7 +667,7 @@ impl core::fmt::Display for Pops<'_> {
     }
 }
 
-/// The last burst's size: more than any ring a learner here builds holds.
+/// The last burst's size: more than the 64-slot ring holds.
 const FULL: usize = 300;
 
 ktest!("kbd.fifo", fn kbd_fifo(t: &mut TestCtx) {
@@ -402,9 +677,9 @@ ktest!("kbd.fifo", fn kbd_fifo(t: &mut TestCtx) {
     // the slot array's end. Sizes and codes come from the nonce: set-1 make
     // codes 0x02-0x39, bit 7 set on about half. Each burst must come back
     // oldest first, then the ring empty. Last, one burst of FULL with no pop
-    // between, more than any ring here holds: what comes back must be its
-    // OLDEST part, in order — a full ring drops the newest — whatever the
-    // ring's size (one slot kept empty is as right as all 64 used).
+    // between, more than the ring holds: what comes back must be its OLDEST
+    // part, in order — a full ring drops the newest — and 64 or 63 of them
+    // (one slot kept empty is as right as all 64 used).
     let mut z = t.derived("kbd.fifo");
     let (mut total, mut bursts, mut bad) = (0usize, 0usize, 0u64);
     let mut first: Option<(usize, usize, [u8; 8], [Option<u8>; 9])> = None;
@@ -489,6 +764,16 @@ ktest!("kbd.fifo", fn kbd_fifo(t: &mut TestCtx) {
         }
     }
     t.expect(m > 0 && j.is_none(), "a full ring hands back the oldest scancodes pushed, in order, and drops the newest");
+    // The ring is 64 slots (the page's task 4; one kept empty is as right),
+    // so a full ring holds 63 or 64. A bigger ring never fills under this
+    // burst, and its full check is never run (2026-10-21, forger round 1, F1:
+    // 1024 slots with no full check came back 300 of 300).
+    if j.is_none() && m > 0 && m != 63 && m != 64 {
+        t.fail(format_args!(
+            "of the {FULL} pushed with no pop, the oldest {m} came back in order: a ring of 64 slots holds 64 when full, or 63 if one slot is kept empty"
+        ));
+    }
+    t.expect(j.is_some() || m == 63 || m == 64, "the full ring held 64 scancodes (63 with one slot kept empty)");
 });
 
 ktest!("kbd.echo.paced", fn kbd_echo(t: &mut TestCtx) {

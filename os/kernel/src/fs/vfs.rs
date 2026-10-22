@@ -3,7 +3,7 @@
 //!
 //! An `Inode` is a file or a directory of some file system, behind a trait
 //! object so the code above it never asks which one: the boot archive
-//! (lab 13), ext2 (17, 18), /proc and /dev (22). The trait is written whole
+//! (lab 13), ext2 (17–21), /proc and /dev (22). The trait is written whole
 //! here, every method a later lab needs; the
 //! ones a read-only file system has no use for come with a default that
 //! refuses the way Linux does (`-EROFS` for a write, `-ENOTTY` for an

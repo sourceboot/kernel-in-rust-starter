@@ -31,9 +31,12 @@
 //! the walk. Eight rows, in this order:
 //!
 //!   1 `log.header.shape` (plain) — two controls on a memory device of this
-//!     file's: a commit writes, in order, the data block, the two logged
-//!     blocks to slots 0 and 1, the header (`MAGIC`, `n` = 2, the two home
-//!     numbers, zeros), the two homes, and the header with `n` = 0; recovery
+//!     file's: a commit writes the data block and the two logged blocks to
+//!     slots 0 and 1, then the header (`MAGIC`, `n` = 2, the two home
+//!     numbers in the slots' order, zeros), then the two homes, then the
+//!     header with `n` = 0, last — each step's blocks once, in any order
+//!     inside the step (fix round 1, 2026-10-19: the set and the barriers,
+//!     not the order the blocks were logged); recovery
 //!     of a two-block header replays both through the cache and zeroes the
 //!     header, a second recovery writes nothing, and a header without the
 //!     magic is `-EINVAL`. Then the disk: the operation, with
@@ -71,7 +74,14 @@
 //!     tree as it was. Controls on the memory device first: an aborted
 //!     operation writes nothing and its block reads back as the device holds
 //!     it, the log commits again after it, and a transaction whose inner
-//!     operation aborts commits nothing of the operations before it. Then
+//!     operation aborts commits nothing of the operations before it; a
+//!     commit the device refuses before its header reads its block back,
+//!     and the next commit is an error that writes nothing and reads its
+//!     block back (the log is dead until it is attached again); attached
+//!     again each time, a commit refused at its home write, at its zeroed
+//!     header, at its slot and at its data sync (the last two read block 7
+//!     back as the device holds it), and after each the next two commits
+//!     are errors that write nothing (fix rounds 2-4). Then
 //!     the disk, after a remount (a cold cache): one `write_at` that grows
 //!     `/tmp/hdr` by a block, with `Wrap` refusing the first read of a block
 //!     this file's walk says is free — the allocator has already taken the
@@ -395,7 +405,7 @@ fn raw_block(b: u64) -> Result<Box<[u8; BLOCK_SIZE]>, String> {
         });
         Ok(buf)
     } else {
-        Err(format!("this vehicle's own read of fs block {b} failed"))
+        Err(format!("the test's own read of fs block {b} failed"))
     }
 }
 
@@ -417,7 +427,7 @@ impl Raw {
         let sb = raw_block(0)?;
         let s = &sb[1024..2048];
         if le16(s, 56) != 0xef53 {
-            return Err(String::from("fs block 0 holds no ext2 superblock (magic) as this vehicle reads it"));
+            return Err(String::from("fs block 0 holds no ext2 superblock (magic) as the test reads it"));
         }
         let gd = raw_block(1)?;
         Ok(Raw {
@@ -893,15 +903,20 @@ impl BlockDevice for Wrap {
 }
 
 /// The controls' device: 64 blocks in memory (zeros until written), and
-/// every write in order.
+/// every write in order. While `left` is `Some(k)`, it takes `k` more
+/// writes and refuses every one after them (row 8's refused commit).
 struct MemDisk {
     blocks: SpinLock<BTreeMap<u64, Box<[u8; BLOCK_SIZE]>>>,
     writes: SpinLock<Vec<(u64, Box<[u8; BLOCK_SIZE]>)>>,
+    left: SpinLock<Option<u32>>,
 }
 
 impl MemDisk {
     fn new() -> MemDisk {
-        MemDisk { blocks: SpinLock::new(BTreeMap::new()), writes: SpinLock::new(Vec::new()) }
+        MemDisk { blocks: SpinLock::new(BTreeMap::new()), writes: SpinLock::new(Vec::new()), left: SpinLock::new(None) }
+    }
+    fn refuse_after(&self, k: Option<u32>) {
+        quiet(|| *self.left.lock() = k);
     }
     /// Block `n` holds `b`, as if written long ago.
     fn seed(&self, n: u64, b: Box<[u8; BLOCK_SIZE]>) {
@@ -925,6 +940,17 @@ impl BlockDevice for MemDisk {
     }
     fn write_block(&self, n: u64, buf: &[u8; BLOCK_SIZE]) -> Result<(), Errno> {
         if n >= 64 {
+            return Err(EIO);
+        }
+        let refuse = quiet(|| match &mut *self.left.lock() {
+            Some(0) => true,
+            Some(k) => {
+                *k -= 1;
+                false
+            }
+            None => false,
+        });
+        if refuse {
             return Err(EIO);
         }
         quiet(|| {
@@ -967,20 +993,63 @@ fn c_slots() -> [u64; LOGSIZE] {
     core::array::from_fn(|i| 41 + i as u64)
 }
 
-/// The writes `md` saw against the sequence expected: (block, bytes).
-fn same_writes(bad: &mut Vec<String>, what: &str, got: &[(u64, Box<[u8; BLOCK_SIZE]>)], want: &[(u64, Box<[u8; BLOCK_SIZE]>)]) {
-    let blocks: Vec<u64> = got.iter().map(|w| w.0).collect();
-    let wblocks: Vec<u64> = want.iter().map(|w| w.0).collect();
-    if blocks != wblocks {
-        bad.push(format!("{what}: the device saw writes to blocks {blocks:?}, expected {wblocks:?}"));
-        return;
+type Blk = (u64, Box<[u8; BLOCK_SIZE]>);
+
+/// One step's writes against the blocks it must write, each once, in any
+/// order: what is wrong, or nothing.
+fn same_set(got: &[Blk], want: &[Blk]) -> Option<String> {
+    let mut g: Vec<&Blk> = got.iter().collect();
+    let mut w: Vec<&Blk> = want.iter().collect();
+    g.sort_by_key(|x| x.0);
+    w.sort_by_key(|x| x.0);
+    let gb: Vec<u64> = g.iter().map(|x| x.0).collect();
+    let wb: Vec<u64> = w.iter().map(|x| x.0).collect();
+    if gb != wb {
+        return Some(format!("blocks {gb:?}, expected {wb:?}, each once, in any order"));
     }
-    for (k, (g, w)) in got.iter().zip(want).enumerate() {
-        if g.1 != w.1 {
-            let i = (0..BLOCK_SIZE).find(|&i| g.1[i] != w.1[i]).unwrap_or(0);
-            bad.push(format!("{what}: write {} (block {}) differs at byte {i}: {:#04x}, expected {:#04x}", k + 1, g.0, g.1[i], w.1[i]));
-            return;
+    for (a, b) in g.iter().zip(&w) {
+        if let Some(i) = (0..BLOCK_SIZE).find(|&i| a.1[i] != b.1[i]) {
+            return Some(format!("block {} differs at byte {i}: {:#04x}, expected {:#04x}", a.0, a.1[i], b.1[i]));
         }
+    }
+    None
+}
+
+/// A commit's writes on the memory device against the contract's barriers
+/// (§A.7 "The log"; fix round 1, 2026-10-19: the SET of each step, not an
+/// order inside it): the data blocks and the slots, then the header naming
+/// the logged blocks in some order with slot i holding home i's bytes,
+/// then the homes, then the empty header, last.
+fn commit_writes(bad: &mut Vec<String>, what: &str, got: &[Blk], data: &[Blk], logged: &[Blk]) {
+    let blocks: Vec<u64> = got.iter().map(|w| w.0).collect();
+    let hdrs: Vec<usize> = (0..got.len()).filter(|&k| got[k].0 == C_HDR).collect();
+    if hdrs.len() != 2 || hdrs[1] + 1 != got.len() {
+        return bad.push(format!("{what}: the device saw writes to blocks {blocks:?}, expected the header block {C_HDR} written twice, the second time last"));
+    }
+    let (h, hb) = (hdrs[0], &got[hdrs[0]].1);
+    let n = logged.len();
+    let order: Vec<u64> = (0..n).map(|i| le32(&hb[..], 12 + 4 * i)).collect();
+    let mut named = order.clone();
+    named.sort();
+    let mut homes: Vec<u64> = logged.iter().map(|l| l.0).collect();
+    homes.sort();
+    if named != homes || hb[..] != header_bytes(&order)[..] {
+        return bad.push(format!(
+            "{what}: the first header written was magic {:#x}, n {}, homes {order:?}; expected magic {MAGIC:#x}, n {n}, the homes {homes:?} in any order, zeros after",
+            le64(&hb[..], 0),
+            le32(&hb[..], 8)
+        ));
+    }
+    let bytes = |b: u64| logged.iter().find(|l| l.0 == b).map(|l| l.1.clone()).unwrap_or_else(|| filled(0));
+    let pre: Vec<Blk> = data.iter().cloned().chain(order.iter().enumerate().map(|(i, b)| (41 + i as u64, bytes(*b)))).collect();
+    if let Some(why) = same_set(&got[..h], &pre) {
+        bad.push(format!("{what}: before the commit header, the device saw writes to {why} (the data blocks, and slot i holding the header's home i)"));
+    }
+    if let Some(why) = same_set(&got[h + 1..hdrs[1]], logged) {
+        bad.push(format!("{what}: between the commit header and the empty one, the device saw writes to {why} (the homes)"));
+    }
+    if got[hdrs[1]].1[..] != header_bytes(&[])[..] {
+        bad.push(format!("{what}: the last header written is not MAGIC, n = 0, zeros"));
     }
 }
 
@@ -1017,8 +1086,7 @@ fn control_commit_abort(bad: &mut Vec<String>, abad: &mut Vec<String>) {
         Ok(Err(e)) => bad.push(format!("the commit's end_op() returned {}", errno_text(e))),
         Ok(Ok(())) => {}
     }
-    let want = [(12, filled(0x12)), (41, filled(0x17)), (42, filled(0x19)), (C_HDR, header_bytes(&[7, 9])), (7, filled(0x17)), (9, filled(0x19)), (C_HDR, header_bytes(&[]))];
-    same_writes(bad, "a commit of blocks 7 and 9 with data block 12", &md.take(), &want);
+    commit_writes(bad, "a commit of blocks 7 and 9 with data block 12", &md.take(), &[(12, filled(0x12))], &[(7, filled(0x17)), (9, filled(0x19))]);
     // Row 8's controls from here: an abort writes nothing and reads the
     // block back; then a commit again.
     let bad = abad;
@@ -1060,8 +1128,7 @@ fn control_commit_abort(bad: &mut Vec<String>, abad: &mut Vec<String>) {
         Ok(Err(e)) => bad.push(format!("the commit after an abort: end_op() returned {}", errno_text(e))),
         Ok(Ok(())) => {}
     }
-    let want = [(41, filled(0x29)), (C_HDR, header_bytes(&[9])), (9, filled(0x29)), (C_HDR, header_bytes(&[]))];
-    same_writes(bad, "the commit after an abort", &md.take(), &want);
+    commit_writes(bad, "the commit after an abort", &md.take(), &[], &[(9, filled(0x29))]);
     // Nested: the outer transaction's earlier operation is undone with it.
     let r = quiet(|| -> Result<Result<(), Errno>, String> {
         log::begin_op();
@@ -1097,6 +1164,134 @@ fn control_commit_abort(bad: &mut Vec<String>, abad: &mut Vec<String>) {
             _ => {}
         }
     }
+}
+
+/// Row 8's last control (fix round 1, 2026-10-19): a commit the device
+/// refuses before its header reads its logged block back, and the log then
+/// commits nothing — a second commit is an error, writes nothing and reads
+/// its block back — until it is attached again. Fix rounds 2-4: the same
+/// after a commit refused at its home write, at its zeroed header, at its
+/// slot and at its data sync, for the next two commits; the last two read
+/// their block back.
+fn control_refused(bad: &mut Vec<String>) {
+    let md = Arc::new(MemDisk::new());
+    md.seed(7, filled(0x07));
+    md.seed(9, filled(0x09));
+    let dev: Arc<dyn BlockDevice> = md.clone();
+    let cache = Arc::new(Cache::new(dev.clone(), 8));
+    log::attach_log(cache.clone(), Log::new(dev.clone(), C_HDR, c_slots()));
+    let get = |n: u64| cache.get(n).map_err(|e| format!("the control's own Cache::get({n}) returned {}", errno_text(e)));
+    let one = |n: u64, v: u8| {
+        quiet(|| -> Result<Result<(), Errno>, String> {
+            log::begin_op();
+            let a = get(n)?;
+            a.data().fill(v);
+            log::log_write(&a);
+            drop(a);
+            Ok(log::end_op())
+        })
+    };
+    // The device takes one write and refuses the rest: a commit of one
+    // logged block writes its slot and needs the header next.
+    md.refuse_after(Some(1));
+    let r = one(7, 0xC7);
+    md.refuse_after(None);
+    match r {
+        Err(why) => return bad.push(why),
+        Ok(Ok(())) => bad.push(String::from("a commit whose header the device refused: end_op() returned Ok")),
+        Ok(Err(_)) => {}
+    }
+    md.take();
+    match get(7) {
+        Ok(a) if a.data()[0] != 0x07 || a.data()[4095] != 0x07 => bad.push(format!(
+            "after a commit the device refused before its header, block 7 in the cache holds {:#04x}, and the device 0x07",
+            a.data()[0]
+        )),
+        Err(why) => return bad.push(why),
+        _ => {}
+    }
+    // The device takes writes again; the log must not.
+    match one(9, 0xD9) {
+        Err(why) => return bad.push(why),
+        Ok(Ok(())) => bad.push(String::from("the commit after a refused one: end_op() returned Ok, before the log was attached again")),
+        Ok(Err(_)) => {}
+    }
+    let ws = md.take();
+    if !ws.is_empty() {
+        bad.push(format!("the commit after a refused one wrote to blocks {:?}, before the log was attached again", ws.iter().map(|w| w.0).collect::<Vec<_>>()));
+    }
+    match get(9) {
+        Ok(a) if a.data()[0] != 0x09 => bad.push(format!("after the commit that followed a refused one, block 9 in the cache holds {:#04x}, and the device 0x09", a.data()[0])),
+        Err(why) => return bad.push(why),
+        _ => {}
+    }
+    // Fix rounds 2-4 (2026-10-19): every refusal point stops the log.
+    // Attached again each time, a commit the device refuses at its home
+    // write (the slot and header land), at its zeroed header (slot, header
+    // and home land), at its slot (nothing taken) and at its data
+    // `Cache::sync` (a dirty data block, nothing taken). After each, the
+    // next two commits must be refused and write nothing; after the last
+    // two, which fail before the header, block 7 reads back as the device
+    // holds it.
+    let after = |what: &str, bad: &mut Vec<String>| {
+        for (nth, v) in [("commit", 0xF9u8), ("second commit", 0xF8)] {
+            match one(9, v) {
+                Err(why) => return bad.push(why),
+                Ok(Ok(())) => return bad.push(format!("the {nth} after one refused at its {what}: end_op() returned Ok, before the log was attached again")),
+                Ok(Err(_)) => {}
+            }
+            let ws = md.take();
+            if !ws.is_empty() {
+                return bad.push(format!("the {nth} after one refused at its {what} wrote to blocks {:?}, before the log was attached again", ws.iter().map(|w| w.0).collect::<Vec<_>>()));
+            }
+        }
+    };
+    let read_back = |what: &str, bad: &mut Vec<String>| match get(7) {
+        Ok(a) if a.data()[0] != md.block(7)[0] || a.data()[4095] != md.block(7)[4095] => bad.push(format!(
+            "after a commit the device refused at its {what}, block 7 in the cache holds {:#04x}, and the device {:#04x}",
+            a.data()[0],
+            md.block(7)[0]
+        )),
+        Err(why) => bad.push(why),
+        _ => {}
+    };
+    for (k, v, what, back) in [(2u32, 0xE2u8, "home write", false), (3, 0xE3, "zeroed header", false), (0, 0xE0, "slot write", true)] {
+        log::attach_log(cache.clone(), Log::new(dev.clone(), C_HDR, c_slots()));
+        md.refuse_after(Some(k));
+        let r = one(7, v);
+        md.refuse_after(None);
+        match r {
+            Err(why) => return bad.push(why),
+            Ok(Ok(())) => bad.push(format!("a commit whose {what} the device refused: end_op() returned Ok")),
+            Ok(Err(_)) => {}
+        }
+        md.take();
+        if back {
+            read_back(what, bad);
+        }
+        after(what, bad);
+    }
+    log::attach_log(cache.clone(), Log::new(dev.clone(), C_HDR, c_slots()));
+    md.refuse_after(Some(0));
+    let r = quiet(|| -> Result<Result<(), Errno>, String> {
+        log::begin_op();
+        let (a, d) = (get(7)?, get(11)?);
+        a.data().fill(0xB7);
+        log::log_write(&a);
+        d.data().fill(0xBB);
+        cache.write(&d);
+        drop((a, d));
+        Ok(log::end_op())
+    });
+    md.refuse_after(None);
+    match r {
+        Err(why) => return bad.push(why),
+        Ok(Ok(())) => bad.push(String::from("a commit whose data write the device refused: end_op() returned Ok")),
+        Ok(Err(_)) => {}
+    }
+    md.take();
+    read_back("data write", bad);
+    after("data write", bad);
 }
 
 fn control_recover(bad: &mut Vec<String>) {
@@ -1276,6 +1471,7 @@ fn remount(wrap: &Arc<Wrap>, fs: Arc<Ext2>) -> Result<Arc<Ext2>, String> {
 fn controls() -> (Vec<String>, Vec<String>) {
     let (mut bad, mut abad) = (Vec::new(), Vec::new());
     control_commit_abort(&mut bad, &mut abad);
+    control_refused(&mut abad);
     control_recover(&mut bad);
     (bad, abad)
 }
@@ -1623,7 +1819,6 @@ unsafe extern "C" fn _start() -> ! {
     serial::init();
     ktap::begin(PLAN);
     prelude();
-    let mut c = Clock::new();
     let raw = Raw::open().unwrap_or_else(|why| stop(1, &format!("disk: {why}")));
     let lm = log_map(&raw).unwrap_or_else(|why| stop(1, &format!("the log: {why}")));
     let drive: Arc<dyn BlockDevice> = match quiet(Ata::probe) {
@@ -1645,7 +1840,7 @@ unsafe extern "C" fn _start() -> ! {
     // The disk as written must agree with itself before anything is judged.
     match scan(&raw).and_then(|s| agree(&raw, &s)) {
         Ok(v) if v.is_empty() => {}
-        Ok(v) => stop(1, &format!("this file's check of the disk as written disagrees (the vehicle is wrong): {}", v.join("; "))),
+        Ok(v) => stop(1, &format!("this file's check of the disk as written disagrees (the test is wrong): {}", v.join("; "))),
         Err(why) => stop(1, &why),
     }
     // Rows 1 and 8's controls, before the learner's mount.
@@ -1660,7 +1855,6 @@ unsafe extern "C" fn _start() -> ! {
     count_row(&counts);
     let fs = abort_row(&raw, &wrap, fs, abad).unwrap_or_else(|_| stop(9, ""));
     drop(fs);
-    note(format_args!("the rows took {} ms", c.ms()));
     sched::yield_now();
     quiet(ktap::end);
     halt()

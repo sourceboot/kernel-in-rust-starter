@@ -169,12 +169,26 @@ fn response<R>(req: &ReqCell<Request<R>>) -> Option<&'static R> {
     }
 }
 
-/// Validate the Limine handoff and fill BootInfo. Halts (never returns) if
-/// the bootloader gave us nothing to stand on.
+/// The line the grader reads as "this kernel reached its entry point" (its
+/// boot marker). A failing check whose serial output lacks it is reported
+/// as a kernel that never started, so it is printed once, first.
+const BOOT_MARKER: &str = "[BOOT] reached kernel_entry";
+
+/// Print the boot marker, then validate the Limine handoff and fill BootInfo.
+/// Halts (never returns) if the bootloader gave us nothing to stand on.
+///
+/// Every binary's `_start` calls this before anything else, so the marker is
+/// the kernel's first line on COM1 and precedes all of your code. It goes out
+/// through the provided handshake writer (kernel/src/handshake.rs): its own
+/// port I/O, no UART set-up, nothing of your serial.rs, so it is there at
+/// every lab, before lab 02's driver exists, and leaves the device as it
+/// found it.
 ///
 /// # Safety
 /// Call once, from `_start`, before anything reads BOOT_INFO.
 pub unsafe fn boot_info() -> &'static BootInfo {
+    kernel::handshake::line(BOOT_MARKER);
+
     let supported = core::ptr::read_volatile(&(*BASE_REVISION.0.get())[2]) == 0;
     if !supported {
         kernel::hcf();

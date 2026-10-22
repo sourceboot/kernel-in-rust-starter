@@ -63,13 +63,23 @@
 //!     that says what was listed: a self-report. Lab 21's recovery rows
 //!     sweep create + a one-block write_at + unlink, so they re-grade the
 //!     create and allocation writes, never the pointer blocks (this row
-//!     alone; CONTRACT §B.2-18, corrected 2026-10-19).
+//!     alone; CONTRACT §B.2-18, corrected 2026-10-19). Last, the disk
+//!     against the drive (added 2026-10-22, slice 5c; sk18-forger F3): every
+//!     metadata block — the superblock, the descriptor, both bitmaps, the
+//!     inode table, every directory and pointer block — must hold on the
+//!     disk, read by this file's own PIO, the bytes of the last write that
+//!     reached the drive through the device the mount was handed, or, if
+//!     none did, what it held before the mount. A write that goes around
+//!     that device (a second driver of the learner's own) leaves bytes no
+//!     write through it put there.
 //!   3 `ext2.alloc.maps.agree` (plain) — after rows 1 and 2's writes, this
 //!     file's walk of the whole tree from the root against the disk: every
 //!     bit of both bitmaps, the superblock's and the descriptor's free
 //!     counts and the directory count, every link count and `i_blocks`, no
 //!     block claimed twice. The same check on the disk before the mount is
-//!     this file's control.
+//!     this file's control. Before that control, this file sets part of the
+//!     free run aside (below), so the bitmaps are not one run of set bits
+//!     then clear bits and the count of used bits is not the first free one.
 //!   4 `ext2.write.enospc` (plain) — a second mount of the partition by
 //!     the learner's `Ext2::mount`, over a device of this file's that keeps
 //!     every write in memory (the disk is never written through it) and
@@ -81,6 +91,27 @@
 //!     what fits in its last block and answers that count, the size grown
 //!     by exactly that. Last, because the mount attaches the log to its own
 //!     cache.
+//!
+//! Before the mount, and before the control, this file's own PIO changes the
+//! disk as written in two ways, and puts both back after the last row
+//! (added 2026-10-22, slice 5c; sk18-forger F1 and F2, ledger G1258 and
+//! G1259):
+//!
+//!   - it marks used `SET_BLOCKS` blocks and `SET_INODES` inodes a little
+//!     above the first free one (`GAP_BLOCKS` and `GAP_INODES` free below
+//!     them), with the free counts moved to match, and every walk of the
+//!     tree here counts them in use. An allocator that takes "the number of
+//!     used bits" from the free counts, and never reads a bit, then hands
+//!     out a block or an inode that is already taken;
+//!   - it fills the first `FILLED` free blocks — the ones a lowest-free
+//!     allocator takes in rows 1 and 2 — with a nonce-seeded pattern that is
+//!     never printed, every 32-bit word of it past the file system's last
+//!     block. A new block that is not zeroed then shows it: a pointer block
+//!     whose unused entries point past the file system, or a partly
+//!     written data block whose other bytes are not zero.
+//!
+//! After the rows, the set-aside bits are cleared, the counts moved back,
+//! and every filled block still free is zeroed again.
 //!
 //! The course also runs `e2fsck -fn` on the copy's partition 2 after the
 //! boot (measured, not graded).
@@ -376,6 +407,73 @@ fn in16(port: u16) -> u16 {
     v
 }
 
+fn out16(port: u16, v: u16) {
+    // SAFETY: a 16-bit port write of the primary ATA bus; no memory touched.
+    unsafe { asm!("out dx, ax", in("dx") port, in("ax") v, options(nomem, nostack, preserves_flags)) };
+}
+
+/// The disk's 4 KiB block `n`, written by this file's own PIO (28-bit LBA,
+/// polled, interrupts off, then a cache flush): never the learner's driver.
+fn raw_disk_write(n: u64, buf: &[u8; BLOCK_SIZE]) -> bool {
+    quiet(|| {
+        let lba = n * 8;
+        let idle = || -> Option<u8> {
+            for _ in 0..20_000_000u32 {
+                let s = in8(0x1f7);
+                if s & 0x80 == 0 {
+                    return Some(s);
+                }
+            }
+            None
+        };
+        let drq = || -> bool {
+            for _ in 0..20_000_000u32 {
+                let s = in8(0x1f7);
+                if s & 0x80 == 0 {
+                    if s & 0x21 != 0 {
+                        return false;
+                    }
+                    if s & 0x08 != 0 {
+                        return true;
+                    }
+                }
+            }
+            false
+        };
+        let settle = || {
+            for _ in 0..4 {
+                in8(0x3f6);
+            }
+        };
+        if idle().is_none() {
+            return false;
+        }
+        out8(0x1f6, 0xe0 | ((lba >> 24) & 0x0f) as u8);
+        settle();
+        out8(0x1f2, 8);
+        out8(0x1f3, lba as u8);
+        out8(0x1f4, (lba >> 8) as u8);
+        out8(0x1f5, (lba >> 16) as u8);
+        out8(0x1f7, 0x30);
+        for sector in buf.chunks_exact(512) {
+            settle();
+            if !drq() {
+                return false;
+            }
+            for pair in sector.chunks_exact(2) {
+                out16(0x1f0, u16::from_le_bytes([pair[0], pair[1]]));
+            }
+        }
+        settle();
+        if !matches!(idle(), Some(s) if s & 0x21 == 0) {
+            return false;
+        }
+        out8(0x1f7, 0xe7);
+        settle();
+        matches!(idle(), Some(s) if s & 0x21 == 0)
+    })
+}
+
 /// The disk's 4 KiB block `n`, read by this file's own PIO (28-bit LBA,
 /// polled, interrupts off): never the learner's driver.
 fn raw_disk_block(n: u64, buf: &mut [u8; BLOCK_SIZE]) -> bool {
@@ -443,7 +541,16 @@ fn raw_block(b: u64) -> Result<Box<[u8; BLOCK_SIZE]>, String> {
     if raw_disk_block(P2_BLOCK0 + b, &mut buf) {
         Ok(buf)
     } else {
-        Err(format!("this vehicle's own read of fs block {b} failed"))
+        Err(format!("the test's own read of fs block {b} failed"))
+    }
+}
+
+/// Partition 2's fs block `b`, written raw.
+fn raw_put(b: u64, buf: &[u8; BLOCK_SIZE]) -> Result<(), String> {
+    if raw_disk_write(P2_BLOCK0 + b, buf) {
+        Ok(())
+    } else {
+        Err(format!("the test's own write of fs block {b} failed"))
     }
 }
 
@@ -458,6 +565,10 @@ struct Raw {
     blocks: u64,
     inodes: u64,
     first_ino: u64,
+    /// Marked used by this file before the mount (`prepare`); every walk of
+    /// the tree here counts them in use.
+    set_blocks: BTreeSet<u64>,
+    set_inodes: BTreeSet<u64>,
 }
 
 impl Raw {
@@ -465,7 +576,7 @@ impl Raw {
         let sb = raw_block(0)?;
         let s = &sb[1024..2048];
         if le16(s, 56) != 0xef53 {
-            return Err(String::from("fs block 0 holds no ext2 superblock (magic) as this vehicle reads it"));
+            return Err(String::from("fs block 0 holds no ext2 superblock (magic) as the test reads it"));
         }
         let gd = raw_block(1)?;
         Ok(Raw {
@@ -475,6 +586,8 @@ impl Raw {
             blocks: le32(s, 4),
             inodes: le32(s, 0),
             first_ino: le32(s, 84),
+            set_blocks: BTreeSet::new(),
+            set_inodes: BTreeSet::new(),
         })
     }
     /// The inode table's blocks: from 0 to here, every block is the file
@@ -500,17 +613,25 @@ impl Raw {
                 data.push(p);
             }
         }
+        // A pointer past the file system is kept (the walk reports it) and
+        // never followed.
         let ind = le32(i, 88);
         if ind != 0 {
             meta.push(ind);
-            data.extend(ptrs(&*raw_block(ind)?));
+            if ind < self.blocks {
+                data.extend(ptrs(&*raw_block(ind)?));
+            }
         }
         let dind = le32(i, 92);
         if dind != 0 {
             meta.push(dind);
-            for ind in ptrs(&*raw_block(dind)?) {
-                meta.push(ind);
-                data.extend(ptrs(&*raw_block(ind)?));
+            if dind < self.blocks {
+                for ind in ptrs(&*raw_block(dind)?) {
+                    meta.push(ind);
+                    if ind < self.blocks {
+                        data.extend(ptrs(&*raw_block(ind)?));
+                    }
+                }
             }
         }
         if le32(i, 96) != 0 {
@@ -520,7 +641,15 @@ impl Raw {
     }
     /// File block `k` of inode `i` (0: a hole).
     fn bmap(&self, i: &[u8; 128], k: u64) -> Result<u64, String> {
-        let at = |b: u64, x: u64| -> Result<u64, String> { if b == 0 { Ok(0) } else { Ok(le32(&raw_block(b)?[..], 4 * x as usize)) } };
+        let at = |b: u64, x: u64| -> Result<u64, String> {
+            if b == 0 {
+                Ok(0)
+            } else if b >= self.blocks {
+                Err(String::from("a pointer block past the file system"))
+            } else {
+                Ok(le32(&raw_block(b)?[..], 4 * x as usize))
+            }
+        };
         if k < 12 {
             return Ok(le32(i, 40 + 4 * k as usize));
         }
@@ -537,6 +666,9 @@ impl Raw {
         let mut out = alloc::vec![0u8; size];
         for k in 0..size.div_ceil(4096) {
             let b = self.bmap(i, k as u64)?;
+            if b >= self.blocks {
+                return Err(format!("file block {k} maps a block past the file system"));
+            }
             if b != 0 {
                 let blk = raw_block(b)?;
                 let n = (size - 4096 * k).min(4096);
@@ -602,10 +734,16 @@ struct Scan {
     /// What disagrees inside the tree itself (links, i_blocks, a block
     /// claimed twice).
     problems: Vec<String>,
+    /// Per inode, how many of its pointers point past the file system
+    /// (reported once per inode).
+    past: BTreeMap<u64, u64>,
+    /// Per inode, how many blocks it maps that are in use already, and the
+    /// first (reported once per inode).
+    twice: BTreeMap<u64, (u64, u64)>,
 }
 
 fn scan(raw: &Raw) -> Result<Scan, String> {
-    let mut s = Scan { used: (0..raw.meta_end()).collect(), dir_blocks: BTreeSet::new(), ptr_blocks: BTreeSet::new(), inodes: BTreeSet::new(), dirs: 0, problems: Vec::new() };
+    let mut s = Scan { used: (0..raw.meta_end()).chain(raw.set_blocks.iter().copied()).collect(), dir_blocks: BTreeSet::new(), ptr_blocks: BTreeSet::new(), inodes: raw.set_inodes.clone(), dirs: 0, problems: Vec::new(), past: BTreeMap::new(), twice: BTreeMap::new() };
     let mut tables: BTreeMap<u64, Box<[u8; BLOCK_SIZE]>> = BTreeMap::new();
     let mut inode = |ino: u64| -> Result<[u8; 128], String> {
         if ino == 0 || ino > raw.inodes {
@@ -623,8 +761,10 @@ fn scan(raw: &Raw) -> Result<Scan, String> {
     };
     let mut refs: BTreeMap<u64, u64> = BTreeMap::new();
     let claim = |s: &mut Scan, b: u64, ino: u64| {
-        if b >= raw.blocks || !s.used.insert(b) {
-            s.problems.push(format!("inode {ino} maps block {b}, which {}", if b >= raw.blocks { "is past the file system" } else { "is in use already" }));
+        if b >= raw.blocks {
+            *s.past.entry(ino).or_insert(0) += 1;
+        } else if !s.used.insert(b) {
+            s.twice.entry(ino).or_insert((0, b)).0 += 1;
         }
     };
     let mut todo = alloc::vec![2u64];
@@ -671,6 +811,12 @@ fn scan(raw: &Raw) -> Result<Scan, String> {
             }
         }
     }
+    for (ino, n) in core::mem::take(&mut s.past) {
+        s.problems.push(format!("inode {ino} maps {n} blocks past the file system"));
+    }
+    for (ino, (n, b)) in core::mem::take(&mut s.twice) {
+        s.problems.push(format!("inode {ino} maps {n} blocks that are in use already, first block {b}"));
+    }
     for ino in seen {
         let i = inode(ino)?;
         let want = refs.get(&ino).copied().unwrap_or(0);
@@ -708,6 +854,218 @@ fn agree(raw: &Raw, s: &Scan) -> Result<Vec<String>, String> {
         }
     }
     Ok(out)
+}
+
+// ── Before the mount: a free run set aside, the expected blocks filled ────
+
+/// Free blocks left free just above the first free one; then `SET_BLOCKS`
+/// marked used. `SET_BLOCKS >= GAP_BLOCKS`, so the count of used blocks
+/// names a marked block.
+const GAP_BLOCKS: u64 = 8;
+const SET_BLOCKS: u64 = 24;
+/// The same for inodes (`SET_INODES >= GAP_INODES`).
+const GAP_INODES: u64 = 2;
+const SET_INODES: u64 = 6;
+/// Free blocks filled with the pattern, the lowest first: rows 1 and 2
+/// take at most 50 on a lowest-free allocator (measured 45 on one nonce).
+const FILLED: usize = 64;
+
+/// What `prepare` changed, for `restore` and for row 2's comparison.
+struct Prep {
+    blocks: Vec<u64>,
+    inodes: Vec<u64>,
+    /// Each filled block and the hash of what was written there.
+    filled: Vec<(u64, u64)>,
+}
+
+/// A block's bytes, folded to 64 bits.
+fn hash(b: &[u8; BLOCK_SIZE]) -> u64 {
+    b.chunks_exact(8).fold(0x5B00_0018_0000_0001, |h, w| splitmix(h ^ u64::from_le_bytes(w.try_into().unwrap())))
+}
+
+fn bit_of(m: &[u8; BLOCK_SIZE], n: u64) -> bool {
+    m[(n / 8) as usize] >> (n % 8) & 1 == 1
+}
+
+fn add32(b: &mut [u8], at: usize, by: i64) {
+    let v = (le32(b, at) as i64 + by) as u32;
+    b[at..at + 4].copy_from_slice(&v.to_le_bytes());
+}
+
+fn add16(b: &mut [u8], at: usize, by: i64) {
+    let v = (le16(b, at) as i64 + by) as u16;
+    b[at..at + 2].copy_from_slice(&v.to_le_bytes());
+}
+
+/// Free block `b`'s fill: every 32-bit word past the file system's last
+/// block, from a seed this run draws.
+fn fill_block(seed: u64, b: u64) -> Box<[u8; BLOCK_SIZE]> {
+    let mut out = Box::new([0u8; BLOCK_SIZE]);
+    for (k, w) in out.chunks_exact_mut(4).enumerate() {
+        w.copy_from_slice(&(splitmix(seed ^ (b << 10 | k as u64)) as u32 | 0x8000_0000).to_le_bytes());
+    }
+    out
+}
+
+/// The free run set aside and the expected blocks filled, by this file's
+/// own PIO, before the mount and before row 3's control.
+fn prepare(raw: &mut Raw) -> Result<Prep, String> {
+    let (mut bb, mut ib, mut sb, mut gd) = (raw_block(raw.block_bitmap)?, raw_block(raw.inode_bitmap)?, raw_block(0)?, raw_block(1)?);
+    let (nb, ni) = (raw.blocks.min(8 * BLOCK_SIZE as u64), raw.inodes.min(8 * BLOCK_SIZE as u64));
+    let u = (0..nb).find(|&b| !bit_of(&bb, b)).ok_or_else(|| String::from("the disk as written has no free block"))?;
+    let fi = (raw.first_ino - 1..ni).find(|&n| !bit_of(&ib, n)).ok_or_else(|| String::from("the disk as written has no free inode"))?;
+    let need = GAP_BLOCKS + SET_BLOCKS + FILLED as u64;
+    if (u..u + need).any(|b| b >= nb || bit_of(&bb, b)) || (fi..fi + GAP_INODES + SET_INODES).any(|n| n >= ni || bit_of(&ib, n)) {
+        return Err(String::from("the disk as written has no free run long enough to set part of it aside (the test is wrong)"));
+    }
+    let blocks: Vec<u64> = (u + GAP_BLOCKS..u + GAP_BLOCKS + SET_BLOCKS).collect();
+    let bits: Vec<u64> = (fi + GAP_INODES..fi + GAP_INODES + SET_INODES).collect();
+    for &b in &blocks {
+        bb[(b / 8) as usize] |= 1 << (b % 8);
+    }
+    for &n in &bits {
+        ib[(n / 8) as usize] |= 1 << (n % 8);
+    }
+    let (db, di) = (blocks.len() as i64, bits.len() as i64);
+    add32(&mut sb[1024..], 12, -db);
+    add32(&mut sb[1024..], 16, -di);
+    add16(&mut gd[..], 12, -db);
+    add16(&mut gd[..], 14, -di);
+    raw_put(raw.block_bitmap, &bb)?;
+    raw_put(raw.inode_bitmap, &ib)?;
+    raw_put(0, &sb)?;
+    raw_put(1, &gd)?;
+    let seed = ktap::nonce().map(|n| ktap::derive(&n, "ktest-18 free blocks")).unwrap_or(0x5B00_0018_F1EE_0000);
+    let mut filled = Vec::new();
+    for b in (u..u + GAP_BLOCKS).chain(u + GAP_BLOCKS + SET_BLOCKS..).take(FILLED) {
+        let blk = fill_block(seed, b);
+        raw_put(b, &blk)?;
+        filled.push((b, hash(&blk)));
+    }
+    raw.set_blocks = blocks.iter().copied().collect();
+    raw.set_inodes = bits.iter().map(|n| n + 1).collect();
+    Ok(Prep { blocks, inodes: bits.iter().map(|n| n + 1).collect(), filled })
+}
+
+/// The disk put back after the last row: the set-aside bits cleared and
+/// the counts moved back by as many, every filled block still free zeroed.
+fn restore(raw: &Raw, p: &Prep) -> Result<(), String> {
+    let (mut bb, mut ib, mut sb, mut gd) = (raw_block(raw.block_bitmap)?, raw_block(raw.inode_bitmap)?, raw_block(0)?, raw_block(1)?);
+    let (mut db, mut di) = (0i64, 0i64);
+    for &b in &p.blocks {
+        if bit_of(&bb, b) {
+            bb[(b / 8) as usize] &= !(1 << (b % 8));
+            db += 1;
+        }
+    }
+    for &i in &p.inodes {
+        let n = i - 1;
+        if bit_of(&ib, n) {
+            ib[(n / 8) as usize] &= !(1 << (n % 8));
+            di += 1;
+        }
+    }
+    add32(&mut sb[1024..], 12, db);
+    add32(&mut sb[1024..], 16, di);
+    add16(&mut gd[..], 12, db);
+    add16(&mut gd[..], 14, di);
+    raw_put(raw.block_bitmap, &bb)?;
+    raw_put(raw.inode_bitmap, &ib)?;
+    raw_put(0, &sb)?;
+    raw_put(1, &gd)?;
+    let zero = Box::new([0u8; BLOCK_SIZE]);
+    for &(b, _) in &p.filled {
+        if !bit_of(&bb, b) {
+            raw_put(b, &zero)?;
+        }
+    }
+    Ok(())
+}
+
+/// Every write that reached the drive through the device the mount was
+/// handed: fs block -> the hash of the last bytes written there.
+static TAPPED: SpinLock<BTreeMap<u64, u64>> = SpinLock::new(BTreeMap::new());
+
+/// The drive under the spy: every write's bytes, hashed (row 2's last
+/// check reads the disk against them).
+struct Tap {
+    inner: Arc<dyn BlockDevice>,
+}
+
+impl BlockDevice for Tap {
+    fn read_block(&self, n: u64, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), Errno> {
+        self.inner.read_block(n, buf)
+    }
+    fn write_block(&self, n: u64, buf: &[u8; BLOCK_SIZE]) -> Result<(), Errno> {
+        let r = self.inner.write_block(n, buf);
+        if r.is_ok() {
+            let h = hash(buf);
+            quiet(|| TAPPED.lock().insert(n.wrapping_sub(P2_BLOCK0), h));
+        }
+        r
+    }
+    fn blocks(&self) -> u64 {
+        self.inner.blocks()
+    }
+    fn arm_fail_after(&self, k: u32) {
+        self.inner.arm_fail_after(k)
+    }
+    fn disarm(&self) {
+        self.inner.disarm()
+    }
+    fn refused_writes(&self) -> u32 {
+        self.inner.refused_writes()
+    }
+}
+
+/// The hash of each metadata block before the mount: the superblock, the
+/// descriptor, both bitmaps, the inode table to 64 inodes past the
+/// set-aside ones (every inode rows 1 and 2 can take), every directory and
+/// pointer block, and the filled blocks.
+fn snapshot(raw: &Raw, pre: &Scan, p: &Prep) -> Result<BTreeMap<u64, u64>, String> {
+    let last = (p.inodes.last().copied().unwrap_or(raw.first_ino) + 64).min(raw.inodes);
+    let table = raw.inode_table..=raw.inode_table + (last - 1) * 128 / 4096;
+    let mut m = BTreeMap::new();
+    for b in [0, 1, raw.block_bitmap, raw.inode_bitmap].into_iter().chain(table).chain(pre.dir_blocks.iter().copied()).chain(pre.ptr_blocks.iter().copied()) {
+        if !m.contains_key(&b) {
+            m.insert(b, hash(&*raw_block(b)?));
+        }
+    }
+    for &(b, h) in &p.filled {
+        m.insert(b, h);
+    }
+    Ok(m)
+}
+
+/// Row 2's last check: every metadata block holds on the disk what the
+/// last write through the mount's device left there, or, if none did, what
+/// it held before the mount.
+fn drive_agrees(r: &mut Row, raw: &Raw, snap: &BTreeMap<u64, u64>) {
+    let Some(after) = got(r, scan(raw)) else { return };
+    let tapped = quiet(|| TAPPED.lock().clone());
+    let mut blocks: BTreeSet<u64> = snap.keys().copied().collect();
+    blocks.extend(tapped.keys().copied());
+    let mut bad = Vec::new();
+    for b in blocks {
+        let k = match b {
+            0 => 0,
+            1 => 1,
+            b if b == raw.block_bitmap => 2,
+            b if b == raw.inode_bitmap => 3,
+            b if b < raw.meta_end() => 4,
+            b if after.dir_blocks.contains(&b) => 5,
+            b if after.ptr_blocks.contains(&b) => 6,
+            _ => continue,
+        };
+        let Some(&want) = tapped.get(&b).or_else(|| snap.get(&b)) else { continue };
+        let Some(now) = got(r, raw_block(b)) else { return };
+        if hash(&now) != want {
+            bad.push(format!("{b} ({})", KINDS[k]));
+        }
+    }
+    if !bad.is_empty() {
+        r.fail(format_args!("{TXN_ID}: fs blocks {} hold bytes on the disk that no write through the device your mount was given put there: a write went around it", bad[..bad.len().min(6)].join(", ")));
+    }
 }
 
 // ── The devices and the root of this file's ─────────────────────────────
@@ -776,7 +1134,7 @@ fn mount_rest(proxy: Arc<Proxy>) {
         Err(e) => note(format_args!("vfs: Archive::new over the boot archive returned {}", errno_text(e))),
     }
     if let Err(e) = vfs::mount("/ktest", Arc::new(KtestDir)) {
-        note(format_args!("vfs: mount(\"/ktest\", this vehicle's directory) returned {}", errno_text(e)));
+        note(format_args!("vfs: mount(\"/ktest\", the test's directory) returned {}", errno_text(e)));
     }
 }
 
@@ -1026,7 +1384,6 @@ fn status_text(s: Option<i32>) -> String {
 struct Ran {
     out: Vec<u8>,
     exit: Option<i32>,
-    ms: u64,
 }
 
 /// Start a program with `start` (interrupts off), give it a pipe as fds 1
@@ -1096,9 +1453,9 @@ fn run(what: &str, start: impl FnOnce() -> Result<Pid, Errno>) -> Result<Ran, St
     let _ = yield_until(500, || exit_of(pid).is_some());
     let exit = exit_of(pid);
     if !ended {
-        note(format_args!("{what}: pid {} had not closed its output after {ms} ms ({})", pid.0, status_text(exit)));
+        note(format_args!("{what}: pid {} had not closed its output after {ms} ms; the limit is {RUN_MS} ms ({})", pid.0, status_text(exit)));
     }
-    Ok(Ran { out, exit, ms })
+    Ok(Ran { out, exit })
 }
 
 /// A probe run: its data segment as it wrote it, or why there is none.
@@ -1108,10 +1465,9 @@ fn run_probe(what: &str, p: Probe) -> Result<Vec<u8>, String> {
     let ran = run(what, || exec::spawn(&path, &["probe"], &[]))?;
     if ran.exit != Some(0) || ran.out.len() != len {
         return Err(format!(
-            "{what}: the probe wrote {} of its {len} bytes and ended {} after {} ms",
+            "{what}: the probe wrote {} of its {len} bytes and ended {}",
             ran.out.len(),
-            status_text(ran.exit),
-            ran.ms
+            status_text(ran.exit)
         ));
     }
     Ok(ran.out)
@@ -1242,10 +1598,10 @@ fn create_row(raw: &Raw, log_ino: u32) -> Second {
     pl.is("read on the O_WRONLY fd", SYS_READ, &[A::R(o), small, i(16)], -EBADF);
     pl.is("close", SYS_CLOSE, &[A::R(o)], 0);
     pl.is("open(w, O_WRONLY|O_CREAT|O_EXCL) again", SYS_OPEN, &[pb, i(O_WRONLY | O_CREAT | O_EXCL), i(0o644)], -EEXIST);
+    let ro = pl.fd("open(w, O_RDONLY)", SYS_OPEN, &[pb, i(O_RDONLY)]);
     let a = pl.fd("open(w, O_WRONLY|O_APPEND)", SYS_OPEN, &[pb, i(O_WRONLY | O_APPEND)]);
     pl.is("write of 7 bytes with O_APPEND", SYS_WRITE, &[A::R(a), A::D(tail), i(7)], 7);
     pl.is("close", SYS_CLOSE, &[A::R(a)], 0);
-    let ro = pl.fd("open(w, O_RDONLY)", SYS_OPEN, &[pb, i(O_RDONLY)]);
     pl.is("read of it whole (asked for 100 more)", SYS_READ, &[A::R(ro), rbuf, i(size as u64 + 107)], size as i64 + 7);
     pl.is("write on the O_RDONLY fd", SYS_WRITE, &[A::R(ro), A::D(tail), i(1)], -EBADF);
     pl.is("close", SYS_CLOSE, &[A::R(ro)], 0);
@@ -1353,7 +1709,7 @@ fn create_row(raw: &Raw, log_ino: u32) -> Second {
 
 // ── Row 2: txn.every.metadata.write ──────────────────────────────────────
 
-fn txn_row(raw: &Raw, control: Vec<String>) {
+fn txn_row(raw: &Raw, control: Vec<String>, snap: &Result<BTreeMap<u64, u64>, String>) {
     let mut r = Row::new(TXN_ID);
     for why in control {
         r.fail(format_args!("{TXN_ID}: the log's control: {why}"));
@@ -1398,6 +1754,10 @@ fn txn_row(raw: &Raw, control: Vec<String>) {
             r.fail(format_args!("{TXN_ID}: no listed write of {} in the five operations: nothing shows the log saw one", KINDS[k]));
         }
     }
+    match snap {
+        Ok(snap) => drive_agrees(&mut r, raw, snap),
+        Err(why) => r.fail(format_args!("{TXN_ID}: the disk before the mount: {why}")),
+    }
     r.finish(2);
 }
 
@@ -1407,7 +1767,7 @@ fn alloc_row(raw: &Raw, control: Result<Vec<String>, String>) {
     let mut r = Row::new(ALLOC_ID);
     match control {
         Ok(v) if v.is_empty() => {}
-        Ok(v) => r.fail(format_args!("{ALLOC_ID}: this file's check of the disk as written, before the mount, disagrees (the vehicle is wrong): {}", v.join("; "))),
+        Ok(v) => r.fail(format_args!("{ALLOC_ID}: this file's check of the disk as written, before the mount, disagrees (the test is wrong): {}", v.join("; "))),
         Err(why) => r.fail(format_args!("{ALLOC_ID}: the check before the mount: {why}")),
     }
     match scan(raw) {
@@ -1595,8 +1955,7 @@ unsafe extern "C" fn _start() -> ! {
     serial::init();
     ktap::begin(PLAN);
     prelude();
-    let mut c = Clock::new();
-    let raw = match Raw::open() {
+    let mut raw = match Raw::open() {
         Ok(raw) => raw,
         Err(why) => {
             fail_rest(1, &format!("disk: {why}"));
@@ -1604,8 +1963,21 @@ unsafe extern "C" fn _start() -> ! {
             halt()
         }
     };
-    // The disk as written must agree with itself: row 3's control.
-    let pre = scan(&raw).and_then(|s| agree(&raw, &s));
+    // Part of the free run set aside, the expected blocks filled (rows 1
+    // and 3; restored after the last row).
+    let prep = match prepare(&mut raw) {
+        Ok(p) => p,
+        Err(why) => {
+            fail_rest(1, &format!("disk: {why}"));
+            quiet(ktap::end);
+            halt()
+        }
+    };
+    // The disk as prepared must agree with itself: row 3's control.
+    let pre_scan = scan(&raw);
+    let pre = pre_scan.as_ref().map_err(|e| e.clone()).and_then(|s| agree(&raw, s));
+    // What every metadata block holds before the mount: row 2's last check.
+    let snap = pre_scan.as_ref().map_err(|e| e.clone()).and_then(|s| snapshot(&raw, s, &prep));
     // The log, before any mount (row 2's control): steps 1–5.
     let control = log_control();
     let drive: Arc<dyn BlockDevice> = match quiet(Ata::probe) {
@@ -1616,7 +1988,7 @@ unsafe extern "C" fn _start() -> ! {
             halt()
         }
     };
-    let spy = Arc::new(Spy { inner: drive, reads: AtomicU64::new(0) });
+    let spy = Arc::new(Spy { inner: Arc::new(Tap { inner: drive }), reads: AtomicU64::new(0) });
     let (fs, root) = match mount_fs(&spy).and_then(|fs| fs.root().map(|root| (fs, root)).map_err(|e| format!("Ext2::root() returned {}", errno_text(e)))) {
         Ok(v) => v,
         Err(why) => {
@@ -1628,13 +2000,16 @@ unsafe extern "C" fn _start() -> ! {
     let log_ino = fs.log_inode();
     let proxy = Arc::new(Proxy(SpinLock::new(Some(root))));
     mount_rest(proxy.clone());
-    note(format_args!("vfs: / is this vehicle's root over ext2 on partition 2, /boot the boot archive ({ARCHIVE_LEN} bytes), /ktest this vehicle's programs"));
+    note(format_args!("vfs: / is the test's root over ext2 on partition 2, /boot the boot archive ({ARCHIVE_LEN} bytes), /ktest the test's programs"));
     let second = create_row(&raw, log_ino);
-    txn_row(&raw, control);
+    txn_row(&raw, control, &snap);
     alloc_row(&raw, pre);
     enospc_row(&spy, &raw, &second);
     drop(fs);
-    note(format_args!("the rows took {} ms; the drive saw {} reads and {} writes", c.ms(), spy.reads.load(Ordering::Relaxed), writes().len()));
+    if let Err(why) = restore(&raw, &prep) {
+        note(format_args!("the disk could not be put back after the rows: {why}"));
+    }
+    note(format_args!("the drive saw {} reads and {} writes", spy.reads.load(Ordering::Relaxed), writes().len()));
     sched::yield_now();
     quiet(ktap::end);
     halt()

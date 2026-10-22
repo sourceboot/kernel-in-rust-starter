@@ -16,20 +16,36 @@
 //! `/boot` is the boot archive, `/ktest` this file's programs. The first
 //! call of this lab's is row 1's first `getdents`. Four rows, in this order:
 //!
-//!   1 `ext2.getdents.records` (plain) — the learner's `Inode::getdents`
-//!     called directly on `/` and on `/t` (302 records in two blocks) from
-//!     index 0 until `None`: every live record, in the order the disk holds
-//!     them, with its inode and `d_type`, and nothing else. Then from ring
-//!     3 (lab 17's row, moved): `getdents64` of `/t` in 4096-byte calls
-//!     until 0, every record parsed (`d_reclen` a multiple of 8, the NUL
-//!     inside it, each `d_off` past the one before) and the set equal to
+//!   1 `ext2.getdents.records` (derived; s20 fix rounds 1 and 2,
+//!     2026-10-19) — before the mount, this file writes `/tmp`'s first
+//!     block itself: three files named from the run's nonce and a word no
+//!     one knows before this boot (the TSC and the PM timer; CONTRACT
+//!     §A.1-5) — the first and the third empty files of inodes of their
+//!     own that it allocates (round 2b), the second a hard link to
+//!     `/pattern` (its links 1 → 2) — with a record of inode 0 between the
+//!     first and the second, as a removal leaves one. Then the
+//!     learner's `Inode::getdents` called directly on `/`, on `/t` (302
+//!     records in two blocks) and on `/tmp` from index 0 until `None`: every
+//!     live record, in the order the disk holds them, with its inode and
+//!     `d_type`, and nothing else (the record of inode 0 neither listed nor
+//!     ending its block's walk); `-ENOTDIR` from the method on a file. Then
+//!     from ring 3 (lab 17's row, moved): `getdents64` of `/t` in 4096-byte
+//!     calls until 0, every record parsed (`d_reclen` a multiple of 8, the
+//!     NUL inside it, each `d_off` past the one before) and the set equal to
 //!     the disk's; `/` in one call, then 0; `-ENOTDIR` on a regular file's
-//!     fd and on a pipe, `-EINVAL` when no record fits. Then `/bin/ls -a /
-//!     /a/b/c`, exec'd from the disk (its `.bss` is 8 pages): its output
-//!     the two directories as the disk holds them, sorted; exit 0.
+//!     fd and on a pipe, `-EINVAL` when no record fits; a d_off resumes
+//!     (s20 fix round 0, 2026-10-19): one record from the middle of `/t`
+//!     (40 bytes after 4096), then a second fd of `/t` moved by `lseek` to
+//!     that record's `d_off` hands out the record after it on the disk
+//!     first, and `lseek` returns the `d_off`; `/tmp` through `getdents64`
+//!     holds the three names. Then `/bin/ls -a / /a/b/c`, exec'd from the
+//!     disk (its `.bss` is 8 pages): its output the two directories as the
+//!     disk holds them, sorted; exit 0. The names are kept in this file and
+//!     printed only in a failure, after the row has read them back.
 //!   2 `ext2.mkdir.rmdir` (plain) — `mkdir` of `/tmp/d1` and `/tmp/d1/d2/`
 //!     (a trailing `/`), a file in each; refused: `mkdir` of a name that is
-//!     there and of `.` (`-EEXIST`), under a file (`-ENOTDIR`), on the
+//!     there, of `.` and of a file's name (`-EEXIST`; the file case s20 fix
+//!     round 1), under a file (`-ENOTDIR`), on the
 //!     archive (`-EROFS`). On the disk: each inode's mode, links and size,
 //!     `/tmp`'s links one more, each new directory's records `.` (itself),
 //!     `..` (its parent) and its entries. Then `rmdir` refused: not empty
@@ -39,10 +55,32 @@
 //!     `-ENOENT`). Both bitmaps, the five counts (the directory count among
 //!     them) and `/tmp`'s links byte for byte as before the row.
 //!   3 `ext2.rename` (derived) — two directories and three files of
-//!     splitmix64 of the nonce; thirteen renames: a file across
+//!     splitmix64 of the nonce, each opening with an unpublished word (fix
+//!     round 2, §A.1-5); twenty-four renames, twenty-seven by fix round 6 (fix round 1 added a
+//!     directory over an empty directory, freed whole; fix round 2 made the
+//!     rename into its own subtree 3–8 levels deep, chosen from the nonce,
+//!     and added the same rename spelled through `..`, both `-EINVAL`; fix
+//!     round 3 added it with no path, the learner's `Inode::rename` called
+//!     directly, `-EINVAL` and nothing changed; fix round 4 named the
+//!     subtree's directories with unpublished words, called it directly
+//!     with `new_dir` at the chain's bottom and at a nonce-chosen level, and
+//!     added two moves that must succeed, a directory into the chain, two
+//!     or more levels from its parent and outside its own subtree, once by
+//!     `rename` and once by `Inode::rename`; fix round 5 gave every one of
+//!     those names one shape, `d` and the word, gave each moved directory a
+//!     child directory whose `..` must still name it, and made one of the
+//!     two, drawn from the nonce, before the chain and the other after;
+//!     fix round 6 refused it into itself, by `rename` and directly, moved
+//!     a directory into the early mover's child before the mover moved, and
+//!     then refused it into that child, by `rename` and directly): a
+//!     file across
 //!     directories, over another file (the replaced inode's links and
 //!     `i_blocks` 0, `i_dtime` set, its inode bit and every block of it
-//!     clear), a directory across directories (its `..` rewritten); refused
+//!     clear), a directory across directories (its `..` rewritten), a
+//!     directory named with a trailing `/` on both sides (and back);
+//!     refused (s20 fix round 0, 2026-10-19): a file named with a trailing
+//!     `/` on either side (`-ENOTDIR`), `.` or `..` as either name
+//!     (`-EINVAL`, §A.4's pin); refused
 //!     into its own subtree (`-EINVAL`), a file over a directory
 //!     (`-EISDIR`), a directory over a file (`-ENOTDIR`), over a non-empty
 //!     directory (`-ENOTEMPTY`), to `/boot` (`-EXDEV`), the log either way
@@ -134,6 +172,7 @@ const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
 const SYS_OPEN: u64 = 2;
 const SYS_CLOSE: u64 = 3;
+const SYS_LSEEK: u64 = 8;
 const SYS_RENAME: u64 = 82;
 const SYS_MKDIR: u64 = 83;
 const SYS_RMDIR: u64 = 84;
@@ -235,6 +274,7 @@ fn errno_text(e: Errno) -> String {
         12 => "ENOMEM",
         13 => "EACCES",
         14 => "EFAULT",
+        16 => "EBUSY",
         17 => "EEXIST",
         18 => "EXDEV",
         19 => "ENODEV",
@@ -402,6 +442,65 @@ fn raw_disk_block(n: u64, buf: &mut [u8; BLOCK_SIZE]) -> bool {
     })
 }
 
+fn out16(port: u16, v: u16) {
+    // SAFETY: a 16-bit port write of the primary ATA bus; no memory touched.
+    unsafe { asm!("out dx, ax", in("dx") port, in("ax") v, options(nomem, nostack, preserves_flags)) };
+}
+
+/// The disk's 4 KiB block `n` written by this file's own PIO (28-bit LBA,
+/// polled, interrupts off), then the drive's write cache flushed. Used
+/// once, before the learner's driver or file system has read anything.
+fn raw_disk_write(n: u64, buf: &[u8; BLOCK_SIZE]) -> bool {
+    quiet(|| {
+        let lba = n * 8;
+        let wait = |data: bool| -> bool {
+            for _ in 0..20_000_000u32 {
+                let s = in8(0x1f7);
+                if s & 0x80 == 0 {
+                    if s & 0x21 != 0 {
+                        return false;
+                    }
+                    if !data || s & 0x08 != 0 {
+                        return true;
+                    }
+                }
+            }
+            false
+        };
+        if !wait(false) {
+            return false;
+        }
+        out8(0x1f6, 0xe0 | ((lba >> 24) & 0x0f) as u8);
+        for _ in 0..4 {
+            in8(0x3f6);
+        }
+        out8(0x1f2, 8);
+        out8(0x1f3, lba as u8);
+        out8(0x1f4, (lba >> 8) as u8);
+        out8(0x1f5, (lba >> 16) as u8);
+        out8(0x1f7, 0x30);
+        for _ in 0..4 {
+            in8(0x3f6);
+        }
+        for sector in buf.chunks_exact(512) {
+            if !wait(true) {
+                return false;
+            }
+            for pair in sector.chunks_exact(2) {
+                out16(0x1f0, u16::from_le_bytes([pair[0], pair[1]]));
+            }
+        }
+        if !wait(false) {
+            return false;
+        }
+        out8(0x1f7, 0xe7);
+        for _ in 0..4 {
+            in8(0x3f6);
+        }
+        wait(false)
+    })
+}
+
 fn le16(b: &[u8], at: usize) -> u64 {
     u16::from_le_bytes([b[at], b[at + 1]]) as u64
 }
@@ -420,8 +519,121 @@ fn raw_block(b: u64) -> Result<Box<[u8; BLOCK_SIZE]>, String> {
     if raw_disk_block(P2_BLOCK0 + b, &mut buf) {
         Ok(buf)
     } else {
-        Err(format!("this vehicle's own read of fs block {b} failed"))
+        Err(format!("the test's own read of fs block {b} failed"))
     }
+}
+
+/// Partition 2's fs block `b`, written raw.
+fn raw_put(b: u64, buf: &[u8; BLOCK_SIZE]) -> Result<(), String> {
+    if raw_disk_write(P2_BLOCK0 + b, buf) {
+        Ok(())
+    } else {
+        Err(format!("the test's own write of fs block {b} failed"))
+    }
+}
+
+/// A number no one knows before this moment: the time-stamp counter and
+/// the PM timer, mixed (CONTRACT §A.1-5). Kept in this file; never printed
+/// before the row that carries it has read it back.
+fn unpublished(salt: u64) -> u64 {
+    // SAFETY: rdtsc reads a counter; no memory is touched.
+    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
+    splitmix(tsc ^ (pm() as u64) << 40 ^ salt) & 0xffff_ffff_ffff
+}
+
+/// Row 1's input, written by this file before the mount: in `/tmp`'s first
+/// block, after its last record, three files named from `seed` (the run's
+/// nonce) and an unpublished word — the first and the third empty regular
+/// files of inodes of their own, made here (a free inode an unpublished
+/// number of free inodes in, its bitmap bit, its record, both free-inode
+/// counts; s20 round 2b, so the records do not all name one published
+/// inode), the second a hard link to `/pattern` — and between the first and
+/// the second a record of inode 0, as a removal leaves one. Returns the
+/// three names.
+fn seed_tmp(raw: &Raw, seed: u64) -> Result<Vec<String>, String> {
+    let tmp = raw.walk("/tmp")?.ok_or(String::from("no /tmp on the disk"))?;
+    let pat = raw.walk("/pattern")?.ok_or(String::from("no /pattern on the disk"))?;
+    let blk = raw.bmap(&raw.inode(tmp)?, 0)?;
+    let mut b = raw_block(blk)?;
+    let (mut at, mut last) = (0usize, 0usize);
+    while at < BLOCK_SIZE {
+        let rl = le16(&b[..], at + 4) as usize;
+        if rl < 8 {
+            return Err(format!("/tmp's first block: a record at byte {at} of length {rl}"));
+        }
+        last = at;
+        at += rl;
+    }
+    let need = |n: usize| (8 + n + 3) & !3;
+    let keep = need(b[last + 6] as usize);
+    let names: Vec<String> = (0..3u64).map(|k| format!("n{:012x}{:012x}", splitmix(seed ^ (0x0201 + k)) & 0xffff_ffff_ffff, unpublished(k))).collect();
+    let ghost = format!("g{:012x}", unpublished(7));
+    // Two free inodes, each found after skipping an unpublished number (0..7)
+    // of free ones.
+    let mut ib = raw_block(raw.inode_bitmap)?;
+    let mut new = Vec::new();
+    let mut skip = unpublished(8) % 8;
+    let mut ino = raw.first_ino;
+    while new.len() < 2 && ino <= raw.inodes {
+        let (byte, bit) = (((ino - 1) / 8) as usize, (ino - 1) % 8);
+        if ib[byte] >> bit & 1 == 0 {
+            if skip == 0 {
+                ib[byte] |= 1 << bit;
+                new.push(ino);
+                skip = unpublished(9) % 8;
+            } else {
+                skip -= 1;
+            }
+        }
+        ino += 1;
+    }
+    if new.len() < 2 {
+        return Err(String::from("no two free inodes for the test's files"));
+    }
+    let recs = [(new[0], &names[0]), (0, &ghost), (pat, &names[1]), (new[1], &names[2])];
+    let room: usize = recs.iter().map(|r| need(r.1.len())).sum();
+    if last + keep + room > BLOCK_SIZE {
+        return Err(String::from("/tmp's first block has no room for the test's records"));
+    }
+    let put16 = |b: &mut [u8], at: usize, v: usize| b[at..at + 2].copy_from_slice(&(v as u16).to_le_bytes());
+    put16(&mut b[..], last + 4, keep);
+    let mut at = last + keep;
+    for (k, (ino, name)) in recs.iter().enumerate() {
+        let len = if k + 1 == recs.len() { BLOCK_SIZE - at } else { need(name.len()) };
+        b[at..at + 4].copy_from_slice(&(*ino as u32).to_le_bytes());
+        put16(&mut b[..], at + 4, len);
+        b[at + 6] = name.len() as u8;
+        b[at + 7] = 1;
+        b[at + 8..at + 8 + name.len()].copy_from_slice(name.as_bytes());
+        at += len;
+    }
+    raw_put(blk, &b)?;
+    // The inodes: /pattern one link more; each new one an empty regular file
+    // (mode 0644, one link, no blocks, every other field 0).
+    for (ino, new_file) in [(pat, false), (new[0], true), (new[1], true)] {
+        let at = (ino - 1) * 128;
+        let (tb, off) = (raw.inode_table + at / 4096, (at % 4096) as usize);
+        let mut t = raw_block(tb)?;
+        if new_file {
+            t[off..off + 128].fill(0);
+            put16(&mut t[..], off, 0o100644);
+            put16(&mut t[..], off + 26, 1);
+        } else {
+            let n = le16(&t[..], off + 26) as usize + 1;
+            put16(&mut t[..], off + 26, n);
+        }
+        raw_put(tb, &t)?;
+    }
+    raw_put(raw.inode_bitmap, &ib)?;
+    let mut sb = raw_block(0)?;
+    let n = le32(&sb[1024..], 16) - 2;
+    sb[1024 + 16..1024 + 20].copy_from_slice(&(n as u32).to_le_bytes());
+    raw_put(0, &sb)?;
+    let mut gd = raw_block(1)?;
+    let n = le16(&gd[..], 14) as usize - 2;
+    put16(&mut gd[..], 14, n);
+    raw_put(1, &gd)?;
+    Ok(names)
 }
 
 /// One directory record as the disk holds it.
@@ -442,7 +654,7 @@ impl Raw {
         let sb = raw_block(0)?;
         let s = &sb[1024..2048];
         if le16(s, 56) != 0xef53 {
-            return Err(String::from("fs block 0 holds no ext2 superblock (magic) as this vehicle reads it"));
+            return Err(String::from("fs block 0 holds no ext2 superblock (magic) as the test reads it"));
         }
         let gd = raw_block(1)?;
         Ok(Raw {
@@ -739,7 +951,7 @@ fn mount_rest(proxy: Arc<Proxy>) {
         Err(e) => note(format_args!("vfs: Archive::new over the boot archive returned {}", errno_text(e))),
     }
     if let Err(e) = vfs::mount("/ktest", Arc::new(KtestDir)) {
-        note(format_args!("vfs: mount(\"/ktest\", this vehicle's directory) returned {}", errno_text(e)));
+        note(format_args!("vfs: mount(\"/ktest\", the test's directory) returned {}", errno_text(e)));
     }
 }
 
@@ -825,6 +1037,9 @@ enum A {
     I(u64),
     R(usize),
     D(usize),
+    /// The u64 the program finds at this place in its data segment when
+    /// the call runs (a value an earlier call wrote there).
+    M(usize),
 }
 
 /// `mov <arg reg>, imm64` for rdi, rsi, rdx, r10, r8, r9.
@@ -885,6 +1100,10 @@ impl Probe {
                 A::R(k) => {
                     self.code.extend_from_slice(&MOV_MEM[i]);
                     self.code.extend_from_slice(&((DATA + 8 * k as u64) as u32).to_le_bytes());
+                }
+                A::M(off) => {
+                    self.code.extend_from_slice(&MOV_MEM[i]);
+                    self.code.extend_from_slice(&((DATA + off as u64) as u32).to_le_bytes());
                 }
             }
         }
@@ -989,7 +1208,6 @@ fn status_text(s: Option<i32>) -> String {
 struct Ran {
     out: Vec<u8>,
     exit: Option<i32>,
-    ms: u64,
 }
 
 /// Start a program with `start` (interrupts off), give it a pipe as fds 1
@@ -1059,9 +1277,9 @@ fn run(what: &str, start: impl FnOnce() -> Result<Pid, Errno>) -> Result<Ran, St
     let _ = yield_until(500, || exit_of(pid).is_some());
     let exit = exit_of(pid);
     if !ended {
-        note(format_args!("{what}: pid {} had not closed its output after {ms} ms ({})", pid.0, status_text(exit)));
+        note(format_args!("{what}: pid {} had not closed its output after {ms} ms; the limit is {RUN_MS} ms ({})", pid.0, status_text(exit)));
     }
-    Ok(Ran { out, exit, ms })
+    Ok(Ran { out, exit })
 }
 
 /// A probe run: its data segment as it wrote it, or why there is none.
@@ -1071,10 +1289,9 @@ fn run_probe(what: &str, p: Probe) -> Result<Vec<u8>, String> {
     let ran = run(what, || exec::spawn(&path, &["probe"], &[]))?;
     if ran.exit != Some(0) || ran.out.len() != len {
         return Err(format!(
-            "{what}: the probe wrote {} of its {len} bytes and ended {} after {} ms",
+            "{what}: the probe wrote {} of its {len} bytes and ended {}",
             ran.out.len(),
-            status_text(ran.exit),
-            ran.ms
+            status_text(ran.exit)
         ));
     }
     Ok(ran.out)
@@ -1277,22 +1494,55 @@ fn compare_dir(r: &mut Row, what: &str, mut got: Vec<Rec>, mut want: Vec<Rec>) {
     }
 }
 
-fn dents_row(raw: &Raw, root: &InodeRef) {
+fn dents_row(raw: &Raw, root: &InodeRef, seeded: Result<Vec<String>, String>) {
     let mut r = Row::new(DENTS_ID);
     let want = (dir(raw, 2), raw.walk("/t").and_then(|t| t.ok_or(String::from("no /t on the disk"))).and_then(|t| dir(raw, t)));
     let (root_want, t_want) = match want {
         (Ok(a), Ok(b)) => (a, b),
         (a, b) => {
-            r.fail(format_args!("{DENTS_ID}: this vehicle's own read of / or /t failed: {:?} {:?}", a.err(), b.err()));
+            r.fail(format_args!("{DENTS_ID}: the test's own read of / or /t failed: {:?} {:?}", a.err(), b.err()));
             return r.finish(1);
         }
     };
     note(format_args!("{DENTS_ID}: on the disk: / holds {} live records, /t {} (in its two blocks)", root_want.len(), t_want.len()));
+    // (0) /tmp as this file wrote it before the mount (seed_tmp): three
+    // names no table holds and a record of inode 0 between them (s20 fix
+    // round 2, 2026-10-19).
+    let _ = r.derived(DENTS_ID);
+    let fresh = match seeded {
+        Ok(v) => v,
+        Err(why) => {
+            r.fail(format_args!("{DENTS_ID}: the test's own write of /tmp before the mount: {why}"));
+            Vec::new()
+        }
+    };
+    let tmp_ino = raw.walk("/tmp").ok().flatten().unwrap_or(0);
+    let tmp_want = match dir(raw, tmp_ino) {
+        Ok(v) => v,
+        Err(why) => {
+            r.fail(format_args!("{DENTS_ID}: the test's own read of /tmp failed: {why}"));
+            Vec::new()
+        }
+    };
+    let held = fresh.iter().filter(|n| tmp_want.iter().any(|w| &w.name == *n)).count();
+    r.expect_eq("the test's own read of /tmp: its three records written before the mount", held as u64, 3);
     // (a) The learner's `Inode::getdents`, called directly, in order.
     walk_dents(&mut r, "/", root, &root_want);
     match root.lookup("t") {
         Ok(t) => walk_dents(&mut r, "/t", &t, &t_want),
         Err(e) => r.fail(format_args!("{DENTS_ID}: lookup(\"t\") in / returned {}", errno_text(e))),
+    }
+    match root.lookup("tmp") {
+        Ok(t) => walk_dents(&mut r, "/tmp (three records and an unused one written before the mount)", &t, &tmp_want),
+        Err(e) => r.fail(format_args!("{DENTS_ID}: lookup(\"tmp\") in / returned {}", errno_text(e))),
+    }
+    match root.lookup("pattern") {
+        Ok(f) => match f.getdents(0) {
+            Err(e) if e == ENOTDIR => {}
+            Err(e) => r.fail(format_args!("{DENTS_ID}: getdents(0) of /pattern (a file) returned {}, expected {}", errno_text(e), errno_text(ENOTDIR))),
+            Ok(x) => r.fail(format_args!("{DENTS_ID}: getdents(0) of /pattern (a file) returned Ok({:?}), expected {}", x.map(|e| e.name), errno_text(ENOTDIR))),
+        },
+        Err(e) => r.fail(format_args!("{DENTS_ID}: lookup(\"pattern\") in / returned {}", errno_text(e))),
     }
     // (b) getdents64 from ring 3.
     let mut p = Probe::new();
@@ -1315,6 +1565,22 @@ fn dents_row(raw: &Raw, root: &InodeRef) {
     let s11 = p.call(SYS_OPEN, &[t, A::I(O_DIRECTORY)]);
     let s12 = p.call(SYS_GETDENTS64, &[A::R(s11), bx, A::I(20)]);
     let s13 = p.call(SYS_GETDENTS64, &[A::I(1), bx, A::I(4096)]);
+    // A d_off resumes after its own record: one record from the middle of
+    // /t (a 40-byte call after a 4096-byte one), then a second open of /t
+    // moved by lseek to that record's d_off, read again.
+    let s14 = p.call(SYS_OPEN, &[t, A::I(O_DIRECTORY)]);
+    let (bm, _) = p.buf(4096);
+    let _s15 = p.call(SYS_GETDENTS64, &[A::R(s14), bm, A::I(4096)]);
+    let (b1, o1) = p.buf(40);
+    let s16 = p.call(SYS_GETDENTS64, &[A::R(s14), b1, A::I(40)]);
+    let s17 = p.call(SYS_OPEN, &[t, A::I(O_DIRECTORY)]);
+    let s18 = p.call(SYS_LSEEK, &[A::R(s17), A::M(o1 + 8), A::I(0)]);
+    let (b2, o2) = p.buf(40);
+    let s19 = p.call(SYS_GETDENTS64, &[A::R(s17), b2, A::I(40)]);
+    let tmpp = p.str("/tmp");
+    let s20 = p.call(SYS_OPEN, &[tmpp, A::I(O_DIRECTORY)]);
+    let (bt, ot) = p.buf(4096);
+    let s21 = p.call(SYS_GETDENTS64, &[A::R(s20), bt, A::I(4096)]);
     match run_probe(DENTS_ID, p) {
         Ok(out) => {
             let counts: Vec<String> = tcalls.iter().map(|&(k, _)| answer(res(&out, k))).collect();
@@ -1343,7 +1609,51 @@ fn dents_row(raw: &Raw, root: &InodeRef) {
             for want in [".", ".."] {
                 r.expect(got.iter().any(|g| g.name == want), &format!("/t's listing holds {want:?}"));
             }
-            compare_dir(&mut r, "/t", got, t_want);
+            // The resume: the record after the one whose d_off was used.
+            let one = |n: i64, o: usize| -> Result<(Rec, i64), String> {
+                if !(1..=40).contains(&n) {
+                    return Err(format!("returned {}", answer(n)));
+                }
+                let (mut v, mut d) = (Vec::new(), Vec::new());
+                parse_dents(&out[o..o + n as usize], &mut v, &mut d)?;
+                match (v.pop(), d.pop()) {
+                    (Some(x), Some(off)) if v.is_empty() => Ok((x, off)),
+                    _ => Err(String::from("did not hand out exactly one record in 40 bytes")),
+                }
+            };
+            match (one(res(&out, s16), o1), one(res(&out, s19), o2)) {
+                (Ok((x, off)), Ok((y, _))) => {
+                    r.expect_res(&format!("lseek(fd, {off}, SEEK_SET) on a second fd of /t (the d_off of {:?})", x.name), res(&out, s18), off);
+                    let k = t_want.iter().position(|w| *w == x);
+                    let next = k.and_then(|k| t_want.get(k + 1));
+                    if next != Some(&y) {
+                        r.fail(format_args!(
+                            "{DENTS_ID}: /t: after lseek to the d_off of {:?} (live record {}), getdents64 handed out {:?} first, expected {} (the record after it)",
+                            x.name,
+                            k.map_or(String::from("none on the disk"), |k| format!("{k}")),
+                            y.name,
+                            next.map_or(String::from("none"), |n| format!("{:?}", n.name))
+                        ));
+                    }
+                }
+                (a, b) => r.fail(format_args!(
+                    "{DENTS_ID}: /t: a 40-byte getdents64 after a 4096-byte one: {}; the same after lseek to its d_off on a second fd: {}",
+                    a.err().unwrap_or(String::from("one record")),
+                    b.err().unwrap_or(String::from("one record"))
+                )),
+            }
+            compare_dir(&mut r, "/t", got, t_want.clone());
+            let n21 = res(&out, s21);
+            let mut tgot = Vec::new();
+            let mut toffs = Vec::new();
+            if (1..=4096).contains(&n21) {
+                if let Err(why) = parse_dents(&out[ot..ot + n21 as usize], &mut tgot, &mut toffs) {
+                    r.fail(format_args!("{DENTS_ID}: /tmp: {why}"));
+                }
+            } else {
+                r.fail(format_args!("{DENTS_ID}: getdents64 of /tmp returned {}", answer(n21)));
+            }
+            compare_dir(&mut r, "/tmp (three records and an unused one written before the mount)", tgot, tmp_want.clone());
             let n7 = res(&out, s7);
             let mut rgot = Vec::new();
             let mut roffs = Vec::new();
@@ -1377,7 +1687,7 @@ fn dents_row(raw: &Raw, root: &InodeRef) {
             let argv = ["ls", "-a", "/", "/a/b/c"];
             match run("ls", || exec::spawn("/bin/ls", &argv, &[])) {
                 Ok(ran) => {
-                    note(format_args!("{DENTS_ID}: /bin/ls -a / /a/b/c: {} bytes out, {} after {} ms", ran.out.len(), status_text(ran.exit), ran.ms));
+                    note(format_args!("{DENTS_ID}: /bin/ls -a / /a/b/c: {} bytes out, {}", ran.out.len(), status_text(ran.exit)));
                     if ran.out != want.as_bytes() {
                         r.fail(format_args!(
                             "{DENTS_ID}: ls -a / /a/b/c printed {:?}, expected {:?} (the directories as the disk holds them, sorted)",
@@ -1390,7 +1700,7 @@ fn dents_row(raw: &Raw, root: &InodeRef) {
                 Err(why) => r.fail(format_args!("{why}")),
             }
         }
-        Err(why) => r.fail(format_args!("{DENTS_ID}: this vehicle's own read of /a/b/c failed: {why}")),
+        Err(why) => r.fail(format_args!("{DENTS_ID}: the test's own read of /a/b/c failed: {why}")),
     }
     r.finish(1);
 }
@@ -1422,6 +1732,7 @@ fn mkdir_row(raw: &Raw) {
     pl.is("close", SYS_CLOSE, &[A::R(gd)], 0);
     pl.is("mkdir(/tmp/d1) again", SYS_MKDIR, &[d1, i(0o755)], -EEXIST);
     pl.is("mkdir(\".\")", SYS_MKDIR, &[dot, i(0o755)], -EEXIST);
+    pl.is("mkdir(/tmp/d1/f) (a file there)", SYS_MKDIR, &[f, i(0o755)], -EEXIST);
     pl.is("mkdir(/tmp/d1/f/x)", SYS_MKDIR, &[f_x, i(0o755)], -ENOTDIR);
     pl.is("mkdir(/boot/x)", SYS_MKDIR, &[bx, i(0o755)], -EROFS);
     pl.run(&mut r, "m20a");
@@ -1491,17 +1802,115 @@ fn mkdir_row(raw: &Raw) {
 
 // ── Row 3: ext2.rename ───────────────────────────────────────────────────
 
+/// A move of a directory into its own subtree, through the learner's own
+/// `Inode::rename` on `pdir`'s inode (`new_dir` walked from `ndir`, or one
+/// held from before): -22 (EINVAL), and `pdir`'s records, `ndir`'s records
+/// and `src`'s links as they were.
+#[allow(clippy::too_many_arguments)]
+fn refused_direct(r: &mut Row, raw: &Raw, pdir: &str, old: &str, ndir: &str, held: Option<&InodeRef>, new: &str, src: &str, what: &str) {
+    let found = vfs::root().and_then(|root| {
+        let p = vfs::walk(&root, pdir)?;
+        let n = match held {
+            Some(h) => h.clone(),
+            None => vfs::walk(&root, ndir)?,
+        };
+        Ok((p, n))
+    });
+    let (p, n) = match found {
+        Ok(v) => v,
+        Err(e) => {
+            r.fail(format_args!("{RENAME_ID}: {pdir} or {ndir} not found through the mount: {}", errno_text(e)));
+            return;
+        }
+    };
+    let state = |r: &mut Row| (names(r, raw, pdir), names(r, raw, ndir), raw_at(r, raw, src).map(|(_, i)| links(&i)));
+    let before = state(r);
+    let got = p.rename(old, &*n, new);
+    if got != Err(EINVAL) {
+        let text = match got {
+            Ok(()) => String::from("0"),
+            Err(e) => errno_text(e),
+        };
+        r.fail(format_args!("{RENAME_ID}: Inode::rename(\"{old}\", {ndir}, \"{new}\") called on {pdir}'s inode ({what}) returned {text}, expected -22 (EINVAL)"));
+    }
+    let after = state(r);
+    if before != after {
+        r.fail(format_args!("{RENAME_ID}: after Inode::rename(\"{old}\", {ndir}, \"{new}\"): {pdir}'s records, {ndir}'s records and {src}'s links were {before:?}, are {after:?}"));
+    }
+}
+
 fn rename_row(raw: &Raw, control: Result<Vec<String>, String>) {
     let mut r = Row::new(RENAME_ID);
-    // The three files' bytes: splitmix64 of the nonce.
+    // The three files' bytes: splitmix64 of the nonce, the first word of
+    // each replaced by a word no one knows before this boot (CONTRACT
+    // §A.1-5: the read-back is bytes the learner's code only carries; s20
+    // fix round 2).
     let d = r.derived(RENAME_ID);
-    let (x, y, z) = (mix(d ^ 0x0301, 100), mix(d ^ 0x0302, 200), mix(d ^ 0x0303, 300));
+    let stamp = |mut v: Vec<u8>, k: u64| {
+        v[..8].copy_from_slice(&unpublished(0x0300 + k).to_le_bytes());
+        v
+    };
+    let (x, y, z) = (stamp(mix(d ^ 0x0301, 100), 1), stamp(mix(d ^ 0x0302, 200), 2), stamp(mix(d ^ 0x0303, 300), 3));
     let i = A::I;
     let mut pl = Plan::new();
     let (ra, rb, sub) = (pl.p.str("/tmp/ra"), pl.p.str("/tmp/rb"), pl.p.str("/tmp/ra/sub"));
-    for (what, d) in [("mkdir(/tmp/ra)", ra), ("mkdir(/tmp/rb)", rb), ("mkdir(/tmp/ra/sub)", sub)] {
+    let (emp, mv) = (pl.p.str("/tmp/rb/emp"), pl.p.str("/tmp/ra/mv"));
+    for (what, d) in [("mkdir(/tmp/ra)", ra), ("mkdir(/tmp/rb)", rb), ("mkdir(/tmp/ra/sub)", sub), ("mkdir(/tmp/rb/emp)", emp), ("mkdir(/tmp/ra/mv)", mv)] {
         pl.is(what, SYS_MKDIR, &[d, i(0o755)], 0);
     }
+    // The subtree cases (s20 fix rounds 2-5): a directory /tmp/<u> with a
+    // chain of `depth` directories below it, 3 to 8 (chosen from the nonce;
+    // a climb that stops early misses the deepest). Every name here — <u>,
+    // the chain's, the new name <v>, the two directories <m1> and <m2>,
+    // their children and their new names — is `d` and a word no one knows
+    // before this boot (CONTRACT §A.1-5; fix round 4: a fixed name was a
+    // needle; fix round 5: so was a role's first letter). <m1> and <m2>
+    // are moved INTO the chain, 1 to `depth` levels below <u> (so 2 or more
+    // below /tmp, never a sibling, never their own subtree), which must
+    // succeed: a rule that refuses every move but a sibling's fails it.
+    // Each holds a directory of its own (fix round 5: a rule that refuses
+    // any source with a subdirectory fails it), and one of the two, drawn
+    // from the nonce, is made before the chain, the other after it (fix
+    // round 5: a rule keyed on which inode is older fails it).
+    let depth = 3 + splitmix(d ^ 0x0310) % 6;
+    let word = |k: u64| format!("d{:012x}", unpublished(0x0320 + k));
+    let (un, vn, m1, m2, w1, w2) = (word(0), word(1), word(2), word(3), word(4), word(5));
+    let (k1, k2) = (word(20), word(21));
+    let top = format!("/tmp/{un}");
+    // chain[j]: the directory j levels below <u> (chain[0] is <u>).
+    let mut chain = alloc::vec![top.clone()];
+    for k in 1..=depth {
+        let next = format!("{}/{}", chain[(k - 1) as usize], word(5 + k));
+        chain.push(next);
+    }
+    let (from1, from2) = (format!("/tmp/{m1}"), format!("/tmp/{m2}"));
+    let (kid1, kid2) = (format!("{from1}/{k1}"), format!("{from2}/{k2}"));
+    // The mover made before the chain (fix round 6): /tmp/<x>, made with
+    // it, moves into its child first, so the mover holds a grandchild when
+    // it moves (a rule that refuses any source with one fails it) and an
+    // honest climb has passed through the mover before it moved. After it
+    // moves, <u> into that child must be refused: a climb that trusts a
+    // parent remembered from before the move, or that stops at the first
+    // directory older than <u>, lets it through.
+    let e1 = splitmix(d ^ 0x0314) & 1 == 0;
+    let (xn, x2, zn) = (word(22), word(23), word(24));
+    let xfrom = format!("/tmp/{xn}");
+    let (early, late) = if e1 { ([&from1, &kid1, &xfrom], [&from2, &kid2]) } else { ([&from2, &kid2, &xfrom], [&from1, &kid1]) };
+    for path in early.into_iter().chain(chain.iter()).chain(late) {
+        let pp = pl.p.str(path);
+        pl.is(&format!("mkdir({path})"), SYS_MKDIR, &[pp, i(0o755)], 0);
+    }
+    let ekid = if e1 { &kid1 } else { &kid2 };
+    let xto = format!("{ekid}/{x2}");
+    let deep_in = format!("{}/{vn}", chain[depth as usize]);
+    let dotted = format!("/tmp/ra/../{un}");
+    // The early mover goes at most `depth` - 2 levels below <u>, so the
+    // refusal into its child (fix round 6) is never deeper than the chain
+    // and the climb floor stays at `depth` (CONTRACT: eight `..` steps).
+    let lv = |salt: u64, early: bool| (1 + splitmix(d ^ salt) % if early { depth - 2 } else { depth }) as usize;
+    let (lv1, lv2) = (lv(0x0312, e1), lv(0x0313, !e1));
+    let to1 = format!("{}/{w1}", chain[lv1]);
+    note(format_args!("{RENAME_ID}: the rename into its own subtree goes {depth} levels below it"));
     for (path, bytes) in [("/tmp/ra/x", &x), ("/tmp/rb/y", &y), ("/tmp/ra/z", &z)] {
         let p = pl.p.str(path);
         let off = pl.p.bytes(bytes);
@@ -1514,11 +1923,30 @@ fn rename_row(raw: &Raw, control: Result<Vec<String>, String>) {
     let (ino_x, ino_y, ino_z, ino_sub, ino_ra, ino_rb) = (ino(&mut r, "/tmp/ra/x"), ino(&mut r, "/tmp/rb/y"), ino(&mut r, "/tmp/ra/z"), ino(&mut r, "/tmp/ra/sub"), ino(&mut r, "/tmp/ra"), ino(&mut r, "/tmp/rb"));
     // The blocks of the file a rename will replace, to see them given back.
     let y_blocks = raw_at(&mut r, raw, "/tmp/rb/y").and_then(|(_, i)| got(&mut r, raw.blocks_of(&i))).map(|(d, m)| [d, m].concat()).unwrap_or_default();
+    // The empty directory a directory will replace, to see it freed whole.
+    let (ino_emp, ino_mv) = (ino(&mut r, "/tmp/rb/emp"), ino(&mut r, "/tmp/ra/mv"));
+    let (ino_m1, ino_m2) = (ino(&mut r, &from1), ino(&mut r, &from2));
+    let (ino_k1, ino_k2) = (ino(&mut r, &kid1), ino(&mut r, &kid2));
+    let ino_g = ino(&mut r, &xfrom);
+    let emp_blocks = raw_at(&mut r, raw, "/tmp/rb/emp").and_then(|(_, i)| got(&mut r, raw.blocks_of(&i))).map(|(d, m)| [d, m].concat()).unwrap_or_default();
     let mut pl = Plan::new();
-    let cases: [(&str, &str, i64); 13] = [
+    let into_self = format!("{top}/{vn}");
+    // <x> moves into the early mover's child after the last rename that
+    // frees an inode and before either mover moves.
+    let cases: [(&str, &str, i64); 23] = [
         ("/tmp/ra/x", "/tmp/rb/x2", 0),
         ("/tmp/rb/x2", "/tmp/rb/y", 0),
         ("/tmp/ra/sub", "/tmp/rb/sub2", 0),
+        ("/tmp/ra/mv", "/tmp/rb/emp", 0),
+        (&xfrom, &xto, 0),
+        (&from1, &to1, 0),
+        (&top, &deep_in, -EINVAL),
+        (&dotted, &deep_in, -EINVAL),
+        (&top, &into_self, -EINVAL),
+        ("/tmp/rb/sub2/", "/tmp/rb/s3/", 0),
+        ("/tmp/rb/s3", "/tmp/rb/sub2", 0),
+        ("/tmp/ra/z/", "/tmp/ra/z3", -ENOTDIR),
+        ("/tmp/ra/z", "/tmp/ra/z3/", -ENOTDIR),
         ("/tmp/rb", "/tmp/rb/sub2/in", -EINVAL),
         ("/tmp/ra/z", "/tmp/rb/sub2", -EISDIR),
         ("/tmp/rb/sub2", "/tmp/rb/y", -ENOTDIR),
@@ -1534,6 +1962,12 @@ fn rename_row(raw: &Raw, control: Result<Vec<String>, String>) {
         let (pa, pb) = (pl.p.str(a), pl.p.str(b));
         pl.is(&format!("rename({a}, {b})"), SYS_RENAME, &[pa, pb], want);
     }
+    // `.` or `..` as either name: -EINVAL, CONTRACT §A.4's pin (POSIX's
+    // errno; Linux answers EBUSY).
+    for (a, b) in [("/tmp/rb/.", "/tmp/rdot"), ("/tmp/rb/sub2/..", "/tmp/rdd"), ("/tmp/ra/z2", "/tmp/rb/.")] {
+        let (pa, pb) = (pl.p.str(a), pl.p.str(b));
+        pl.is(&format!("rename({a}, {b})"), SYS_RENAME, &[pa, pb], -EINVAL);
+    }
     let (px, py) = (pl.p.str("/tmp/ra/x"), pl.p.str("/tmp/rb/y"));
     let (buf, boff) = pl.p.buf(400);
     pl.is("open(/tmp/ra/x) after it moved", SYS_OPEN, &[px, i(O_RDONLY)], -ENOENT);
@@ -1543,19 +1977,124 @@ fn rename_row(raw: &Raw, control: Result<Vec<String>, String>) {
     if let Some(out) = pl.run(&mut r, "r20b") {
         r.expect_bytes("/tmp/rb/y read back", &out[boff..boff + 100], &x);
     }
+    // The same refusal with no path at all (s20 fix rounds 3-4): the
+    // learner's own `Inode::rename`, called on /tmp's inode with <u> as
+    // `old` and a directory of the chain as `new_dir` — the deepest, then
+    // one at a level chosen from the nonce. A check made on the path's
+    // text, however it is normalised, never sees these calls; only a climb
+    // from `new_dir` does. Refused, each must leave /tmp's records, the
+    // target's records and <u>'s links as they were. Then <m2> moved into
+    // the chain the same way, which must succeed.
+    let drawn = (1 + splitmix(d ^ 0x0311) % depth) as usize;
+    match vfs::root().and_then(|root| Ok((root.clone(), vfs::walk(&root, "/tmp")?))) {
+        Ok((root, tdir)) => {
+            for level in [depth as usize, drawn, 0] {
+                let target = &chain[level];
+                let Ok(ndir) = vfs::walk(&root, target) else {
+                    r.fail(format_args!("{RENAME_ID}: {target} not found through the mount"));
+                    continue;
+                };
+                let state = |r: &mut Row| (names(r, raw, "/tmp"), names(r, raw, target), raw_at(r, raw, &top).map(|(_, i)| links(&i)));
+                let before = state(&mut r);
+                let got = tdir.rename(&un, &*ndir, &vn);
+                let text = match got {
+                    Ok(()) => String::from("0"),
+                    Err(e) => errno_text(e),
+                };
+                if got != Err(EINVAL) {
+                    let into = if level == 0 { String::from("a directory into itself") } else { format!("a directory into its own subtree, level {level} below it") };
+                    r.fail(format_args!("{RENAME_ID}: Inode::rename(\"{un}\", {target}, \"{vn}\") called on /tmp's inode ({into}, no path) returned {text}, expected -22 (EINVAL)"));
+                }
+                let after = state(&mut r);
+                if before != after {
+                    r.fail(format_args!("{RENAME_ID}: after Inode::rename(\"{un}\", {target}, \"{vn}\"): /tmp's records, {target}'s records and {top}'s links were {before:?}, are {after:?}"));
+                }
+            }
+            let target = &chain[lv2];
+            match vfs::walk(&root, target) {
+                Ok(ndir) => {
+                    if let Err(e) = tdir.rename(&m2, &*ndir, &w2) {
+                        r.fail(format_args!("{RENAME_ID}: Inode::rename(\"{m2}\", {target}, \"{w2}\") called on /tmp's inode (a directory into its sibling {top}'s subtree, level {lv2} below it, not its own) returned {}, expected 0", errno_text(e)));
+                    }
+                }
+                Err(e) => r.fail(format_args!("{RENAME_ID}: {target} not found through the mount: {}", errno_text(e))),
+            }
+        }
+        Err(e) => r.fail(format_args!("{RENAME_ID}: /tmp not found through the mount: {}", errno_text(e))),
+    }
+    // <u> into the child of the mover made before the chain, now that the
+    // mover lies below <u> (fix round 6): refused by `rename`, then by the
+    // learner's `Inode::rename` with that child as `new_dir`, nothing
+    // changed.
+    let (eto, ekn) = if e1 { (to1.clone(), &k1) } else { (format!("{}/{w2}", chain[lv2]), &k2) };
+    let ein = format!("{eto}/{ekn}");
+    let ezin = format!("{ein}/{zn}");
+    let mut pl = Plan::new();
+    let (pa, pb) = (pl.p.str(&top), pl.p.str(&ezin));
+    pl.is(&format!("rename({top}, {ezin}) (into a directory moved below it)"), SYS_RENAME, &[pa, pb], -EINVAL);
+    pl.run(&mut r, "r20c");
+    match vfs::root().and_then(|root| Ok((vfs::walk(&root, "/tmp")?, vfs::walk(&root, &ein)?))) {
+        Ok((tdir, ndir)) => {
+            let state = |r: &mut Row| (names(r, raw, "/tmp"), names(r, raw, &ein), raw_at(r, raw, &top).map(|(_, i)| links(&i)));
+            let before = state(&mut r);
+            let got = tdir.rename(&un, &*ndir, &zn);
+            if got != Err(EINVAL) {
+                let text = match got {
+                    Ok(()) => String::from("0"),
+                    Err(e) => errno_text(e),
+                };
+                r.fail(format_args!("{RENAME_ID}: Inode::rename(\"{un}\", {ein}, \"{zn}\") called on /tmp's inode (a directory into a directory moved below it, no path) returned {text}, expected -22 (EINVAL)"));
+            }
+            let after = state(&mut r);
+            if before != after {
+                r.fail(format_args!("{RENAME_ID}: after Inode::rename(\"{un}\", {ein}, \"{zn}\"): /tmp's records, {ein}'s records and {top}'s links were {before:?}, are {after:?}"));
+            }
+        }
+        Err(e) => r.fail(format_args!("{RENAME_ID}: /tmp or {ein} not found through the mount: {}", errno_text(e))),
+    }
+    // The grandchild moved in before its grandparent moved: its `..` still
+    // names the child, which now has three links.
+    let ekino = if e1 { ino_k1 } else { ino_k2 };
+    let gn = names(&mut r, raw, &format!("{ein}/{x2}"));
+    r.expect(gn.iter().any(|e| e.0 == ".." && e.1 == ekino) && gn.iter().any(|e| e.0 == "." && e.1 == ino_g), &format!("{ein}/{x2} (inode {ino_g}, once {xfrom})'s . and .. name inodes {ino_g} and {ekino}: {gn:?}"));
+    if let Some((_, i)) = raw_at(&mut r, raw, &ein) {
+        r.expect_eq(&format!("{ein}: i_links_count on the disk"), links(&i), 3);
+    }
+    // Both moves into the chain, on the disk: the new record names the
+    // moved inode, its `..` names its new parent, the old name is gone, and
+    // the child it carried still names it as `..` (three links: its record,
+    // its `.`, the child's `..`).
+    for (to, ino_m, from, kid, ino_k) in [(to1.clone(), ino_m1, &from1, &k1, ino_k1), (format!("{}/{w2}", chain[lv2]), ino_m2, &from2, &k2, ino_k2)] {
+        let parent = &to[..to.rfind('/').unwrap_or(0)];
+        let pino = ino(&mut r, parent);
+        let (pn, mn) = (names(&mut r, raw, parent), names(&mut r, raw, &to));
+        let leaf = String::from(&to[parent.len() + 1..]);
+        r.expect(pn.iter().any(|e| e.0 == leaf && e.1 == ino_m), &format!("{parent}'s records name {leaf} as inode {ino_m} (moved from {from}): {pn:?}"));
+        r.expect(mn.iter().any(|e| e.0 == ".." && e.1 == pino), &format!("{to}'s .. names {parent} (inode {pino}): {mn:?}"));
+        if let Some(Some(_)) = got(&mut r, raw.walk(from)) {
+            r.fail(format_args!("{RENAME_ID}: {from} is still a record on the disk after it moved"));
+        }
+        let kn = names(&mut r, raw, &format!("{to}/{kid}"));
+        r.expect(kn.iter().any(|e| e.0 == ".." && e.1 == ino_m) && kn.iter().any(|e| e.0 == "." && e.1 == ino_k), &format!("{to}/{kid} (inode {ino_k}, moved with {from})'s . and .. name inodes {ino_k} and {ino_m}: {kn:?}"));
+        if let Some((_, i)) = raw_at(&mut r, raw, &to) {
+            r.expect_eq(&format!("{to}: i_links_count on the disk"), links(&i), 3);
+        }
+    }
     let tmp = raw.walk("/tmp").ok().flatten().unwrap_or(0);
     let s = String::from;
     let mut want_a = alloc::vec![(s("."), ino_ra), (s(".."), tmp), (s("z2"), ino_z)];
     want_a.sort();
     let got_a = names(&mut r, raw, "/tmp/ra");
     r.expect(got_a == want_a, &format!("/tmp/ra's records {got_a:?}, expected {want_a:?}"));
-    let mut want_b = alloc::vec![(s("."), ino_rb), (s(".."), tmp), (s("y"), ino_x), (s("sub2"), ino_sub)];
+    let mut want_b = alloc::vec![(s("."), ino_rb), (s(".."), tmp), (s("y"), ino_x), (s("sub2"), ino_sub), (s("emp"), ino_mv)];
     want_b.sort();
     let got_b = names(&mut r, raw, "/tmp/rb");
     r.expect(got_b == want_b, &format!("/tmp/rb's records {got_b:?}, expected {want_b:?}"));
     let got_s = names(&mut r, raw, "/tmp/rb/sub2");
     r.expect(got_s.iter().any(|e| e.0 == ".." && e.1 == ino_rb), &format!("/tmp/rb/sub2's .. names /tmp/rb (inode {ino_rb}): {got_s:?}"));
-    for (path, n) in [("/tmp/ra", 2), ("/tmp/rb", 3), ("/tmp/rb/sub2", 2), ("/tmp/rb/y", 1)] {
+    let got_e = names(&mut r, raw, "/tmp/rb/emp");
+    r.expect(got_e.iter().any(|e| e.0 == ".." && e.1 == ino_rb), &format!("/tmp/rb/emp (once /tmp/ra/mv)'s .. names /tmp/rb (inode {ino_rb}): {got_e:?}"));
+    for (path, n) in [("/tmp/ra", 2), ("/tmp/rb", 4), ("/tmp/rb/sub2", 2), ("/tmp/rb/emp", 2), ("/tmp/rb/y", 1)] {
         if let Some((_, i)) = raw_at(&mut r, raw, path) {
             r.expect_eq(&format!("{path}: i_links_count on the disk"), links(&i), n);
         }
@@ -1568,6 +2107,22 @@ fn rename_row(raw: &Raw, control: Result<Vec<String>, String>) {
             r.expect_eq(&format!("the replaced inode {ino_y}: i_blocks"), le32(&i, 28), 0);
         }
     }
+    if ino_emp != 0 {
+        if let (Some(i), Some(ib)) = (got(&mut r, raw.inode(ino_emp)), got(&mut r, raw_block(raw.inode_bitmap))) {
+            r.expect_eq(&format!("the replaced empty directory /tmp/rb/emp's inode {ino_emp}: i_links_count"), links(&i), 0);
+            r.expect(le32(&i, 20) != 0, &format!("the replaced directory's inode {ino_emp}: i_dtime set"));
+            r.expect_eq(&format!("the replaced directory's inode {ino_emp}: its inode bitmap bit"), (ib[((ino_emp - 1) / 8) as usize] >> ((ino_emp - 1) % 8) & 1) as u64, 0);
+            r.expect_eq(&format!("the replaced directory's inode {ino_emp}: i_blocks"), le32(&i, 28), 0);
+        }
+    }
+    r.expect(!emp_blocks.is_empty(), "the empty directory the rename replaces (/tmp/rb/emp) held a block before it");
+    if let Some(bb) = got(&mut r, raw_block(raw.block_bitmap)) {
+        for b in &emp_blocks {
+            if bb[(b / 8) as usize] >> (b % 8) & 1 == 1 {
+                r.fail(format_args!("{RENAME_ID}: block {b} of the replaced directory /tmp/rb/emp still set in the block bitmap"));
+            }
+        }
+    }
     r.expect(!y_blocks.is_empty(), "the file the rename replaces (/tmp/rb/y) held a block before it");
     if let Some(bb) = got(&mut r, raw_block(raw.block_bitmap)) {
         for b in &y_blocks {
@@ -1576,9 +2131,108 @@ fn rename_row(raw: &Raw, control: Result<Vec<String>, String>) {
             }
         }
     }
-    for path in ["/tmp/ra/x", "/tmp/rb/x2", "/tmp/ra/sub", "/tmp/ra/z"] {
+    for path in ["/tmp/ra/x", "/tmp/rb/x2", "/tmp/ra/sub", "/tmp/ra/z", "/tmp/rb/s3", "/tmp/ra/mv"] {
         if let Some(Some(_)) = got(&mut r, raw.walk(path)) {
             r.fail(format_args!("{RENAME_ID}: {path} is still a record on the disk after it moved"));
+        }
+    }
+    for path in ["/tmp/ra/z3", "/tmp/rdot", "/tmp/rdd"] {
+        if let Some(Some(_)) = got(&mut r, raw.walk(path)) {
+            r.fail(format_args!("{RENAME_ID}: {path} is a record on the disk, though the rename to it was refused"));
+        }
+    }
+    // A directory never becomes its own descendant, judged by inode, under
+    // every path shape (s20 fix round 7): each case through `rename`, then
+    // through the learner's own `Inode::rename`, each refused target at
+    // most `depth` levels below its source (the climb floor stays at
+    // `depth`). Every name is a word no one knows before this boot.
+    //  - over an existing empty directory inside <u>'s subtree;
+    //  - a directory directly under / into its own subtree;
+    //  - a directory moved under another tree's directory of the same
+    //    name, which must succeed (a check on names refuses it);
+    //  - into a directory made in the inode a removed directory gave back,
+    //    after a climb passed through the removed one;
+    //  - into a directory held from before its parent moved below <u2>.
+    let (ae, ca, cb, cs, ct, cn, ck, cn2) = (word(25), word(26), word(27), word(28), word(29), word(30), word(31), word(32));
+    let (ds, dx, da, dy, dz) = (word(33), word(34), word(35), word(36), word(37));
+    let (eq, ea, eb, ez) = (word(38), word(39), word(40), word(41));
+    let (gn, gk, gz) = (word(42), word(43), word(44));
+    let over = format!("{}/{ae}", chain[drawn]);
+    let (ta, tb) = (format!("/tmp/{ca}"), format!("/tmp/{cb}"));
+    let (dsx, dad) = (format!("/tmp/{ds}/{dx}"), format!("/tmp/{da}"));
+    let dady = format!("{dad}/{dy}");
+    let (teq, tea) = (format!("/tmp/{eq}"), format!("/tmp/{ea}"));
+    let teb = format!("{tea}/{eb}");
+    let (g, ggk) = (format!("/{gn}"), format!("/{gn}/{gk}"));
+    let mut pl = Plan::new();
+    for path in [over.clone(), ta.clone(), format!("{ta}/{cs}"), format!("{ta}/{ct}"), tb.clone(), format!("{tb}/{cs}"), format!("{tb}/{ct}"), format!("{tb}/{ct}/{ck}"), format!("/tmp/{ds}"), dsx.clone(), dad.clone(), teq.clone(), tea.clone(), teb.clone(), g.clone(), ggk.clone()] {
+        let pp = pl.p.str(&path);
+        pl.is(&format!("mkdir({path})"), SYS_MKDIR, &[pp, i(0o755)], 0);
+    }
+    pl.run(&mut r, "r20d");
+    let ino_dx = ino(&mut r, &dsx);
+    let (ino_cs, ino_ct) = (ino(&mut r, &format!("{ta}/{cs}")), ino(&mut r, &format!("{ta}/{ct}")));
+    let twin_to = format!("{tb}/{cs}/{cn}");
+    let mut pl = Plan::new();
+    for (a, b, want, how) in [
+        (top.clone(), over.clone(), -EINVAL, "over an empty directory inside it"),
+        (g.clone(), format!("{ggk}/{gz}"), -EINVAL, "a directory under / into its own subtree"),
+        (g.clone(), format!("{g}/{gz}"), -EINVAL, "a directory under / into itself"),
+        (format!("{ta}/{cs}"), twin_to.clone(), 0, "under another tree's directory of the same name"),
+        (format!("/tmp/{ds}"), format!("{dsx}/{dz}"), -EINVAL, "into its own child"),
+    ] {
+        let (pa, pb) = (pl.p.str(&a), pl.p.str(&b));
+        pl.is(&format!("rename({a}, {b}) ({how})"), SYS_RENAME, &[pa, pb], want);
+    }
+    pl.run(&mut r, "r20e");
+    refused_direct(&mut r, raw, "/tmp", &un, &chain[drawn], None, &ae, &top, &format!("over an empty directory inside it, level {drawn} below it"));
+    refused_direct(&mut r, raw, "/", &gn, &ggk, None, &gz, &g, "a directory under / into its own subtree");
+    refused_direct(&mut r, raw, "/", &gn, &g, None, &gz, &g, "a directory under / into itself");
+    // The climb above passed through <dx>; it goes, and a directory made
+    // right after it, in another tree, takes the inode it gave back.
+    let mut pl = Plan::new();
+    let (pdx, pdy, pda, pdz) = (pl.p.str(&dsx), pl.p.str(&dady), pl.p.str(&dad), pl.p.str(&format!("{dady}/{dz}")));
+    pl.is(&format!("rmdir({dsx})"), SYS_RMDIR, &[pdx], 0);
+    pl.is(&format!("mkdir({dady})"), SYS_MKDIR, &[pdy, i(0o755)], 0);
+    pl.is(&format!("rename({dad}, {dady}/{dz}) (into its child, made after {dsx} went)"), SYS_RENAME, &[pda, pdz], -EINVAL);
+    pl.run(&mut r, "r20f");
+    let ino_dy = ino(&mut r, &dady);
+    if ino_dy != 0 && ino_dy != ino_dx {
+        note(format_args!("{RENAME_ID}: {dady} is inode {ino_dy}, not the inode {ino_dx} {dsx} gave back, so this kernel's allocator did not reuse it"));
+    }
+    refused_direct(&mut r, raw, "/tmp", &da, &dady, None, &dz, &dad, &format!("into its child, made after {dsx} went"));
+    // A directory held from before its parent moved below <eq>.
+    match vfs::root().and_then(|root| vfs::walk(&root, &teb)) {
+        Ok(held) => {
+            let mut pl = Plan::new();
+            let (pa, pb) = (pl.p.str(&tea), pl.p.str(&format!("{teq}/{ea}")));
+            pl.is(&format!("rename({tea}, {teq}/{ea})"), SYS_RENAME, &[pa, pb], 0);
+            pl.run(&mut r, "r20g");
+            let now = format!("{teq}/{ea}/{eb}");
+            refused_direct(&mut r, raw, "/tmp", &eq, &now, Some(&held), &ez, &teq, &format!("into {now}, held from before {tea} moved below it"));
+        }
+        Err(e) => r.fail(format_args!("{RENAME_ID}: {teb} not found through the mount: {}", errno_text(e))),
+    }
+    // The second twin through the learner's own `Inode::rename`.
+    match vfs::root().and_then(|root| Ok((vfs::walk(&root, &ta)?, vfs::walk(&root, &format!("{tb}/{ct}/{ck}"))?))) {
+        Ok((pdir, ndir)) => {
+            if let Err(e) = pdir.rename(&ct, &*ndir, &cn2) {
+                r.fail(format_args!("{RENAME_ID}: Inode::rename(\"{ct}\", {tb}/{ct}/{ck}, \"{cn2}\") called on {ta}'s inode (under another tree's directory of the same name, no path) returned {}, expected 0", errno_text(e)));
+            }
+        }
+        Err(e) => r.fail(format_args!("{RENAME_ID}: {ta} or {tb}/{ct}/{ck} not found through the mount: {}", errno_text(e))),
+    }
+    // Both twins on the disk: the new record names the moved inode, its
+    // `..` names its new parent, and the old record is gone.
+    for (to, ino_m, from) in [(twin_to.clone(), ino_cs, format!("{ta}/{cs}")), (format!("{tb}/{ct}/{ck}/{cn2}"), ino_ct, format!("{ta}/{ct}"))] {
+        let parent = &to[..to.rfind('/').unwrap_or(0)];
+        let pino = ino(&mut r, parent);
+        let (pn, mn) = (names(&mut r, raw, parent), names(&mut r, raw, &to));
+        let leaf = String::from(&to[parent.len() + 1..]);
+        r.expect(ino_m != 0 && pn.iter().any(|e| e.0 == leaf && e.1 == ino_m), &format!("{parent}'s records name {leaf} as inode {ino_m} (moved from {from}): {pn:?}"));
+        r.expect(mn.iter().any(|e| e.0 == ".." && e.1 == pino), &format!("{to}'s .. names {parent} (inode {pino}): {mn:?}"));
+        if let Some(Some(_)) = got(&mut r, raw.walk(&from)) {
+            r.fail(format_args!("{RENAME_ID}: {from} is still a record on the disk after it moved"));
         }
     }
     // After every move: the whole tree, from the root, against both
@@ -1586,7 +2240,7 @@ fn rename_row(raw: &Raw, control: Result<Vec<String>, String>) {
     // is its control).
     match control {
         Ok(v) if v.is_empty() => {}
-        Ok(v) => r.fail(format_args!("{RENAME_ID}: this file's check of the disk as written, before the mount, disagrees (the vehicle is wrong): {}", v.join("; "))),
+        Ok(v) => r.fail(format_args!("{RENAME_ID}: this file's check of the disk as written, before the mount, disagrees (the test is wrong): {}", v.join("; "))),
         Err(why) => r.fail(format_args!("{RENAME_ID}: the check before the mount: {why}")),
     }
     match scan(raw).and_then(|s| agree(raw, &s)) {
@@ -1709,7 +2363,6 @@ unsafe extern "C" fn _start() -> ! {
     serial::init();
     ktap::begin(PLAN);
     prelude();
-    let mut c = Clock::new();
     let raw = match Raw::open() {
         Ok(raw) => raw,
         Err(why) => {
@@ -1718,6 +2371,8 @@ unsafe extern "C" fn _start() -> ! {
             halt()
         }
     };
+    // Row 1's input, written before the mount, before row 3's control.
+    let seeded = seed_tmp(&raw, ktap::derive(&ktap::nonce().unwrap_or([b'0'; 32]), DENTS_ID));
     // The disk as written must agree with itself: row 3's control.
     let pre = scan(&raw).and_then(|s| agree(&raw, &s));
     // The log, before any mount (row 4's control).
@@ -1741,14 +2396,14 @@ unsafe extern "C" fn _start() -> ! {
     };
     let proxy = Arc::new(Proxy(SpinLock::new(Some(root.clone()))));
     mount_rest(proxy.clone());
-    note(format_args!("vfs: / is this vehicle's root over ext2 on partition 2, /boot the boot archive ({ARCHIVE_LEN} bytes), /ktest this vehicle's programs"));
-    dents_row(&raw, &root);
+    note(format_args!("vfs: / is the test's root over ext2 on partition 2, /boot the boot archive ({ARCHIVE_LEN} bytes), /ktest the test's programs"));
+    dents_row(&raw, &root, seeded);
     drop(root);
     mkdir_row(&raw);
     rename_row(&raw, pre);
     txn_row(&raw, control);
     drop(fs);
-    note(format_args!("the rows took {} ms; the drive saw {} reads and {} writes", c.ms(), spy.reads.load(Ordering::Relaxed), writes().len()));
+    note(format_args!("the drive saw {} reads and {} writes", spy.reads.load(Ordering::Relaxed), writes().len()));
     sched::yield_now();
     quiet(ktap::end);
     halt()
