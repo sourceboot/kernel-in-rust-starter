@@ -1,0 +1,45 @@
+# user/rust/ -- `ulib`, the course's user-mode Rust crate (CONTRACT §A.8; LADDER §1).
+#
+# Course-owned, like the rest of user/. Its two bin targets are YOUR files, named
+# by path: userland/init.rs (lab 28) and userland/sh.rs (lab 29). The library is
+# what they build on: `_start`, one wrapper per syscall, `print!`, `derive()`
+# and a panic handler that exits 101.
+#
+# Not a member of os/'s workspace (the `[workspace]` below makes this directory
+# its own), so `cargo build` in os/ never compiles a half-written userland. The
+# lab-28-on vehicles build it with cwd = this directory, which picks up
+# os/.cargo/config.toml (relocation-model=static) and .cargo/config.toml here.
+[package]
+name = "ulib"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+build = "build.rs"
+autobins = false
+
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+test = false
+doctest = false
+
+[[bin]]
+name = "init"
+path = "../../userland/init.rs"
+test = false
+
+[[bin]]
+name = "sh"
+path = "../../userland/sh.rs"
+test = false
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+codegen-units = 1
+debug = false
+strip = true

@@ -20,6 +20,28 @@ use crate::syscall::Errno;
 
 /// `ioctl` request: the terminal's size, into a `struct winsize`.
 pub const TIOCGWINSZ: u64 = 0x5413;
+/// Lab 33: `ioctl` requests: the console's termios, read and replaced.
+pub const TCGETS: u64 = 0x5401;
+pub const TCSETS: u64 = 0x5402;
+/// Lab 33: the bits of a termios this console honours, and the `c_cc`
+/// slots it reads (Linux's numbers, asm-generic/termbits.h).
+pub mod tc {
+    pub const ICRNL: u32 = 0o400;
+    pub const ISIG: u32 = 0o1;
+    pub const ICANON: u32 = 0o2;
+    pub const ECHO: u32 = 0o10;
+    pub const VTIME: usize = 5;
+    pub const VMIN: usize = 6;
+    /// Linux's cooked defaults (`tty_std_termios`): `c_iflag` ICRNL|IXON,
+    /// `c_oflag` OPOST|ONLCR, `c_cflag` B38400|CS8|CREAD|HUPCL, `c_lflag`
+    /// ISIG|ICANON|ECHO|ECHOE|ECHOK|ECHOCTL|ECHOKE|IEXTEN, `c_line` 0, and
+    /// `c_cc` INIT_C_CC (^C, ^\\, DEL, ^U, ^D, VTIME 0, VMIN 1, …), as the
+    /// 36 bytes `TCGETS` writes.
+    pub const COOKED: [u8; 36] = [
+        0x00, 0x05, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0xbf, 0x04, 0x00, 0x00, 0x3b, 0x8a, 0x00, 0x00, 0x00, 0x03, 0x1c, 0x7f,
+        0x15, 0x04, 0x00, 0x01, 0x00, 0x11, 0x13, 0x1a, 0x00, 0x12, 0x0f, 0x17, 0x16, 0x00, 0x00, 0x00,
+    ];
+}
 /// The console's size, as `TIOCGWINSZ` reports it.
 pub const ROWS: u16 = 25;
 pub const COLS: u16 = 80;
@@ -182,4 +204,47 @@ impl Default for FdTable {
 pub fn with_fds<R>(f: impl FnOnce(&mut FdTable) -> R) -> R {
     let _ = f;
     todo!("lab 09 step 3 — with_fds: one table behind a SpinLock, for now")
+}
+
+/// Lab 32 step 5: ctrl+c, from the keyboard interrupt. Every process
+/// holding the console open but init (pid 1) is sent SIGINT, the input
+/// waiting is thrown away and `^C` is echoed; `true`. With no process
+/// holding the console, nothing, and `false` (ctrl+c is then a key).
+pub fn interrupt() -> bool {
+    todo!("lab 32 step 5 — interrupt: the input discarded, SIGINT to every process with the console open but pid 1")
+}
+
+impl Console {
+    /// Lab 33 step 1: the termios `TCGETS` writes — Linux's 36-byte
+    /// `struct termios` (`c_iflag`, `c_oflag`, `c_cflag`, `c_lflag`,
+    /// `c_line`, `c_cc[19]`), `tc::COOKED` until a `TCSETS` replaced it.
+    pub fn tcgets(&self) -> [u8; 36] {
+        todo!("lab 33 step 1 — Console::tcgets: the console's termios, Linux's 36 bytes, cooked until TCSETS changed it")
+    }
+
+    /// Lab 33 step 2: `TCSETS` — the console's termios is now `t`, for
+    /// every open file on it, from the next key read.
+    pub fn tcsets(&self, t: &[u8; 36]) {
+        let _ = t;
+        todo!("lab 33 step 2 — Console::tcsets: the 36 bytes are the console's termios now")
+    }
+
+    /// Lab 33 step 3: `read` with `ICANON` off — keys as they come, no line
+    /// and no editing: until `VMIN` bytes are there (what there is when it
+    /// is 0), CR made NL under `ICRNL`, echoed under `ECHO`; keys typed
+    /// beyond what the read takes stay in the ring.
+    pub fn read_raw(&self, of: &OpenFile, buf: &mut [u8]) -> Result<usize, Errno> {
+        let _ = (of, buf);
+        todo!("lab 33 step 3 — Console::read_raw: keys as they come, until VMIN bytes; ICRNL, ECHO; the rest stays in the ring")
+    }
+}
+
+impl OpenFile {
+    /// Lab 33 step 6: `ftruncate` (77) — the file is now `len` bytes, cut
+    /// or grown with zeros; only a regular file opened for writing,
+    /// `-EINVAL` for anything else.
+    pub fn truncate(&self, len: u64) -> Result<(), Errno> {
+        let _ = len;
+        todo!("lab 33 step 6 — OpenFile::truncate: a regular file open for writing is len bytes now; anything else EINVAL")
+    }
 }

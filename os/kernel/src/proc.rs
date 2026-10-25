@@ -111,6 +111,15 @@ impl VmaList {
         let _ = (start, len, need);
         todo!("lab 12 step 7 — VmaList::covers: every byte of the range in a VMA allowing `need`")
     }
+
+    /// Lab 25: take `[start, end)` out of the list. A VMA inside it goes, one
+    /// that overlaps an edge shrinks, one that holds it whole splits in two.
+    /// Returns the ranges taken, lowest first (whatever was mapped there is
+    /// the caller's).
+    pub fn carve(&mut self, start: VirtAddr, end: VirtAddr) -> Vec<(VirtAddr, VirtAddr)> {
+        let _ = (start, end);
+        todo!("lab 25 step 1 — VmaList::carve: drop, shrink or split every VMA overlapping [start, end), return the ranges taken")
+    }
 }
 
 /// A process. Its address space is its task's (`Task::aspace`); `root` is
@@ -257,4 +266,42 @@ impl fmt::Display for KillLine {
 pub fn kill(pid: Pid, k: Kill) -> ! {
     let _ = (pid, k);
     todo!("lab 12 step 11 — kill: print the line, then end the process as exit does")
+}
+
+// ── Lab 31: signals ──────────────────────────────────────────────────────
+
+/// Lab 31 step 1 (`kill`, syscall 62): send signal `n` (1–64) to process
+/// `pid`. `-ESRCH` when no live process has that pid; `-EINVAL` for a
+/// number above 64; 0 only asks whether the process is there. A signal the
+/// process ignores is dropped; one it has blocked waits in its pending set.
+pub fn signal(pid: Pid, n: u32) -> Result<(), Errno> {
+    let _ = (pid, n);
+    todo!("lab 31 step 1 — signal: -ESRCH for no such process, -EINVAL above 64, else the signal pending on it")
+}
+
+/// Lab 31 step 3: what `take_signal` hands the way back to ring 3 — the
+/// signal, its action (`sigaction`'s four words: handler, flags, restorer,
+/// mask) and the mask to restore when the handler returns (lab 32).
+pub struct Delivery {
+    pub sig: u32,
+    pub action: [u64; 4],
+    pub old_mask: u64,
+}
+
+/// Lab 31 step 3: the next signal for the running process, lowest number
+/// first, taken out of its pending set. An ignored one is dropped; one whose
+/// action is the default ends the process (its status the signal's number),
+/// or is dropped when the default is to ignore it (SIGCHLD, SIGWINCH,
+/// SIGURG); one with a handler comes back (lab 32 also installs the
+/// handler's mask then). `None` when nothing is to be delivered, or in a
+/// kernel task.
+pub fn take_signal() -> Option<Delivery> {
+    todo!("lab 31 step 3 — take_signal: the lowest pending unblocked signal, its default action done here or its handler handed back")
+}
+
+/// Lab 31 step 5: send signal `n` to the running process (SIGPIPE, from a
+/// write to a pipe with no reader). Nothing in a kernel task.
+pub fn raise(n: u32) {
+    let _ = n;
+    todo!("lab 31 step 5 — raise: signal n pending on the running process")
 }

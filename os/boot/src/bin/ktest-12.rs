@@ -243,7 +243,8 @@ fn seen(pid: Pid) -> Option<Seen> {
                 match v.kind {
                     VmaKind::Text => text = r,
                     VmaKind::Stack => stack = r,
-                    VmaKind::Data => {}
+                    // Data, and every kind a later lab adds (Anon at 25).
+                    _ => {}
                 }
             }
             out = Some(Seen {

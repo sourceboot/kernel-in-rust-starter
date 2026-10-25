@@ -83,7 +83,9 @@ os/                     the cargo workspace
   boot/                 the course's boot code: Limine (vendored + pinned),
                         the boot shim and the linker script
   user/                 the course's own user programs, C sources and built
-                        binaries, which your kernel runs from lab 09 on
+                        binaries, which your kernel runs from lab 09 on;
+                        user/rust/ is the library your own programs use
+  userland/             your init and shell (labs 28–29), on user/rust
   .cargo/               the bare-metal build settings
 rust-toolchain.toml     stable Rust and the x86_64-unknown-none target
 sboot.toml              tells the sboot CLI which course this repo is for

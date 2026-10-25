@@ -9,7 +9,8 @@
 //! tests call them.
 
 /// Producer side (IRQ 1). Lab 23: after storing, wake whoever sleeps on
-/// `chan()`.
+/// `chan()`. Lab 26: hand the scancode to `devfs::feed` first; when that
+/// returns `true` the input device keeps it.
 pub fn push(sc: u8) {
     let _ = sc;
     todo!("lab 06 step 4 — push: store the scancode if the ring has room")
@@ -40,4 +41,24 @@ pub fn chan() -> usize {
 pub fn translate(sc: u8) -> Option<u8> {
     let _ = sc;
     todo!("lab 23 step 1 — translate: follow shift and control; the shifted symbols, ctrl+letter's control code")
+}
+
+/// Lab 26: the `KEY_*` number (Linux's input-event-codes.h) of a set-1
+/// scancode, make or break alike; `None` for a scancode that names no key
+/// and for the 0xe0 prefix. Lab 26 also grows `push`: every scancode goes to
+/// `devfs::feed` first, and a key the input device keeps (a program holds
+/// it grabbed) goes no further.
+pub fn to_keycode(sc: u8) -> Option<u16> {
+    let _ = sc;
+    todo!("lab 26 step 1 — to_keycode: a set-1 scancode to Linux's KEY_* number")
+}
+
+/// Lab 33 step 4: the bytes one scancode sends to a raw-mode reader, as the
+/// Linux console sends them, into `out`; the count (0 for a prefix, a break
+/// code, a modifier). Esc 0x1b, Enter CR, Backspace DEL; after the 0xe0
+/// prefix up, down, right, left `ESC [ A`/`B`/`C`/`D`, Home `ESC [ 1 ~`,
+/// End `ESC [ 4 ~`; any other key what `translate` types (ctrl+c 0x03).
+pub fn vt100(sc: u8, out: &mut [u8; 4]) -> usize {
+    let _ = (sc, out);
+    todo!("lab 33 step 4 — vt100: what the Linux console sends for this key: ESC, CR, DEL, ESC [ A..D, ESC [ 1 ~, ESC [ 4 ~")
 }

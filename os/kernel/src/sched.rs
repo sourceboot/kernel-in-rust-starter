@@ -85,3 +85,25 @@ pub fn wakeup(chan: usize) {
     let _ = chan;
     todo!("lab 14 step 3 — wakeup: every sleeper on chan back in the run queue")
 }
+
+/// Lab 31 step 4: what an interruptible sleep returns when a signal ended it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Interrupted;
+
+/// Lab 31 step 4: `sleep`, that a signal the running process would act on
+/// also ends: then the task is off the channel and `Err` carries the guard.
+pub fn sleep_intr<'a, T: ?Sized>(
+    chan: usize,
+    lock: &'a SpinLock<T>,
+    held: SpinGuard<'a, T>,
+) -> Result<SpinGuard<'a, T>, (SpinGuard<'a, T>, Interrupted)> {
+    let _ = (chan, lock, held);
+    todo!("lab 31 step 4 — sleep_intr: sleep, ended early by a signal the process would act on")
+}
+
+/// Lab 31 step 4: wait until the tick count reaches `deadline`, or a signal
+/// the running process would act on arrives (`Err`).
+pub fn sleep_until_intr(deadline: u64) -> Result<(), Interrupted> {
+    let _ = deadline;
+    todo!("lab 31 step 4 — sleep_until_intr: the timed wait, ended early by a signal")
+}

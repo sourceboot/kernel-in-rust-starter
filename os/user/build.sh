@@ -8,6 +8,10 @@
 #                         (CONTRACT §A.7), read it back, write bin/SHA256SUMS
 #   ZIG=/path/to/zig ./build.sh     use a zig that is not first on PATH
 #   OBJDUMP=llvm-objdump ./build.sh use another disassembler for the SSE check
+#   BUSYBOX_TARBALL=/path/busybox-1.37.0.tar.bz2 ./build.sh
+#                         take busybox's pinned source from there, not from the
+#                         workspace's target/assets/ (it is not in the workspace; checked by sha256;
+#                         where to get it: busybox/README.md)
 #
 # Adding a program: one directory <name>/ with its .c file(s), one line in
 # PROGRAMS below. Nothing else in this file changes.
@@ -19,7 +23,7 @@ OBJDUMP=${OBJDUMP:-objdump}
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BIN=$HERE/bin
 
-# name | sources (relative to user/, crt0.c is always linked) | layout
+# name | sources (relative to user/; crt0.c is linked into every layout but "musl") | layout
 #   layout "flat": exactly one PT_LOAD, file offset 0 -> 0x1000000, filesz == memsz,
 #   so labs 09-12's vehicle may copy the file's bytes to 0x1000000 and enter at
 #   e_entry. "elf": loaded by lab 13's ELF loader; may carry a RW segment.
@@ -27,6 +31,23 @@ BIN=$HERE/bin
 #   general register or memory and xmm0/xmm1 (hostile-spin's inline asm, on purpose:
 #   lab 12's regs.survive.preempt row is the FXSAVE check -- CONTRACT §A.8 as amended
 #   2026-10-17). Any other SSE line in such a program still fails the build.
+#   "musl" (lab 25, CONTRACT §A.8 as built 2026-10-22): a static program built against
+#   zig's own musl with no crt0 and no linker script -- the toolchain's default static
+#   layout (first PT_LOAD r-- at offset 0 -> 0x1000000, then r-x, then rw-), at most
+#   one PT_TLS, any SSE (musl's own memcpy and printf use it), never AVX: no ymm/zmm
+#   and no VEX-encoded xmm instruction. Stripped (-s): zig's cached libc objects carry
+#   DWARF with the absolute path of the machine's zig install, and -g0 does not reach them.
+#   "port" (lab 27, CONTRACT §A.8 as built 2026-10-22): an upstream program built
+#   UNMODIFIED from its own makefile's file list. The sources field names that makefile;
+#   its `SRC_DOOM = …` line is the list of objects, each built from the .c beside it, all
+#   in one zig cc call with PORT_CFLAGS. Then every "musl" check. doomgeneric's own
+#   sources, licence and makefile sit under doomgeneric/ byte for byte as the pinned
+#   upstream commit has them (user/README.md, "doomgeneric").
+#   "busybox" (lab 30, CONTRACT §A.8 as built 2026-10-23): upstream busybox, UNMODIFIED, from
+#   its pinned release tarball (BUSYBOX_* below; not in the repo), configured by the committed
+#   .config the sources field names, built by busybox's own makefiles with zig cc as CC. Then
+#   every "musl" check, and its applet list must equal busybox/applets, which the image writer
+#   reads to make /bin's hard links from lab 30 (xtask/src/ext2.rs `busybox_bin`).
 PROGRAMS=(
   "hi|hi/hi.c|flat"
   "hostile-kwrite|hostile-kwrite/hostile-kwrite.c|flat"
@@ -49,6 +70,29 @@ PROGRAMS=(
   "rmdir|rmdir/rmdir.c|elf"
   "mounts|mounts/mounts.c|elf"
   "sh|sh/sh.c|elf"
+  # lab 24 on (the W4 programs): not in ARCHIVE; ext2's /bin carries them from lab 24's image on
+  # (xtask/src/ext2.rs W4_PROGRAMS)
+  "cowtest|cowtest/cowtest.c|elf"
+  # lab 25 (the W4 musl programs, layout musl): the same rule
+  "hello|hello/hello.c|musl"
+  "tls|tls/tls.c|musl"
+  "mem|mem/mem.c|musl"
+  # lab 26 (the devices: /dev/fb0 and /dev/input/event0), layout musl
+  "fbtest|fbtest/fbtest.c|musl"
+  "evtest|evtest/evtest.c|musl"
+  # lab 27 (the port): upstream doomgeneric, the linuxvt backend, layout port
+  "doomgeneric|doomgeneric/doomgeneric/Makefile.linuxvt|port"
+  # lab 30: busybox 1.37.0, ash and the applets labs 30-32 run (busybox/README.md), layout busybox
+  "busybox|busybox/busybox.config|busybox"
+  # lab 29 (the learner's shell's script): not in ARCHIVE; ext2's /bin carries it from lab 29's
+  # image on (xtask/src/ext2.rs SHELL_PROGRAMS)
+  "mark|mark/mark.c|elf"
+  # lab 32 (handlers: the registers a handler may not disturb, SA_RESTART, rt_sigsuspend),
+  # layout musl; not in ARCHIVE, and kept out of ext2's /bin before 32 (HANDLER_PROGRAMS)
+  "sigregs|sigregs/sigregs.c|musl"
+  # lab 33 (the terminal: termios, raw input, access, ftruncate), layout musl; not in ARCHIVE,
+  # and kept out of ext2's /bin before 33 (TERMIOS_PROGRAMS)
+  "ttyprobe|ttyprobe/ttyprobe.c|musl"
 )
 
 # The boot archive (CONTRACT §A.7): what labs 13-16 mount at / and 17 on at /boot.
@@ -70,6 +114,20 @@ CFLAGS=(
   -g0
 )
 LDFLAGS=(-T "$HERE/user.ld")
+# The "musl" layout's flags: libc and its start-up code are the toolchain's, SSE is allowed.
+MUSL_CFLAGS=(-target x86_64-linux-musl -static -O2 -Wall -Wextra -g0 -s)
+# The "port" layout's flags: CONTRACT Appendix (1)'s build line (`make -f Makefile.linuxvt
+# CC="zig cc -target x86_64-linux-musl" CFLAGS="-static -O2 -DNORMALUNIX -DLINUX -DSNDSERV
+# -D_DEFAULT_SOURCE" LDFLAGS="-static"`), plus -g0 -s as for "musl": without them the bytes
+# carry DWARF with the build directory's absolute path (measured 2026-10-22: the Appendix
+# line's binary differs by size and sha256 from one directory to another), and
+# -ffile-prefix-map below for the same reason (`__FILE__`).
+PORT_CFLAGS=(-target x86_64-linux-musl -static -O2 -DNORMALUNIX -DLINUX -DSNDSERV -D_DEFAULT_SOURCE -g0 -s)
+# The "busybox" layout's source: busybox.net's release tarball, pinned by sha256 (busybox/README.md).
+BUSYBOX_VERSION=1.37.0
+BUSYBOX_SHA256=3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4
+BUSYBOX_URL=https://busybox.net/downloads/busybox-$BUSYBOX_VERSION.tar.bz2
+BUSYBOX_TARBALL=${BUSYBOX_TARBALL:-$HERE/../../target/assets/busybox-$BUSYBOX_VERSION.tar.bz2}
 
 have=$("$ZIG" version 2>/dev/null || true)
 if [[ "$have" != "$PIN" ]]; then
@@ -78,6 +136,74 @@ if [[ "$have" != "$PIN" ]]; then
 fi
 command -v python3 >/dev/null || { echo "build.sh: python3 is needed for the ELF checks" >&2; exit 1; }
 command -v "$OBJDUMP" >/dev/null || { echo "build.sh: $OBJDUMP is needed for the SSE check (set OBJDUMP)" >&2; exit 1; }
+if command -v sha256sum >/dev/null; then sum=(sha256sum); else sum=(shasum -a 256); fi
+
+# busybox's source, checked BEFORE bin/ is touched: a missing or different tarball is one
+# named refusal and bin/ stays as it was.
+if [[ " ${PROGRAMS[*]} " == *"|busybox "* ]]; then
+  if [[ ! -f "$BUSYBOX_TARBALL" ]]; then
+    echo "build.sh: busybox: no source tarball at $BUSYBOX_TARBALL; download $BUSYBOX_URL there" \
+         "(sha256 $BUSYBOX_SHA256), or name it with BUSYBOX_TARBALL=" >&2
+    exit 1
+  fi
+  got=$("${sum[@]}" "$BUSYBOX_TARBALL" | cut -d' ' -f1)
+  if [[ "$got" != "$BUSYBOX_SHA256" ]]; then
+    echo "build.sh: busybox: $BUSYBOX_TARBALL has sha256 $got, not busybox $BUSYBOX_VERSION's $BUSYBOX_SHA256" >&2
+    exit 1
+  fi
+  for t in make tar bzip2 cc; do
+    command -v "$t" >/dev/null || { echo "build.sh: busybox: '$t' is needed to build busybox" >&2; exit 1; }
+  done
+fi
+
+# The "busybox" layout: unpack the pinned tarball and build out of tree, both in a temporary
+# directory, with the committed .config. CC is a wrapper around zig cc that drops the three
+# linker flags busybox's trylink adds for its own report (--warn-common, -Map, --verbose), which
+# zig's linker refuses; nothing else changes. KCONFIG_NOTIMESTAMP: no build date in the banner
+# ("BusyBox v1.37.0 ()"). SKIP_STRIP: zig's link at -Oz already leaves no symbols or debug info.
+build_busybox() { # name config-path
+  local tmp src out cfg="$HERE/$2" jobs
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/sboot-busybox.XXXXXX")
+  BUSYBOX_TMP=$tmp
+  trap 'rm -rf "$BUSYBOX_TMP"' EXIT
+  tar -xjf "$BUSYBOX_TARBALL" -C "$tmp"
+  src="$tmp/busybox-$BUSYBOX_VERSION"; out="$tmp/out"; mkdir -p "$out" "$tmp/cc"
+  [[ -f "$src/Makefile" ]] || { echo "build.sh: $1: the tarball has no busybox-$BUSYBOX_VERSION/Makefile" >&2; exit 1; }
+  cat > "$tmp/cc/zcc" <<EOF
+#!/bin/sh
+n=\$#
+for a in "\$@"; do
+  case "\$a" in -Wl,--warn-common|-Wl,--verbose|-Wl,-Map,*) ;; *) set -- "\$@" "\$a" ;; esac
+done
+shift \$n
+exec "$ZIG" cc -target x86_64-linux-musl "\$@"
+EOF
+  chmod +x "$tmp/cc/zcc"
+  cp "$cfg" "$out/.config"
+  jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+  local bb_make=(make -C "$src" O="$out" HOSTCC=cc CC="$tmp/cc/zcc" AR="$ZIG ar" SKIP_STRIP=y KCONFIG_NOTIMESTAMP=1)
+  # stdin is /dev/null: a config the release does not accept whole stops Kconfig, never waits.
+  if ! "${bb_make[@]}" oldconfig </dev/null >"$tmp/config.log" 2>&1 || ! cmp -s "$cfg" "$out/.config"; then
+    echo "build.sh: $1: busybox $BUSYBOX_VERSION's Kconfig does not take $2 unchanged (diff below)" >&2
+    diff "$cfg" "$out/.config" >&2 || true
+    exit 1
+  fi
+  if ! "${bb_make[@]}" -j"$jobs" busybox busybox.links </dev/null >"$tmp/build.log" 2>&1; then
+    tail -30 "$tmp/build.log" >&2
+    echo "build.sh: $1: busybox's build failed (the log's tail above)" >&2
+    exit 1
+  fi
+  local links want
+  links=$(sed 's|.*/||' "$out/busybox.links" | LC_ALL=C sort)
+  want=$(grep -v -e '^#' -e '^$' "$HERE/busybox/applets")
+  if [[ "$links" != "$want" ]]; then
+    echo "build.sh: $1: the build's applets differ from busybox/applets:" >&2
+    diff <(echo "$want") <(echo "$links") >&2 || true
+    exit 1
+  fi
+  cp "$out/busybox" "$BIN/$1"
+  rm -rf "$tmp"
+}
 
 # The ELF checks every course binary passes (CONTRACT §A.5, §A.8).
 elfcheck() { # file layout
@@ -100,12 +226,16 @@ phs = []
 for i in range(e_phnum):
     t, fl, off, va, pa, fsz, msz, al = struct.unpack_from("<IIQQQQQQ", d, e_phoff + i * e_phentsize)
     phs.append((NAMES.get(t, hex(t)), fl, off, va, fsz, msz))
-for bad in ("DYNAMIC", "INTERP", "TLS"):
+for bad in ("DYNAMIC", "INTERP") + (() if layout == "musl" else ("TLS",)):
     if any(p[0] == bad for p in phs): die(f"has PT_{bad}")
+if sum(p[0] == "TLS" for p in phs) > 1: die("has more than one PT_TLS")
 loads = [p for p in phs if p[0] == "LOAD"]
 if not loads or loads[0][3] != 0x1000000 or loads[0][2] != 0:
     die("first PT_LOAD is not file offset 0 at vaddr 0x1000000")
-if not (loads[0][3] <= e_entry < loads[0][3] + loads[0][4]) or not (loads[0][1] & 1):
+entry_in = [p for p in loads if p[3] <= e_entry < p[3] + p[4] and p[1] & 1]
+if layout == "musl":
+    if not entry_in: die("e_entry is not inside an executable PT_LOAD")
+elif not entry_in or entry_in[0] is not loads[0]:
     die("e_entry is not inside the executable first PT_LOAD")
 if layout in ("flat", "flat-sse") and (len(loads) != 1 or loads[0][4] != loads[0][5]):
     die("layout 'flat' needs exactly one PT_LOAD with filesz == memsz (writable data present?)")
@@ -128,6 +258,32 @@ rm -rf "$BIN"
 mkdir -p "$BIN"
 for row in "${PROGRAMS[@]}"; do
   IFS='|' read -r name srcs layout <<<"$row"
+  if [[ "$layout" == musl || "$layout" == port || "$layout" == busybox ]]; then
+    src=()
+    if [[ "$layout" == busybox ]]; then
+      build_busybox "$name" "$srcs"
+    elif [[ "$layout" == port ]]; then
+      mk="$HERE/$srcs"
+      objs=$(sed -n 's/^SRC_DOOM *= *//p' "$mk")
+      [[ -n "$objs" ]] || { echo "build.sh: $name: no SRC_DOOM line in $srcs" >&2; exit 1; }
+      for o in $objs; do src+=("$(dirname "$mk")/${o%.o}.c"); done
+      # -ffile-prefix-map: `__FILE__` (z_zone.h's Z_ChangeTag) is then "w_wad.c", not the
+      # checkout's absolute path (measured 2026-10-22: two directories, two sha256s, until this;
+      # zig cc makes a relative source name absolute, so compiling from the directory is not enough).
+      "$ZIG" cc "${PORT_CFLAGS[@]}" -ffile-prefix-map="$(dirname "$mk")/=" -o "$BIN/$name" "${src[@]}"
+    else
+      for s in $srcs; do src+=("$HERE/$s"); done
+      "$ZIG" cc "${MUSL_CFLAGS[@]}" -o "$BIN/$name" "${src[@]}"
+    fi
+    elfcheck "$BIN/$name" musl
+    avx=$("$OBJDUMP" -d "$BIN/$name" | grep -c -E '%ymm|%zmm|[[:space:]]v[a-z0-9]+[[:space:]]+[^#]*%xmm' || true)
+    if [[ "$avx" != 0 ]]; then
+      echo "build.sh: $name: $avx AVX instruction lines (ymm/zmm or VEX-encoded xmm); must be 0" >&2
+      exit 1
+    fi
+    echo "  $name: 0 AVX lines (layout $layout: SSE allowed)"
+    continue
+  fi
   src=("$HERE/crt0.c")
   for s in $srcs; do src+=("$HERE/$s"); done
   "$ZIG" cc "${CFLAGS[@]}" "${LDFLAGS[@]}" -o "$BIN/$name" "${src[@]}"
@@ -192,7 +348,6 @@ print(f"  boot.archive: {len(d)} bytes, {count} entries, each equal to bin/<name
 PY
 
 # SHA256SUMS lists every file in bin/ except itself (and its .tmp), sorted, in sha256sum's format.
-if command -v sha256sum >/dev/null; then sum=(sha256sum); else sum=(shasum -a 256); fi
 ( cd "$BIN" && find . -maxdepth 1 -type f ! -name 'SHA256SUMS*' | sed 's|^\./||' | LC_ALL=C sort \
     | while read -r f; do "${sum[@]}" "$f"; done ) > "$BIN/SHA256SUMS.tmp"
 mv "$BIN/SHA256SUMS.tmp" "$BIN/SHA256SUMS"

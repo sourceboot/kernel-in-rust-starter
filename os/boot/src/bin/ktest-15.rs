@@ -9,9 +9,10 @@
 //! `SBOOT_NONCE` in its environment. Everything after that is the learner's
 //! syscalls: init makes its pipes with `pipe2`, wires `producer | consumer`
 //! with `fork`, `dup2`, `close` and `execve`, and reaps with `wait4`. Every
-//! row but the first and the last is a program's, in the order they print:
+//! row but the first two and the last is a program's, in the order they print:
 //!
 //!   7    `pipe.full.writer_sleeps` — this vehicle's, first (the probe below)
+//!   8    `fcntl.dupfd.cloexec` — this vehicle's, second, before init (below)
 //!   5    `dup2.shared.flags` — init's: `O_NONBLOCK` set with `F_SETFL`
 //!        through one fd is read back with `F_GETFL` through its `dup2`
 //!   1–3  `pipe.chain.checksum`, `pipe.eof.last_writer`, `pipe.cloexec` —
@@ -70,6 +71,19 @@
 //! missing, which is why it runs last. The programs live in this vehicle's
 //! own directory, `/ktest`, mounted through the learner's `vfs::mount` after
 //! init's run.
+//!
+//! Row 8, `fcntl.dupfd.cloexec`, one look at the fd table (2026-10-23, the
+//! port ladder's lab 15 amendment, first inside row 6; its own row since the
+//! slice 8 fix round, the same day): on the vehicle's own table, fd 4 holds a
+//! console open file with close-on-exec clear and fds 9 and 10 hold another;
+//! `fcntl(4, F_DUPFD_CLOEXEC, 9)` must return 11, the lowest free fd from 9
+//! up, naming fd 4's open file and marked close-on-exec, with fd 4's own mark
+//! still clear. The vehicle reads both marks off the `Fd`s themselves, never
+//! through `F_GETFD`. Everything it takes out of the table is dropped after
+//! `with_fds` returns. It prints right after row 7, before init runs, so
+//! neither a program's deadlock nor the drop case's can leave it missing;
+//! the table it looks at is the vehicle's own, which no program inherits
+//! (`exec::spawn` starts each on a table of its own).
 
 #![no_std]
 #![no_main]
@@ -87,7 +101,7 @@ use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use kernel::addr::VirtAddr;
-use kernel::console::{self, Fd, FileRef};
+use kernel::console::{self, Fd, FdTable, FileObj, FileRef};
 use kernel::exec;
 use kernel::fs::archive::Archive;
 use kernel::fs::vfs::{self, dt, mode, DirEntry, Inode, InodeRef, Stat};
@@ -110,7 +124,7 @@ const HEAP_START: u64 = 0xffff_ffff_d000_0000;
 const HEAP_PAGES: usize = 16;
 const PM_HZ: u64 = 3_579_545;
 
-const PLAN: usize = 7;
+const PLAN: usize = 8;
 const CHAIN_ID: &str = "pipe.chain.checksum";
 /// Every row, by number (init's index is 1; consumer reports 1..4, init 5).
 const ROW_IDS: [&str; 5] = [CHAIN_ID, "pipe.eof.last_writer", "pipe.cloexec", "pipe.stress.tiny_writes", "dup2.shared.flags"];
@@ -120,12 +134,25 @@ const DROP_ID: &str = "pipe.release.outside_lock";
 /// The probe's row, printed before init runs.
 const SLEEP_ROW: usize = 7;
 const SLEEP_ID: &str = "pipe.full.writer_sleeps";
+/// The `F_DUPFD_CLOEXEC` look's row, printed second, before init runs.
+const DUPFD_ROW: usize = 8;
+const DUPFD_ID: &str = "fcntl.dupfd.cloexec";
 /// The drop case's bounds: for the reader to be seen asleep, and for its
 /// read to return once the write end is gone (each sub-case).
 const ASLEEP_MS: u64 = 200;
 const EOF_MS: u64 = 500;
 /// The fd the drop case's programs get the write end on.
 const DROP_FD: usize = 3;
+/// Row 8's `F_DUPFD_CLOEXEC` look: Linux's command number
+/// (include/uapi/linux/fcntl.h), the fd it copies, the minimum it is given,
+/// and the fds from the minimum up that are already taken, so the answer is
+/// `DUPFD_MIN + DUPFD_TAKEN` (11).
+const DUPFD_CLOEXEC: u32 = 1030;
+const DUPFD_SRC: usize = 4;
+const DUPFD_MIN: usize = 9;
+const DUPFD_TAKEN: usize = 2;
+/// `O_RDWR` (Linux's value), for the console files the look opens.
+const O_RDWR: u32 = 2;
 const EXEC_PROBE: &str = "/ktest/exec-probe";
 const DUP2_PROBE: &str = "/ktest/dup2-probe";
 const PARKER: &str = "/ktest/parker";
@@ -885,6 +912,81 @@ fn drop_case(what: &str, path: &str, argv: &[&str], cloexec: bool, after: &[&str
     woke && got == 0 && parked
 }
 
+/// `FdTable::fcntl` (lab 15 on) where the cut has it: a path to an
+/// associated function takes the inherent one first, so before lab 15 this
+/// answers `-ENOSYS` and this file still builds.
+trait FcntlOf {
+    #[allow(dead_code)]
+    fn fcntl(&mut self, fd: u64, cmd: u32, arg: u64) -> Result<i64, Errno>;
+}
+
+impl FcntlOf for FdTable {
+    fn fcntl(&mut self, _: u64, _: u32, _: u64) -> Result<i64, Errno> {
+        Err(38)
+    }
+}
+
+/// Row 8: `fcntl(F_DUPFD_CLOEXEC)` on the vehicle's own fd table (the
+/// module doc). Each `Fd` is read by swapping it out with
+/// `install`, so its own `cloexec` and file are what is checked.
+fn dupfd_cloexec() -> bool {
+    let (a, b) = match (FileRef::open(FileObj::CONSOLE, O_RDWR), FileRef::open(FileObj::CONSOLE, O_RDWR)) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => {
+            note(format_args!("{DUPFD_ID}: FileRef::open(the console, O_RDWR) returned {}", errno_text(e)));
+            return false;
+        }
+    };
+    let want = DUPFD_MIN + DUPFD_TAKEN;
+    let (got, new_fd, src_fd, back, closed) = console::with_fds(|t| {
+        let mut back = Vec::new();
+        back.push(t.install(DUPFD_SRC, Fd { file: a.clone(), cloexec: false }));
+        for i in 0..DUPFD_TAKEN {
+            back.push(t.install(DUPFD_MIN + i, Fd { file: b.clone(), cloexec: false }));
+        }
+        let got = FdTable::fcntl(t, DUPFD_SRC as u64, DUPFD_CLOEXEC, DUPFD_MIN as u64);
+        let n = got.ok().filter(|&n| n >= 0 && (n as usize) < console::NFD).map(|n| n as usize);
+        let new_fd = n.and_then(|n| t.install(n, Fd { file: b.clone(), cloexec: false }).ok().flatten());
+        let src_fd = t.install(DUPFD_SRC, Fd { file: b.clone(), cloexec: false }).ok().flatten();
+        let mut used: Vec<usize> = (DUPFD_MIN..DUPFD_MIN + DUPFD_TAKEN).collect();
+        used.push(DUPFD_SRC);
+        used.extend(n.filter(|n| !used.contains(n)));
+        let closed: Vec<_> = used.into_iter().map(|i| t.close(i as u64)).collect();
+        (got, new_fd, src_fd, back, closed)
+    });
+    let same = |d: &Option<Fd>| d.as_ref().is_some_and(|d| core::ptr::eq(&*d.file, &*a));
+    let ok = got == Ok(want as i64)
+        && same(&new_fd)
+        && new_fd.as_ref().is_some_and(|d| d.cloexec)
+        && same(&src_fd)
+        && src_fd.as_ref().is_some_and(|d| !d.cloexec);
+    let mark = |d: &Option<Fd>| match d {
+        None => String::from("nothing"),
+        Some(d) => format!(
+            "{}, close-on-exec {}",
+            if core::ptr::eq(&*d.file, &*a) { "the open file fd 4 was given" } else { "another open file" },
+            if d.cloexec { "set" } else { "clear" }
+        ),
+    };
+    note(format_args!(
+        "{DUPFD_ID}: fcntl({DUPFD_SRC}, F_DUPFD_CLOEXEC, {DUPFD_MIN}) with fds {DUPFD_MIN} and {} taken returned {}; the new fd names {}; fd {DUPFD_SRC} names {}{}",
+        DUPFD_MIN + DUPFD_TAKEN - 1,
+        match got {
+            Ok(n) => format!("{n}"),
+            Err(e) => errno_text(e),
+        },
+        mark(&new_fd),
+        mark(&src_fd),
+        if ok {
+            String::new()
+        } else {
+            format!("; F_DUPFD_CLOEXEC (1030) is F_DUPFD that also marks the new fd close-on-exec: it must return {want}, the lowest free fd from {DUPFD_MIN} up, naming fd {DUPFD_SRC}'s open file with the mark set, and leave fd {DUPFD_SRC}'s own mark clear")
+        }
+    ));
+    drop((new_fd, src_fd, back, closed));
+    ok
+}
+
 fn drop_row(mounted: bool) {
     let ok = mounted && mount_ktest() && {
         let a = drop_case("exec", EXEC_PROBE, &["exec-probe", PARKER, "parker"], true, &["parker"]);
@@ -1005,6 +1107,8 @@ unsafe extern "C" fn _start() -> ! {
 
     probe_pipe();
     let probe_waits = pipe::full_waits();
+    // Second, before init: no program's run or drop can leave it missing.
+    row(dupfd_cloexec(), DUPFD_ROW, DUPFD_ID);
 
     // The stream producer writes and consumer checks (user/producer/stream.h).
     let seed = ktap::nonce().map_or(0, |n| ktap::derive(&n, CHAIN_ID));

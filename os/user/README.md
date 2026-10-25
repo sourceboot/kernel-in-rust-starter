@@ -25,6 +25,13 @@ no CI workflow runs `build.sh` yet — and the binaries ship under `bin/` beside
 | `mkfile/mkfile.c`, `rm/rm.c`, `mv/mv.c`, `mkdir/mkdir.c`, `rmdir/rmdir.c` | labs 18–20: the write-side tools (the old 18, re-cut by the split on 2026-10-19 into 18, 19 and 20: `mkfile` 18, `rm` 19, `mv`, `mkdir`, `rmdir` 20) |
 | `mounts/mounts.c` | lab 22: the mount table, with each mount point's `st_dev` |
 | `sh/sh.c` | lab 23: the course's shell (RATIFY Q6) |
+| `cowtest/cowtest.c` | lab 24: 48 MiB, three forks, private pages, a text write, a counted child → the four `cow.*` rows (below, "The W4 programs") |
+| `hello/hello.c` | lab 25: a static musl program — stdio through `writev`/`readv`, the ids, the clocks, `nanosleep`, the signal-mask and futex calls musl makes → `musl.hello.line` |
+| `tls/tls.c` | lab 25: thread-local storage through `%fs`, its own `arch_prctl(ARCH_SET_FS)`, and SSE registers, all checked across preemption → `musl.tls.survives.preempt` |
+| `mem/mem.c` | lab 25: 32 MiB through musl's `malloc`/`realloc`/`free`, stack growth, and `mmap`/`munmap`/`mremap` asked directly → `musl.mem.32m.checksum` |
+| `fbtest/fbtest.c` | lab 26: `/dev/fb0` the way doomgeneric's linuxvt port opens it — the two screeninfo `ioctl`s, a `MAP_SHARED` `mmap` of `yres × line_length`, a fill, and a forked child that draws the rectangle the `fb` row reads back; prints its findings as plain lines the lab-26 vehicle reads (no nonce, no index) → `fb0.vscreeninfo`, `fb0.fscreeninfo` and the rubric's `fb` row `fb0.mmap.frame` |
+| `evtest/evtest.c` | lab 26: `/dev/input/event0` — `EVIOCGBIT`, `EVIOCGRAB`, `poll` on it, on the console, on a pipe and on bad fds, `O_NONBLOCK` reads, and the keys the vehicle and the rubric's script press; plain lines, as `fbtest` → `input.keys.codes`, `input.nonblock.eagain`, `input.poll` |
+| `doomgeneric/` | lab 27: upstream [ozkl/doomgeneric](https://github.com/ozkl/doomgeneric) at `dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284`, **unmodified** (GPL-2.0, its `LICENSE` beside it), only the files its `linuxvt` build reads; built as layout `port` → `/bin/doomgeneric`, which `ktest-27` runs with `/port/game.wad` → `port.survives`, the rubric's `port.startup.lines` and its `fb` row `port.title.frame` (below, "`doomgeneric`") |
 | `build.sh` | builds every program into `bin/`, checks each binary, writes and reads back `bin/boot.archive`, writes `bin/SHA256SUMS` |
 | `bin/` | the built programs, `boot.archive` and `SHA256SUMS` — committed, shipped |
 
@@ -56,13 +63,26 @@ above, plus a `RW` `PT_LOAD` at `0x1004000` (file offset `0x4000`) when the prog
 writes) and `init` (`filesz` 0, `memsz` 0x50: `.bss` only — its directory and nonce pointers).
 `args`, `producer` and `consumer` have no writable data and stay one segment. The W3 programs
 (labs 17–23) are all `elf`: `rm`, `mv`, `mkdir`, `rmdir` are one segment; the others have a
-`.bss`-only `RW` segment (`filesz` 0) for their buffers.
+`.bss`-only `RW` segment (`filesz` 0) for their buffers. `cowtest` (lab 24) is `elf` with a
+48 MiB `.bss`-only `RW` segment (`memsz` 0x3001018).
+
+**Layout `musl`** (lab 25 on, 2026-10-22): a program built against zig's own musl — its
+`_start`, its `malloc`, its `printf` — with no `crt0.c` and no `user.ld`, so the toolchain's
+default static layout: `PT_PHDR`, a `R` `PT_LOAD` at file offset 0 → `0x1000000` (headers and
+read-only data), a `R E` one, one or two `RW` ones, at most one `PT_TLS` (`tls` has an 8-byte
+`.tdata`; `mem` and `hello` a 4-byte `.tbss`, the allocator's thread index), `PT_GNU_RELRO`,
+`PT_GNU_EH_FRAME` and `PT_GNU_STACK` with `memsz` `0x1000000` (16 MiB). `build.sh` refuses one
+that is not `ET_EXEC`, has a `PT_DYNAMIC`/`PT_INTERP` or more than one `PT_TLS`, whose entry is
+not in an executable `PT_LOAD`, or whose disassembly has an AVX line (`ymm`, `zmm`, or a
+VEX-encoded `v…` instruction on `xmm`); SSE is allowed — musl's own `memcpy`, `printf` and
+`strtoull` use it (173, 253 and 185 SSE lines in `hello`, `tls`, `mem`). Stripped with `-s`
+(TOOLCHAIN.md). Not in `boot.archive`: the image writer puts them in ext2's `/bin`.
 
 | program | layout | bytes | `PT_LOAD`s (R E `filesz` · RW `filesz`/`memsz`) | sha256 |
 |---|---|---|---|---|
 | `hi` | flat | 7104 | `0x189f` | `8e44b87c522916b87caab8a13e3067c4ec5743bbac4aecfe7d927f5dff244dc7` |
 | `hostile-kwrite` | flat | 3816 | `0xbbd` | `33d98e4f29bb4177acbc70d7ce812eca66bdc0b026abd668f40304fc53291047` |
-| `hostile-badnum` | flat | 4104 | `0xcb8` | `0409f3891e13bfe353216af9eda5b13b184af947af1a1cde100581193ddf721a` |
+| `hostile-badnum` | flat | 4040 | `0xc78` | `3419e9872151908589daa842106f5ab21ad5b133618b12c15b0c563072ccf790` |
 | `hostile-badptr` | flat | 4760 | `0xf48` | `b6f1c0e0c12388ddbfb0da0e56d25c7a345cbfacaa7cb4414370e64d75f533ea` |
 | `hostile-spin` | flat-sse | 8640 | `0x1e78` | `002ea10a3dfaf38a1dacb9283f4af1f440bd512ee9fa01d7a05e55554af976d4` |
 | `args` | elf | 10064 | `0x240c` | `bf8a80598fc034baa81dd182805d4ae05f6e18721febcec79f14055fd397b660` |
@@ -80,9 +100,16 @@ writes) and `init` (`filesz` 0, `memsz` 0x50: `.bss` only — its directory and 
 | `rmdir` | elf | 3016 | `0x8e8` | `0efa7a37a73a6da460d13cafa14151a8875959bc21b84f0e1d6e5e11222fdace` |
 | `mounts` | elf | 9184 | `0x1500` · `0`/`0x1430` | `af2e602b7867acdd8eef455878e788be1088ba0bafb8c20b7d3451aac8ffb9af` |
 | `sh` | elf | 9312 | `0x1b30` · `0`/`0x2cf8` | `abcd6570a3d0fe4517afacb45e4db305b574a1c253955d548c5a508c0a882eaa` |
-| `boot.archive` | — | 113768 | — | `80bcecb3f8b685e18939656639c59e32bc1746498bacac6aac5c60b29c20841b` |
+| `cowtest` | elf | 22224 | `0x41b8` · `0`/`0x3001018` | `b361a589d8ef2437a4fff81208f8ebaa9977f6b4f81e9d6cefa0f12bdeab6527` |
+| `hello` | musl | 28008 | (below) | `4f57bed8c29cc949944ea0df641d69c8bcb53aeca5cfa95236ebe0c8a5ce0b2f` |
+| `tls` | musl | 25408 | (below) | `10f3be38d791ea3818d988db91e4e2a8f83ba79b0a344dd0b8898756be50c60a` |
+| `mem` | musl | 35096 | (below) | `59670b8073832c7b1409c60c3cea8c9b9c41879f647ab00ed542bfda9aa4d8e4` |
+| `fbtest` | musl | 27456 | (below) | `5ff9f1d2baec8efd9497a3cdcaab7e72922690e1e6bade61b7f803e2d3edb53d` |
+| `evtest` | musl | 35880 | (below) | `44302055d13e07ad9b3cd00fb5dbff0059c33598309058dfc1bd0738296b03f5` |
+| `doomgeneric` | port | 513776 | (below) | `2c39dbdf976f82bf46816210f897ddd0206bf73eab2f594d88b25f1f4a0474a5` |
+| `boot.archive` | — | 113704 | — | `9a0e2fe37356123d33c16cd714155b6aba76ba5adc952e1cf3644dd5fdbde147` |
 
-`bin/SHA256SUMS` is the authority; this table is its copy as of 2026-10-19 (forker rebuilt for lab 14's `getppid` and `sched_yield` checks; then init and consumer for lab 15's fix round 1: `dup2.shared.flags` reads `F_GETFL` before, during and after the set and on a second open file, and `pipe.cloexec` checks an unmarked fd above 2 when argv names one; then both again for its fix round 2: that fd is drawn from the nonce, `dup2.shared.flags` uses eight nonce-shuffled fds and reads `F_GETFL` on another pipe's read end; then both again for its fix round 3: `pipe.cloexec` checks eight nonce-drawn fds, some marked with `F_SETFD` and some not, and `dup2.shared.flags` holds a different flag on two open files at once).
+`bin/SHA256SUMS` is the authority; this table is its copy as of 2026-10-19 (forker rebuilt for lab 14's `getppid` and `sched_yield` checks; then init and consumer for lab 15's fix round 1: `dup2.shared.flags` reads `F_GETFL` before, during and after the set and on a second open file, and `pipe.cloexec` checks an unmarked fd above 2 when argv names one; then both again for its fix round 2: that fd is drawn from the nonce, `dup2.shared.flags` uses eight nonce-shuffled fds and reads `F_GETFL` on another pipe's read end; then both again for its fix round 3: `pipe.cloexec` checks eight nonce-drawn fds, some marked with `F_SETFD` and some not, and `dup2.shared.flags` holds a different flag on two open files at once; `doomgeneric` added 2026-10-22, lab 27; `hostile-badnum` and `boot.archive` rebuilt 2026-10-22, slice 7: lab 12's third number is 174; `cowtest`, `mem`, `fbtest` and `evtest` rebuilt 2026-10-22 by slice 7's fix rounds for labs 24–26, their rows re-copied from `bin/SHA256SUMS` the same day).
 
 ## The protocol every program follows (CONTRACT §A.3)
 
@@ -148,7 +175,7 @@ exactly the U rows CONTRACT §B.2-12 gives it; the K rows are the vehicle's.
 | program | prints | rows it reports | syscalls (measured, strace 6.19 on Linux 7.0) |
 |---|---|---|---|
 | `hostile-kwrite` | `# hostile-kwrite: writing one byte to 0xffff800000001000`, then stores there | none while the kill works (`kill.kwrite` is the vehicle's, from §A.6's line, which a correct kernel prints as `reason=pf-kernel-addr … addr=0xffff800000001000`); if the store *returns* it prints `not ok <index> - kill.kwrite`, which §A.2 (d) makes a failed row | `write`×1, then the fault |
-| `hostile-badnum` | one `#` line per call with what came back | `sys.badnum.enosys`: `syscall(1000)`, `syscall(-1)` and `syscall(158)` (`arch_prctl(ARCH_GET_FS, &v)`: in §A.4's table, its arm is lab 25's) all return `-38` | 1000, -1, 158, `write`×4, `exit` |
+| `hostile-badnum` | one `#` line per call with what came back | `sys.badnum.enosys`: `syscall(1000)`, `syscall(-1)` and `syscall(174)` (`create_module`: §A.4 reserves it as never served by any lab, and Linux answers `-ENOSYS` too) all return `-38` *(2026-10-22, slice 7: the third number was 158, `arch_prctl`, which lab 25 serves)* | 1000, -1, 174, `write`×4, `exit` |
 | `hostile-badptr` | one `#` line per call | `sys.badptr.efault`: `write(1, p, 16)` returns `-14` for `p = 0`, `0x0000100000000000` (user half, unmapped) and `0xffff800000001000` (kernel half) | `write`×7, `exit` |
 | `hostile-spin` | `# hostile-spin: seed=<16 hex>, checking rbx r12-r15 xmm0 xmm1`, then after the checks `# regs.survive.preempt: 64 checks x 1048576 iterations; tsc per check min=… max=…` | `regs.survive.preempt` (derived), then spins forever with no syscall | `write`×3, then none |
 
@@ -365,6 +392,112 @@ each answers its own `st_dev`. It needs `/proc/mounts` in Linux's field order (`
   `sh.hi.by_name` can type `hi $SBOOT_NONCE 1`, `$SBOOT_NONCE` coming from the environment `init`
   passes on.
 
+## The W4 programs (lab 24 on)
+
+Not in `bin/boot.archive` (§A.7's archive stays the W1–W3 set, byte for byte): ext2's `/bin` carries
+them from lab 24's image on, and a vehicle below 24 never sees them (`xtask/src/ext2.rs`
+`W4_PROGRAMS`, `W4_FIRST_LAB`; the list names the later W4 programs too, so each lab that adds one
+changes only `build.sh`).
+
+### `cowtest` (lab 24; `cowtest/cowtest.c`)
+
+A row reporter's helper, not a tool: `ktest-24` starts it with `argv = ["cowtest", <nonce>, "t" <16
+hex>]`, fd 0 a control pipe it writes one command into at a time, fds 1 and 2 a pipe it reads.
+The protocol (each line one `write(1)`) is the file's header comment; the vehicle computes every
+value cowtest reports and judges the four `cow.*` rows from them and from `frame::stats` and the
+page tables. In short: touch 48 MiB of `.bss` (12,288 pages) → three forks, each child checking
+it sees the memory as it was at its own fork → every process writes its own nonce-seeded pattern
+into the same 32 pages and reads it back, the parent `read`ing a control word and `wait4`ing its
+children's statuses into pages they share (the kernel's own copy-on-write writes) → a child writes
+a byte of the text and must be killed → a child writes K nonce-chosen pages, exits, and the parent
+writes the same K. No SSE; syscalls `read`, `write`, `pipe2`, `fork`, `wait4`, `exit`.
+
+### `hello`, `tls` and `mem` (lab 25; layout `musl`, TOOLCHAIN.md)
+
+Ordinary static musl programs, started by `ktest-25` with `exec::spawn` from ext2's `/bin`, fds 0
+(a pipe the vehicle wrote into) and 1/2 (a pipe it reads). Each prints one line the vehicle
+computes itself from the nonce; each is given a derived value in hex and an unpublished word as
+`t` + 12 hex. Each file's header comment is its protocol.
+
+- **`hello <16 hex>`** (and `t<12 hex>\n` on stdin) reads those 14 bytes with one `fread`, then prints
+  `hello, musl: <16 hex> t<12 hex>` and `ids 0 0 0 0 pid <pid> cpus 1 slept <n> ms realtime <s> sig
+  ok futex ok`: the four ids, `sched_getaffinity`'s count, a `nanosleep` of `20 + a % 40` ms timed
+  on `CLOCK_MONOTONIC`, the `CLOCK_REALTIME` seconds (musl's `gettimeofday` is
+  `clock_gettime(CLOCK_REALTIME)`), a `sigaction`/`sigprocmask` round trip read back, and a `futex`
+  `WAKE` that finds nobody and a `WAIT` on a changed value that does not wait.
+- **`tls <16 hex> t<12 hex> <0|1> <ms>`**: two copies at once, each spinning twice for `<ms>`; a
+  thread-local through `%fs` and `xmm8`–`xmm15` checked every turn, first on musl's thread block,
+  then on one of its own (`arch_prctl(ARCH_SET_FS)` / `ARCH_GET_FS`), then back on musl's. The
+  gaps in its time-stamp counter longer than 0.2 ms count how often it was preempted. The
+  counter's rate is the middle of three 20 ms windows against `CLOCK_MONOTONIC`, and each phase
+  ends at `<ms>` by the counter or the clock, whichever comes first, so a host pause cannot
+  stretch the run (2026-10-23).
+- **`mem <16 hex> t<12 hex>`**: first two pages from `mmap`, one given back, the other touched and given back (so every run meets `mmap`, `munmap` and a first-touch fault in that order); then 32 MiB through musl's `malloc`/`realloc`/`free` (zig 0.17.0's:
+  page-sized blocks straight from `mmap`, trimmed to their alignment with `munmap`, grown with
+  `mremap(MREMAP_MAYMOVE)`), every word checked before its block goes; a recursion that grows the
+  stack past its first 64 KiB; then `mmap` with a hint, `munmap` of a mapping's head and tail, an
+  `mremap` that must move, and `MAP_FIXED` (refused with `EINVAL`, or mapped exactly where asked).
+
+What each executes, counted per number by a counter in a work copy of `syscall::dispatch` (never
+in the shipped file) on 2026-10-22, listed in the order each was first met:
+
+| program | syscalls (count) |
+|---|---|
+| `hello` | 158 ×1, 218 ×1, 19 `readv` ×1, 102/104/107/108 ×1 each, 39 ×1, 204 ×1, 109 ×1, 112 ×1, 228 ×5, 35 ×1, 14 ×4, 13 ×2, 202 ×2, 16 ×1, 20 `writev` ×2, 231 ×1 |
+| `tls` (two copies) | 158 ×10, 218 ×2, 228 ×42,000–95,000 (the spin reads the clock), 16 ×2, 20 ×2, 231 ×2 |
+| `mem` | 158 ×1, 218 ×1, 9 `mmap` ×111–123, 11 `munmap` ×120–130, ~8,300 first-touch faults on `Anon` pages, 204 ×1, 25 `mremap` ×46–78, 49 stack-growth faults, 16, 20, 231 ×1 each |
+
+None executes `poll` (7), `brk` (12), `mprotect` (10) or `gettimeofday` (96).
+
+### `doomgeneric` (lab 27; `doomgeneric/`, layout `port`)
+
+The one program here the course did not write. **Source:** the archive
+`https://github.com/ozkl/doomgeneric/archive/dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284.tar.gz`
+(3,090,406 bytes, sha256 `1bd3f7f26220494159a38d71f2847ec81b58d6bbd7c7c8d81b08993018001148`;
+commit of 2026-04-12). `doomgeneric/` holds 179 of its files, each byte-identical to the
+archive's: `LICENSE`, `README.md`, `README.TXT`, and under `doomgeneric/` the `Makefile.linuxvt`,
+the 82 `.c` files its `SRC_DOOM` names and the 93 headers they include (`zig cc -MM`). Nothing is
+patched; a kernel that cannot run it unmodified is what lab 27 finds.
+
+**Build:** `build.sh` reads `SRC_DOOM` from `Makefile.linuxvt` and compiles those files in one
+`zig cc` call with the Makefile's flags (CONTRACT Appendix (1): `-static -O2 -DNORMALUNIX
+-DLINUX -DSNDSERV -D_DEFAULT_SOURCE`) plus `-g0 -s` and `-ffile-prefix-map`, which make the bytes
+independent of the checkout's directory (measured 2026-10-22: the same `bin/doomgeneric` from two
+directories; without them, two sizes and two sha256s). It then makes every `musl` check. The two
+compiler warnings it prints (`p_maputl.c`, `r_segs.c`) are upstream's.
+
+**Data:** the program needs an IWAD, and none ships here (CONTRACT §A.8): `cargo xtask
+fetch-assets` (and `ktest 27`, on first use) puts Freedoom 0.13.0's `freedoom1.wad` (28,795,076
+bytes, sha256 `7323bcc1…703d`) in the workspace's `target/assets/`, checked by sha256, and the
+image writer places it at `/port/game.wad` from lab 27's image on.
+
+`ktest-27` starts `/bin/doomgeneric -iwad /port/game.wad` with the console as fds 0–2 and `/dev`
+mounted after `devfs::probe`. What it executes up to 6 s after its exec, counted per number by a
+counter in a work copy of `syscall::dispatch` on 2026-10-22: `open` 6, `close` 3, `poll` 320,
+`lseek` 2,138, `mmap` 8, `munmap` 5, `ioctl` 6, `readv` 2,134, `writev` 38, `nanosleep` 1,416,
+`fcntl` 1, `mkdir` 2, `arch_prctl` 1, `sched_getaffinity` 1, `getdents64` 2, `set_tid_address` 1,
+`clock_gettime` 3,798, and no `-ENOSYS` — Appendix (1)'s set less `execve` (the vehicle execs it).
+
+### `mark` (lab 29; `mark/mark.c`)
+
+`mark <N>` prints `mark <N> <cwd>` in one write (usage error: exit 2; a refused `getcwd`: exit 1).
+Lab 29's script ends each group with it, in place of lab 23's `echo $? "q"N`, which needs quoting
+the learner's shell does not have, and its cwd stands in for `pwd`. ext2's `/bin` carries it from
+lab 29's image on (`SHELL_PROGRAMS`), never earlier, beside `/bin/ush`, the learner's shell.
+
+### `busybox` (lab 30; `busybox/`, layout `busybox`)
+
+busybox 1.37.0, unmodified, from the release tarball (sha256 `3311dff3…043a4`, not in this
+repository: `target/assets/`, or `BUSYBOX_TARBALL=`), configured by `busybox/busybox.config`
+and built by upstream's Makefiles with the pinned zig (TOOLCHAIN.md): 241,160 bytes, sha256
+`927cffcd…2c24`. From lab 30's image on, `/bin/busybox` and its 18 applet names
+(`busybox/applets`) are one inode with 19 links, `/bin/sh` among them; the course programs an
+applet shadows (`cat`, `ls`, `mkdir`, `mv`, `rm`, `sh`) are left out of that image's `/bin`, and
+every earlier image leaves busybox out. `ktest-30` runs `ash` over the busybox-surface report's
+session; what it executes, and the two numbers with no arm it survives (`sendfile`, `access`), is
+in `busybox/README.md`. Its licence is GPL-2.0, and its source offer is there: the pinned tarball is
+hosted at https://sourceboot.com/third-party/busybox-1.37.0.tar.bz2.
+
 ## Native check on Linux
 
 These are Linux-ABI binaries, so each runs under a real x86-64 Linux as an oracle before a
@@ -374,8 +507,10 @@ with the noise instance on the same CPU), `init … 14` 4/4 when run under a chi
 (`prctl(PR_SET_CHILD_SUBREAPER)`, a host-only wrapper, never shipped; without it Linux reparents
 the orphan to its own init and the row is `not ok`), `init … 15` 5/5 (re-run 2026-10-17 with
 nonce `c273b542791488f55d571423227d6f66` after `dup2.shared.flags` landed). Expected differences:
-`hi` prints `cs=0x33` (Linux's user code selector) and `not ok`; `hostile-badnum` prints `not ok`
-because Linux serves `arch_prctl`; `hostile-kwrite` dies of `SIGSEGV` at
+`hi` prints `cs=0x33` (Linux's user code selector) and `not ok`; `hostile-badnum` printed `not ok`
+because Linux serves `arch_prctl` (that was the 2026-10-17 run, when its third number was 158; since
+2026-10-22 it is 174, which Linux answers `-ENOSYS`, so a native run should print `ok`: not re-run on
+Linux, the lab lap is owed); `hostile-kwrite` dies of `SIGSEGV` at
 `0xffff800000001000`.
 
 **The W3 programs** (2026-10-17, lab-linux01, Linux 7.0.0-34, strace 6.19, in one `mktemp -d`
@@ -404,7 +539,7 @@ offset 12  count × { name: 56 bytes, UTF-8, NUL-padded; offset: u64 LE; size: u
 ```
 
 Entries are sorted by name; there are no timestamps, so the archive's bytes follow from the
-binaries alone. Today: 10 entries, 113,768 bytes, the table ends at byte 732, the first data at
+binaries alone. Today: 10 entries, 113,704 bytes, the table ends at byte 732, the first data at
 `0x2e0`:
 
 | # | name | offset | size |
@@ -413,12 +548,12 @@ binaries alone. Today: 10 entries, 113,768 bytes, the table ends at byte 732, th
 | 1 | `consumer` | `0x02a30` | 15384 |
 | 2 | `forker` | `0x06648` | 17504 |
 | 3 | `hi` | `0x0aaa8` | 7104 |
-| 4 | `hostile-badnum` | `0x0c668` | 4104 |
-| 5 | `hostile-badptr` | `0x0d670` | 4760 |
-| 6 | `hostile-kwrite` | `0x0e908` | 3816 |
-| 7 | `hostile-spin` | `0x0f7f0` | 8640 |
-| 8 | `init` | `0x119b0` | 34016 |
-| 9 | `producer` | `0x19e90` | 7640 |
+| 4 | `hostile-badnum` | `0x0c668` | 4040 |
+| 5 | `hostile-badptr` | `0x0d630` | 4760 |
+| 6 | `hostile-kwrite` | `0x0e8c8` | 3816 |
+| 7 | `hostile-spin` | `0x0f7b0` | 8640 |
+| 8 | `init` | `0x11970` | 34016 |
+| 9 | `producer` | `0x19e50` | 7640 |
 
 Names carry no leading `/`: mounted at `/`, entry `init` is `/init`. The W3 programs (`ls` …
 `sh`) are **not** in the archive (2026-10-17): the image writer copies `bin/` into ext2's `/bin`

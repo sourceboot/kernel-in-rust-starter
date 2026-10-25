@@ -15,7 +15,8 @@
 //! object itself (`console::FileRef::open_inode` knows them by their device
 //! numbers), so a write through `/dev/console` and one through fd 1 are the
 //! same object's, with its `O_NONBLOCK` and its `ioctl`. Lab 26 adds `fb0`
-//! and `event0`.
+//! (29:0, the framebuffer) and `input/event0` (13:64, the keyboard), each
+//! listed only once `probe` has found the hardware behind it.
 
 use crate::fs::vfs::{DirEntry, Inode, InodeRef, Stat};
 use crate::syscall::errno::EISDIR;
@@ -58,4 +59,21 @@ impl Inode for DevFs {
     fn stat(&self) -> Stat {
         todo!("lab 22 step 5 — DevFs::stat: a directory, 0755, on this /dev's device")
     }
+}
+
+/// Lab 26: look for the hardware behind `/dev/fb0` (the bootloader's
+/// framebuffer, 32 bits a pixel) and `/dev/input/event0` (the keyboard),
+/// once at boot. A `/dev` lists them, and `lookup` finds them, only after
+/// this.
+pub fn probe() {
+    todo!("lab 26 step 2 — probe: which of fb0 and the input device this machine has")
+}
+
+/// Lab 26: `kbd::push` hands every scancode here first, in the keyboard
+/// interrupt. While anyone has `event0` open the key becomes an `EV_KEY`
+/// event and an `EV_SYN` in the device's queue; `true` when a reader holds
+/// the device grabbed (`EVIOCGRAB`), so the console never sees the key.
+pub fn feed(sc: u8) -> bool {
+    let _ = sc;
+    todo!("lab 26 step 8 — feed: the scancode as input events; whether the device is grabbed")
 }

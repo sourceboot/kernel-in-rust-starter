@@ -21,6 +21,10 @@ pub mod flags {
     /// Bit 9 is ignored by the hardware; the course reserves it for lab 24's
     /// copy-on-write mark.
     pub const COW: u64 = 1 << 9;
+    /// Bit 10 is ignored by the hardware too; the course reserves it for lab
+    /// 26's mark on a page whose frame is a device's (the framebuffer), not
+    /// the frame pool's.
+    pub const DEVICE: u64 = 1 << 10;
     pub const NX: u64 = 1 << 63;
 }
 

@@ -1,0 +1,6 @@
+# Adds to os/.cargo/config.toml (cargo merges the two; that file's
+# relocation-model=static is what makes the output ET_EXEC, not a PIE).
+# x86_64-unknown-none defaults to the kernel code model (the top 2 GiB);
+# a user program is linked at 0x1000000, so it takes the small one.
+[target.x86_64-unknown-none]
+rustflags = ["-C", "code-model=small"]
