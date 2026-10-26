@@ -86,13 +86,13 @@ os/                     the cargo workspace
                         binaries, which your kernel runs from lab 09 on;
                         user/rust/ is the library your own programs use
   userland/             your init and shell (labs 28–29), on user/rust
-  .cargo/               the bare-metal build settings
+  .cargo/               the course's bare-metal build settings
 rust-toolchain.toml     stable Rust and the x86_64-unknown-none target
 sboot.toml              tells the sboot CLI which course this repo is for
 ```
 
-**Some of these files are the course's, not yours:** everything under `os/boot/`
-and `os/user/`, and in `os/kernel/src/` the module list in `lib.rs` and the test
+**Some of these files are the course's, not yours:** everything under `os/boot/`,
+`os/user/` and `os/.cargo/`, and in `os/kernel/src/` the module list in `lib.rs` and the test
 harness your kernel reports through (`ktap.rs`, with `bootinfo.rs`,
 `handshake.rs`, `fwcfg.rs`, `sync.rs`, `addr.rs` and `exit.rs`). They are public,
 so publishing your repo gives nothing away. From lab 02 on, `sboot test` and
