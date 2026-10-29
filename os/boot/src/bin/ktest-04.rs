@@ -105,7 +105,7 @@ ktest!("gdt.layout", fn layout(t: &mut TestCtx) {
     let kd = desc(2);
     t.expect(present(kd) && is_data_rw(kd) && dpl(kd) == 0, "0x10 is a present writable DPL0 data segment");
     let u32c = desc(3);
-    t.expect(!(present(u32c) && is_code(u32c) && long(u32c)), "0x18 is not a 64-bit code segment (sysret's CS is 0x18 + 16)");
+    t.expect(!(present(u32c) && is_code(u32c) && long(u32c)), "0x18 is not a 64-bit code segment (it is the slot a 32-bit sysret loads)");
     let td = desc(6);
     t.expect(present(td) && access(td) & 0x1f == 0x0b, "0x30 is a present, busy 64-bit TSS (ltr ran)");
     t.expect((td & 0xffff) >= 103, "the TSS limit covers 104 bytes");

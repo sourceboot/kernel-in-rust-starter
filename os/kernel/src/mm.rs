@@ -51,7 +51,7 @@ pub enum FaultOutcome {
     Kill(Kill),
 }
 
-/// The `#PF` error-code bits (SDM Vol. 3A §4.7).
+/// The `#PF` error-code bits (SDM Vol. 3A, Page-Fault Exceptions).
 pub mod pf {
     pub const PRESENT: u64 = 1 << 0;
     pub const WRITE: u64 = 1 << 1;
@@ -61,12 +61,12 @@ pub mod pf {
 /// Decide what a page fault at `addr` means.
 pub fn fault(addr: VirtAddr, error: u64, tf: &TrapFrame) -> FaultOutcome {
     let _ = (addr, error, tf);
-    todo!("lab 05 step 5 — fault: classify by the error code and the address, remember the Kill for last_kill, return it")
+    todo!("lab 05 task 5 — fault: classify by the error code and the address, remember the Kill for last_kill, return it")
 }
 
 /// The last `Kill` that `fault` returned, if it has returned one.
 pub fn last_kill() -> Option<Kill> {
-    todo!("lab 05 step 5 — last_kill: the Kill that fault returned last")
+    todo!("lab 05 task 5 — last_kill: the Kill that fault returned last")
 }
 
 // ── Lab 25: the mmap family ──────────────────────────────────────────────

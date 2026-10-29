@@ -1,4 +1,4 @@
-//! `SpinLock<T>` — rfk lab 03's lock, provided here so the course has one.
+//! `SpinLock<T>` — Rust for Kernels lab 03's lock, provided here so the course has one.
 //! Course-owned (proposed CONTRACT §B.1 amendment, 2026-10-16: the spine uses
 //! `SpinLock` from lab 09 on — the console, the task table, pipes — and no
 //! learner module owns it). You wrote this one already; it ships whole.

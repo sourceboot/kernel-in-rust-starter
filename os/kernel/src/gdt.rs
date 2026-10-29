@@ -19,21 +19,22 @@ pub mod sel {
     pub const TSS: u16 = 0x30;
 }
 
-/// The 64-bit task-state segment (SDM Vol. 3A §8.7): 104 bytes, packed, with
-/// `rsp0` and the seven `ist` slots where the manual puts them.
+/// The 64-bit task-state segment (SDM Vol. 3A, *Task Management in 64-bit
+/// Mode*): 104 bytes, packed, with `rsp0` and the seven `ist` slots where the
+/// manual puts them.
 #[repr(C, packed)]
 pub struct Tss {
-    // lab 04 step 1 — lay out the fields.
+    // lab 04 task 1 — lay out the fields.
 }
 
 /// Build the table, load it, reload every segment register, load the TSS.
 pub fn init(kstack_top: VirtAddr, ist1_top: VirtAddr) {
     let _ = (kstack_top, ist1_top);
-    todo!("lab 04 steps 2–4 — init: the eight slots, the two stack tops, then lgdt, CS and the data segments, ltr")
+    todo!("lab 04 tasks 2–4 — init: the eight slots, the two stack tops, then lgdt, CS and the data segments, ltr")
 }
 
-/// The stack the CPU switches to on a ring 3 → 0 transition.
+/// The stack the CPU switches to when an interrupt or exception arrives from ring 3.
 pub fn set_rsp0(top: VirtAddr) {
     let _ = top;
-    todo!("lab 04 step 5 — set_rsp0: write the TSS's rsp0")
+    todo!("lab 04 task 5 — set_rsp0: write the TSS's rsp0")
 }

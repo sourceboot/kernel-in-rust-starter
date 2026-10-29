@@ -110,7 +110,7 @@ ktest!("translate.huge", fn translate_huge(t: &mut TestCtx) {
     t.expect(a.translate(VirtAddr(0x1234_5000)).is_none(), "an address in the empty user half translates to None");
     // The bootloader maps no 1 GiB page, so the row builds one: PML4[1] of the
     // fresh space names a PDPT whose entry 0 is PRESENT|PS at physical 0 with
-    // bit 12 (PAT, SDM Vol. 3A §4.5) set — a valid 1 GiB entry whose address
+    // bit 12 (PAT; SDM Vol. 3A, 4-Level Paging and 5-Level Paging) set — a valid 1 GiB entry whose address
     // bits read 0x1000. A walk that ignores PS reads physical page 1 as a PD,
     // so the probe picks a PD index whose entry there is not present: that walk
     // answers None instead of wandering. The space is never loaded.

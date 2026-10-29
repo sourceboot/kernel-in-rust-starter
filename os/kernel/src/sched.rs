@@ -65,7 +65,7 @@ pub fn exit_current() -> ! {
 /// one per turn.
 pub fn slices(id: Tid) -> u64 {
     let _ = id;
-    todo!("lab 14 step 2 — slices: count every time the switch puts a task on the CPU")
+    todo!("lab 14 task 2 — slices: count every time the switch puts a task on the CPU")
 }
 
 /// Sleep on `chan` until a `wakeup(chan)`. `held` is the caller's guard on
@@ -76,14 +76,14 @@ pub fn slices(id: Tid) -> u64 {
 /// condition again (a loop). Never from the tick.
 pub fn sleep<'a, T: ?Sized>(chan: usize, lock: &'a SpinLock<T>, held: SpinGuard<'a, T>) -> SpinGuard<'a, T> {
     let _ = (chan, lock, held);
-    todo!("lab 14 step 1 — sleep: off the CPU and out of the run queue until a wakeup, the lock let go as one step with it")
+    todo!("lab 14 task 1 — sleep: off the CPU and out of the run queue until a wakeup, the lock let go as one step with it")
 }
 
 /// Wake every task asleep on `chan`: each goes back in the run queue. Safe
 /// from an interrupt handler: it never allocates.
 pub fn wakeup(chan: usize) {
     let _ = chan;
-    todo!("lab 14 step 3 — wakeup: every sleeper on chan back in the run queue")
+    todo!("lab 14 task 3 — wakeup: every sleeper on chan back in the run queue")
 }
 
 /// Lab 31 step 4: what an interruptible sleep returns when a signal ended it.

@@ -13,5 +13,5 @@ pub static TICKS: AtomicU64 = AtomicU64::new(0);
 
 /// Nanoseconds since the first tick; never goes back.
 pub fn now_ns() -> u64 {
-    todo!("lab 06 step 3 — now_ns: TICKS times the PIT period, in nanoseconds")
+    todo!("lab 06 task 3 — now_ns: TICKS times the PIT period, in nanoseconds")
 }

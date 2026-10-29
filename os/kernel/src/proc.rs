@@ -49,6 +49,7 @@ pub mod prot {
 
 /// `E2BIG`: argv does not fit the top stack page. `syscall::errno` has no
 /// name for it, so `spawn_user` uses this one.
+#[allow(dead_code)]
 const E2BIG: Errno = 7;
 
 /// A process id. 1 is the first process spawned; ids are never reused.
@@ -174,27 +175,27 @@ pub fn each(f: impl FnMut(&Process)) {
 /// is running). Every syscall that takes a path walks this from `/`.
 pub fn absolute(path: &str) -> String {
     let _ = path;
-    todo!("lab 23 step 4 — absolute: the cwd joined to a relative path")
+    todo!("lab 23 task 4 — absolute: the cwd joined to a relative path")
 }
 
 /// Lab 23, syscall 80: the cwd becomes the directory `path` names, kept
 /// absolute with `.` and `..` folded out. `-ENOENT`, `-ENOTDIR` as Linux.
 pub fn chdir(path: &str) -> Result<(), Errno> {
     let _ = path;
-    todo!("lab 23 step 5 — chdir: walk it, a directory, the folded absolute path as the cwd")
+    todo!("lab 23 task 4 — chdir: walk it, a directory, the folded absolute path as the cwd")
 }
 
 /// Lab 23, syscall 81: the cwd becomes the directory open on `fd`, by the
 /// path it was opened by. `-EBADF`, `-ENOTDIR` as Linux.
 pub fn fchdir(fd: u64) -> Result<(), Errno> {
     let _ = fd;
-    todo!("lab 23 step 5 — fchdir: the open file's path, when it is a directory")
+    todo!("lab 23 task 4 — fchdir: the open file's path, when it is a directory")
 }
 
 /// Lab 23, syscall 79's answer: the running process's cwd (`/` when no
 /// process is running).
 pub fn getcwd() -> String {
-    todo!("lab 23 step 5 — getcwd: the running process's cwd")
+    todo!("lab 23 task 4 — getcwd: the running process's cwd")
 }
 
 /// For `user::access_ok` (S5): whether the running process's VMAs cover
@@ -225,7 +226,7 @@ pub const WNOHANG: u32 = 1;
 /// table is copied (the open files are shared); its parent is the caller.
 pub fn fork(parent: &mut Process, f: &SyscallFrame) -> Result<Pid, Errno> {
     let _ = (parent, f);
-    todo!("lab 14 step 4 — fork: copy the pages, the fds and the FPU state; a kernel stack whose first return is the caller's syscall return, rax = 0")
+    todo!("lab 14 task 4 — fork: copy the pages, the fds and the FPU state; a kernel stack whose first return is the caller's syscall return, rax = 0")
 }
 
 /// Wait for a child to end (`wait4`, syscall 61) and collect it: its record
@@ -235,7 +236,7 @@ pub fn fork(parent: &mut Process, f: &SyscallFrame) -> Result<Pid, Errno> {
 /// child's `exit` wakes the caller, and look again.
 pub fn wait4(p: &mut Process, pid: i64, status: VirtAddr, opts: u32) -> Result<Pid, Errno> {
     let _ = (p, pid, status, opts);
-    todo!("lab 14 step 5 — wait4: collect an ended child, -ECHILD when there is none, sleep on your own record otherwise")
+    todo!("lab 14 task 5 — wait4: collect an ended child, -ECHILD when there is none, sleep on your own record otherwise")
 }
 
 /// End the running process with `code` (`exit`, syscall 60): its status is

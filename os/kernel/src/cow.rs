@@ -41,7 +41,7 @@ use crate::syscall::Errno;
 /// flushed.
 pub fn share(src: &mut AddressSpace, dst: &mut AddressSpace, va: VirtAddr) -> Result<(), Errno> {
     let _ = (src, dst, va);
-    todo!("lab 24 step 1 — share: one frame mapped in both spaces, copy-on-write when writable")
+    todo!("lab 24 task 1 — share: one frame mapped in both spaces, copy-on-write when writable")
 }
 
 /// Step 2. The fault arm: `true` when the fault at `addr` (error code
@@ -55,5 +55,5 @@ pub fn share(src: &mut AddressSpace, dst: &mut AddressSpace, va: VirtAddr) -> Re
 /// entry through the running process's record is as safe as through CR3.
 pub fn write_fault(addr: VirtAddr, error: u64) -> bool {
     let _ = (addr, error);
-    todo!("lab 24 step 2 — write_fault: a write to a COW page gets a page of its own")
+    todo!("lab 24 task 2 — write_fault: a write to a COW page gets a page of its own")
 }

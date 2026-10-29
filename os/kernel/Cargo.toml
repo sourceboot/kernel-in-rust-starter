@@ -2,6 +2,11 @@
 name = "kernel"
 version = "0.1.0"
 edition = "2021"
+# E1 (sprint 4 #51, 2026-10-25): no build script. kernel/Cargo.toml is course-owned
+# (every kir rubric 02+), so this line is put back over the learner's upload before
+# cargo reads any manifest — a planted kernel/build.rs can never run host code at
+# grade time, and a forged `[lib] path` cannot swap the crate root (CONTRACT §A.1 r3).
+build = false
 rust-version.workspace = true
 
 [lib]

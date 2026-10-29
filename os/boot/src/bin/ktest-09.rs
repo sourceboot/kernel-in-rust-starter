@@ -57,8 +57,8 @@ macro_rules! msg1 { () => { "# sys.write.console: this line left ring 3 through 
 macro_rules! msg2 { () => { "# sys.write.console: and this one through write(2)" } }
 const N1: usize = concat!(msg1!(), "\n").len();
 const N2: usize = concat!(msg2!(), "\n").len();
-/// The line the flags probe writes with DF set.
-macro_rules! msg3 { () => { "# sys.entry.flags: this line was written with DF set in ring 3" } }
+/// The line the flags probe writes with DF and NT set.
+macro_rules! msg3 { () => { "# sys.entry.flags: this line was written with DF and NT set in ring 3" } }
 const N3: usize = concat!(msg3!(), "\n").len();
 //
 // Each entry does one thing, stores what the kernel answered in the result
@@ -160,11 +160,17 @@ core::arch::global_asm!(
     "fld1",
     "ldmxcsr [rip + 89f]",
     "jmp 70b",
-    // write(1, line, n) with DF set: the vehicle's breakpoint on the line
-    // reads RFLAGS where the kernel copies it (DF is noted only, see the row)
+    // write(1, line, n) with DF and NT set: the vehicle's breakpoint on the
+    // line reads RFLAGS where the kernel copies it (DF is noted only, NT is
+    // asserted clear, see the row). NT is writable at CPL 3 by popfq; an
+    // interrupt gate clears it on entry, so setting it here cannot hurt a
+    // handler, and `sysret` brings it back from r11 until the `and` below.
     ".globl ktest09_p_flags",
     "ktest09_p_flags:",
     "std",
+    "pushfq",
+    "or qword ptr [rsp], 0x4000",
+    "popfq",
     "pushfq",
     "pop rax",
     "mov [rip + 90f + {f_user}], rax",
@@ -174,6 +180,9 @@ core::arch::global_asm!(
     "mov eax, 1",
     "syscall",
     "cld",
+    "pushfq",
+    "and qword ptr [rsp], -16385",
+    "popfq",
     "mov [rip + 90f + {f_write}], rax",
     "jmp 70b",
     // pointers the program may not pass (the vehicle fills the parameter
@@ -581,7 +590,7 @@ mod dr {
     pub static ADDR: AtomicU64 = AtomicU64::new(0);
 
     /// L0, L1, LE, GE, bit 10 (reserved, 1); RW0 = RW1 = 0b11 (read or
-    /// write), LEN0 = LEN1 = 0b10 (8 bytes) — SDM Vol. 3B §18.2.4.
+    /// write), LEN0 = LEN1 = 0b10 (8 bytes) — SDM Vol. 3B, "Debug Control Register (DR7)".
     const DR7_ON: u64 = 1 | (1 << 2) | (1 << 8) | (1 << 9) | (1 << 10) | (0b11 << 16) | (0b10 << 18) | (0b11 << 20) | (0b10 << 22);
 
     /// Watch `a` and `b` (each 8-aligned).
@@ -961,7 +970,7 @@ ktest!("sys.entry.flags", fn sys_entry_flags(t: &mut TestCtx) {
         dr::RIP.load(Ordering::SeqCst)
     ));
     t.expect_eq("the probe's exit status", r.status as u64, 0);
-    t.expect_eq("write(1, line, n) with DF set returned", word(&r, res::FLAGS_WRITE), N3 as u64);
+    t.expect_eq("write(1, line, n) with DF and NT set returned", word(&r, res::FLAGS_WRITE), N3 as u64);
     if hits == 0 {
         t.fail(format_args!("no read of the program's line by the kernel was seen (at its address or its HHDM alias)"));
         return;
@@ -973,6 +982,13 @@ ktest!("sys.entry.flags", fn sys_entry_flags(t: &mut TestCtx) {
     // says (measured 2026-10-18, QEMU 11.1.1: SFMASK 0 and the program's DF
     // set still read DF clear here), so no kernel could turn it red.
     t.expect_eq("SFMASK's TF bit (no single-step into the kernel)", (sfmask >> 8) & 1, 1);
+    // NT (bit 14), asserted since 2026-10-25: the probe
+    // sets it before `syscall`. An `iretq` the kernel runs with NT set is a
+    // task-switch attempt, which long mode faults on, so SFMASK must clear
+    // it as Linux's mask does. Both halves are read: the mask's bit, and the
+    // flags the kernel actually copied the line under.
+    t.expect_eq("SFMASK's NT bit (the program's nested-task flag must not reach the kernel)", (sfmask >> 14) & 1, 1);
+    t.expect_eq("RFLAGS.NT inside the syscall, after the program set it", (kflags >> 14) & 1, 0);
 });
 
 ktest!("sse.usable", fn sse_usable(t: &mut TestCtx) {

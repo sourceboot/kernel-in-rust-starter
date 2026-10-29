@@ -1,8 +1,8 @@
 //! Lab 07 — the frame allocator. This file is yours.
 //!
 //! Every 4 KiB physical frame the bootloader marks usable (memmap kind 0 —
-//! rfk lab 01 spelled usable as 1; this course's BootInfo carries Limine's
-//! numbering), at or above 1 MiB, outside the kernel's image, gets a
+//! Rust for Kernels lab 01 spelled usable as 1; this course's BootInfo
+//! carries Limine's numbering), at or above 1 MiB, outside the kernel's image, gets a
 //! reference count. `alloc` hands out a zeroed frame with count 1; `inc`
 //! adds a reference; `free` drops one and the frame returns to the pool at 0.
 //!
@@ -25,32 +25,33 @@ pub struct Stats {
 /// Build the pool from the memory map. Call once.
 pub fn init(memmap: &[MemRegion], kernel: PhysRange) {
     let _ = (memmap, kernel);
-    todo!("lab 07 step 1 — init: count the usable frames, place the counts, mark them free")
+    todo!("lab 07 task 1 — init: count the usable frames, place the counts, mark them free")
 }
 
 /// A zeroed frame with reference count 1, or `None` when none is free.
 pub fn alloc() -> Option<Frame> {
-    todo!("lab 07 step 2 — alloc: find a free frame, count 1, zero it")
+    todo!("lab 07 task 2 — alloc: find a free frame, count 1, zero it")
 }
 
 /// Drop one reference; at 0 the frame is free again.
 pub fn free(f: Frame) {
     let _ = f;
-    todo!("lab 07 step 3 — free: drop one reference")
+    todo!("lab 07 task 3 — free: drop one reference")
 }
 
 /// Add one reference to an allocated frame.
 pub fn inc(f: Frame) {
     let _ = f;
-    todo!("lab 07 step 3 — inc: add one reference")
+    todo!("lab 07 task 3 — inc: add one reference")
 }
 
 /// The frame's reference count (0 = free, or not a frame of the pool).
 pub fn refs(f: Frame) -> u32 {
     let _ = f;
-    todo!("lab 07 step 3 — refs: the frame's count")
+    todo!("lab 07 task 3 — refs: the frame's count")
 }
 
+/// free, used and total under the lock; all zeros before `init` has run.
 pub fn stats() -> Stats {
-    todo!("lab 07 step 4 — stats: free, used, total")
+    todo!("lab 07 task 4 — stats: free, used, total")
 }

@@ -38,7 +38,6 @@
  *   ready
  *   block <ok|what the read returned>
  *   keys <event> <event> ... time <ok|what>
- *   inject
  *   poll <ok|what failed>
  *   eagain <ok|what read returned>
  *   end release <0|-errno> again <0|-errno>
@@ -55,9 +54,15 @@
  * EV_SYN SYN_REPORT as `.`; anything else as t<type>:<code>=<value>. `time`
  * checks every event's timestamp: microseconds under a million, never
  * going back, inside [ready, the last read] by CLOCK_REALTIME.
- * After `inject` someone puts one key in (press and release at once);
- * poll(3 s) must wake for it within 2 s with POLLIN, poll(0) must say
- * POLLIN before each of its four events and 0 after them. Last, a read of
+ * Then it writes `# sboot poll-ready` to /dev/console, the serial line,
+ * and polls: the grader reads that line there and types F12 at the
+ * machine (a press, then its release 50 ms later). poll(3 s) must wake
+ * for the press within 2 s with POLLIN; poll(0) must say POLLIN before the
+ * press and its SYN_REPORT, poll(1 s) must wake for the release, poll(0)
+ * must say POLLIN before its SYN_REPORT, and 0 after it. The line goes to
+ * the console, not to stdout, because stdout is a pipe the test reads only
+ * when it gets the CPU; the console write reaches the serial port from
+ * this program's own syscall. Last, a read of
  * the empty device must be -1 with EAGAIN; then the grab is let go
  * (0) and let go again (-EINVAL).
  * It exits 0 once every line is printed; `evtest: <what>` and 1 when it
@@ -77,6 +82,8 @@
 #include <unistd.h>
 
 #define DEV "/dev/input/"
+/* The serial line the grader waits for before it types the poll's key. */
+#define POLL_READY "# sboot poll-ready\n"
 #define EVENTS 20
 
 static char bad[1024];
@@ -301,7 +308,15 @@ int main(int argc, char **argv) {
     short rev;
     int r = ask(1, &fd, (short[]){POLLIN}, &rev, 0);
     if (r != 0) miss("poll(0) on the device after the keys returned", r);
-    printf("inject\n");
+    /* The grader types F12 once this line is on the serial port. */
+    int con = open("/dev/console", O_WRONLY);
+    if (con < 0) {
+        miss("open /dev/console to ask for the key: errno", errno);
+    } else {
+        ssize_t w = write(con, POLL_READY, sizeof POLL_READY - 1);
+        if (w != (ssize_t)(sizeof POLL_READY - 1)) miss("write to /dev/console returned", w);
+        close(con);
+    }
     int64_t t0 = ns(CLOCK_MONOTONIC);
     r = ask(1, &fd, (short[]){POLLIN}, &rev, 3000);
     int64_t waited = (ns(CLOCK_MONOTONIC) - t0) / 1000000;
@@ -309,17 +324,18 @@ int main(int argc, char **argv) {
     if (waited >= 2000) miss("poll(3000) as a key came in returned after (ms)", waited);
     char in[96] = "", *ip = in;
     for (int i = 0; i < 4; i++) {
-        r = ask(1, &fd, (short[]){POLLIN}, &rev, 0);
-        if (r != 1 || rev != POLLIN) miss("poll(0) before an injected event: revents", rev);
+        /* The release comes 50 ms after the press: poll waits for it. */
+        r = ask(1, &fd, (short[]){POLLIN}, &rev, i == 2 ? 1000 : 0);
+        if (r != 1 || rev != POLLIN) miss(i == 2 ? "poll(1000) as the key was released: revents" : "poll(0) before the key's next event: revents", rev);
         struct input_event e;
         if (read(fd, &e, sizeof e) == (ssize_t)sizeof e) ip = show(ip, &e);
     }
     if (strcmp(in, " 88+ . 88- .") != 0) {
         size_t k = strlen(bad);
-        snprintf(bad + k, sizeof bad - k, "%sthe injected key read as \"%s\"", k ? "; " : "", in);
+        snprintf(bad + k, sizeof bad - k, "%sF12 read as \"%s\"", k ? "; " : "", in);
     }
     r = ask(1, &fd, (short[]){POLLIN}, &rev, 0);
-    if (r != 0) miss("poll(0) after the injected key: revents", rev);
+    if (r != 0) miss("poll(0) after F12's events: revents", rev);
     printf("poll %s\n", bad[0] ? bad : "ok");
 
     struct input_event e;

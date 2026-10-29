@@ -47,7 +47,7 @@ impl LockedHeap {
     /// held (on this one CPU, waiting would never end).
     pub fn lock(&self) -> Option<HeapGuard<'_>> {
         let _ = &self.heap;
-        todo!("lab 10 step 4 — LockedHeap::lock: interrupts off, then try the lock; held means deadlock: None")
+        todo!("lab 10 task 4 — LockedHeap::lock: interrupts off, then try the lock; held means deadlock: None")
     }
 }
 
@@ -67,14 +67,14 @@ unsafe impl GlobalAlloc for LockedHeap {
         // return is compiled to a bare `ud2` where `Box::new` calls it, and
         // the `todo!` never prints. Your body returns, so it needs none.)
         if core::hint::black_box(true) {
-            todo!("lab 10 step 2 — alloc: the first free block that fits, split; grow by frames when none does (step 3)")
+            todo!("lab 10 task 2 — alloc: the first free block that fits, split; grow by frames when none does (task 3)")
         }
         core::ptr::null_mut()
     }
 
     unsafe fn dealloc(&self, p: *mut u8, layout: Layout) {
         let _ = (p, layout);
-        todo!("lab 10 step 2 — dealloc: back into the list in address order, merged with the blocks it touches")
+        todo!("lab 10 task 2 — dealloc: back into the list in address order, merged with the blocks it touches")
     }
 }
 
@@ -85,5 +85,5 @@ pub static HEAP: LockedHeap = LockedHeap::new();
 /// `initial_pages` frames there.
 pub fn init(start: VirtAddr, initial_pages: usize) {
     let _ = (start, initial_pages);
-    todo!("lab 10 step 1 — init: map initial_pages frames at start through paging, and free them into the list")
+    todo!("lab 10 task 1 — init: map initial_pages frames at start through paging, and free them into the list")
 }

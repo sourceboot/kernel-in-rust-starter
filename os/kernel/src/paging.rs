@@ -11,7 +11,8 @@
 use crate::addr::{PhysAddr, VirtAddr};
 use crate::frame::Frame;
 
-/// Page-table entry bits (SDM Vol. 3A §4.5); `flags: u64` throughout.
+/// Page-table entry bits (SDM Vol. 3A, 4-Level Paging and 5-Level Paging);
+/// `flags: u64` throughout.
 pub mod flags {
     pub const PRESENT: u64 = 1;
     pub const WRITE: u64 = 1 << 1;
@@ -34,13 +35,13 @@ pub struct Pte(pub u64);
 
 impl Pte {
     pub fn is_present(self) -> bool {
-        todo!("lab 08 step 1 — Pte::is_present")
+        todo!("lab 08 task 1 — Pte::is_present")
     }
     pub fn addr(self) -> PhysAddr {
-        todo!("lab 08 step 1 — Pte::addr: the frame address bits")
+        todo!("lab 08 task 1 — Pte::addr: the frame address bits")
     }
     pub fn flags(self) -> u64 {
-        todo!("lab 08 step 1 — Pte::flags: every bit but the address")
+        todo!("lab 08 task 1 — Pte::flags: every bit but the address")
     }
 }
 
@@ -61,10 +62,10 @@ pub enum MapError {
     NoMemory,
 }
 
-/// The HHDM: every physical address, mapped at `pa + offset`.
+/// The HHDM: every RAM frame and the framebuffer, mapped at `pa + offset`.
 pub fn hhdm(pa: PhysAddr) -> VirtAddr {
     let _ = pa;
-    todo!("lab 08 step 1 — hhdm: the BootInfo's offset")
+    todo!("lab 08 task 1 — hhdm: the BootInfo's offset")
 }
 
 pub struct AddressSpace {
@@ -74,7 +75,7 @@ pub struct AddressSpace {
 impl AddressSpace {
     /// A fresh PML4: the user half empty, the kernel half the running one's.
     pub fn new_kernel() -> Self {
-        todo!("lab 08 step 2 — new_kernel: a zeroed PML4, the upper half copied from CR3's")
+        todo!("lab 08 task 2 — new_kernel: a zeroed PML4, the upper half copied from CR3's")
     }
 
     /// The physical address of this space's PML4 (what `activate` loads).
@@ -85,29 +86,29 @@ impl AddressSpace {
     /// Map the 4 KiB page at `va` to `f` with `flags` (PRESENT is implied).
     pub fn map(&mut self, va: VirtAddr, f: Frame, flags: u64) -> Result<(), MapError> {
         let _ = (va, f, flags);
-        todo!("lab 08 step 3 — map: walk four levels, making tables as needed, write the leaf")
+        todo!("lab 08 task 4 — map: walk the three upper levels, making tables as needed, then write the leaf")
     }
 
     /// Unmap the 4 KiB page at `va`; returns the frame it mapped.
     pub fn unmap(&mut self, va: VirtAddr) -> Option<Frame> {
         let _ = va;
-        todo!("lab 08 step 4 — unmap: clear the leaf, flush the TLB entry")
+        todo!("lab 08 task 3 — unmap: clear the leaf, flush the TLB entry")
     }
 
     /// Where `va` lands, and the size of the page that maps it.
     pub fn translate(&self, va: VirtAddr) -> Option<(PhysAddr, PageSize)> {
         let _ = va;
-        todo!("lab 08 step 4 — translate: walk, stopping at a huge page")
+        todo!("lab 08 task 3 — translate: walk, stopping at a huge page")
     }
 
     /// Load this space into CR3.
     pub fn activate(&self) {
-        todo!("lab 08 step 5 — activate: mov cr3")
+        todo!("lab 08 task 5 — activate: mov cr3")
     }
 
     /// The 4 KiB leaf entry for `va`, if every table on the way exists.
     pub fn entry_mut(&mut self, va: VirtAddr) -> Option<&mut Pte> {
         let _ = va;
-        todo!("lab 08 step 4 — entry_mut: the leaf entry")
+        todo!("lab 08 task 3 — entry_mut: the leaf entry")
     }
 }

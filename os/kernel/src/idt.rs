@@ -26,22 +26,22 @@ pub struct TrapFrame {
     pub ss: u64,
 }
 
-// lab 05 step 1 — the trampolines and the common entry go here, above `init`.
+// lab 05 task 1 — the trampolines and the common entry go here, above `init`.
 
 /// Fill all 256 gates and load the table.
 pub fn init() {
-    todo!("lab 05 step 2 — init: point every gate at its trampoline, #DF on IST 1, lidt")
+    todo!("lab 05 task 2 — init: point every gate at its trampoline, #DF on IST 1, lidt")
 }
 
 /// Route `vector` to `f`, on interrupt stack `ist` (0 = none). For `#PF`
 /// (14), `f` runs only for a fault `mm::fault` answers with `Kill`.
 pub fn set_handler(vector: u8, f: fn(&mut TrapFrame), ist: u8) {
     let _ = (vector, f, ist);
-    todo!("lab 05 step 3 — set_handler: record the handler, set the gate's IST")
+    todo!("lab 05 task 3 — set_handler: record the handler, set the gate's IST")
 }
 
 /// Every trap lands here with its frame.
 pub fn dispatch(tf: &mut TrapFrame) {
     let _ = tf;
-    todo!("lab 05 step 4 — dispatch: #PF to mm::fault first (a Kill then goes to a registered handler), else a registered handler; int3 resumes, the rest report and halt")
+    todo!("lab 05 task 4 — dispatch: #PF to mm::fault first (a Kill then goes to a registered handler), else a registered handler; int3 resumes, the rest report and halt")
 }

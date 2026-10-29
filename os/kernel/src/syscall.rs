@@ -4,7 +4,7 @@
 //! instruction: the number in `rax`, up to six arguments in `rdi rsi rdx r10
 //! r8 r9`, the answer back in `rax` — Linux's x86-64 convention, so Linux's
 //! numbers. `syscall` does not switch stacks: the entry's first job is to
-//! leave the user's stack for a kernel one. `sysret` is the way back.
+//! leave the user's stack for a kernel one. `sysretq` is the way back.
 //!
 //! The dispatch is one `match` over the number. Every later lab adds arms
 //! to it and never reorders them; a number with no arm yet is `-ENOSYS`,
@@ -82,14 +82,14 @@ pub struct SyscallFrame {
 
 /// Program STAR, LSTAR and SFMASK, and set EFER.SCE.
 pub fn init() {
-    todo!("lab 09 step 1 — init: STAR (kernel 0x08, user base 0x18), LSTAR = your naked entry, SFMASK (IF, TF, DF at least), EFER.SCE")
+    todo!("lab 09 task 1 — init: STAR (kernel 0x08, user base 0x18), LSTAR = your naked entry, SFMASK (IF, TF, DF, NT at least), EFER.SCE")
 }
 
 /// The kernel stack your entry switches to (its top, 16-aligned) — the
 /// same stack the TSS's `rsp0` names.
 pub fn set_kernel_stack(top: VirtAddr) {
     let _ = top;
-    todo!("lab 09 step 1 — set_kernel_stack: remember the top for the entry to load")
+    todo!("lab 09 task 1 — set_kernel_stack: remember the top for the entry to load")
 }
 
 /// Bumped by `dispatch`'s `_` arm, once per unknown number.
@@ -104,7 +104,7 @@ pub fn enosys_count() -> u64 {
 /// One `match` over the number; `-errno` for a refusal.
 pub fn dispatch(nr: u64, a: [u64; 6], f: &mut SyscallFrame) -> i64 {
     let _ = (nr, a, f);
-    todo!("lab 09 step 5 — dispatch: read, write, close, ioctl, getpid, exit; `_` counts and returns -ENOSYS")
+    todo!("lab 09 task 5 — dispatch: read, write, close, ioctl, getpid, exit; `_` counts and returns -ENOSYS")
 }
 
 impl crate::fs::vfs::Stat {

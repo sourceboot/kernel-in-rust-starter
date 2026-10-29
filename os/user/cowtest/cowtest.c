@@ -245,6 +245,57 @@ static int hexword(const volatile u8 *s, u64 *out)
     return 1;
 }
 
+/* fork(), and in the same asm statement, before any compiled code runs in either
+ * process, one write to each of the pages main's locals sit on, which that fork has
+ * just shared copy-on-write: every stack page pretouch() names (four below the
+ * stack pointer's page, that page and the one above it, up to the stack's top) and
+ * the page holding torn_n, torn_page and torn_byte. Each byte is rewritten with its
+ * own value, so nothing changes but where the copy happens. (The 48 MiB and the
+ * shared X/Y/Z pages are left alone: copying them where the rows look is the
+ * point.)
+ *
+ * WHY (2026-10-28, ledger G1821): the first store to a shared page faults and is
+ * re-run once the kernel has copied it. Measured at one site: row 1's `setg`
+ * (testq %rax,%rax; ...; testq %r14,%r14; setg -0xb8(%rbp), the parent's "fork 1
+ * gave a pid" flag, the first store to a stack page fork 1 shared). There QEMU
+ * 8.2.2's TCG (Ubuntu 24.04's package, the course's QEMU floor, CI's runner) gave
+ * the page fault the flags of the first testq, not the second, and the kernel's
+ * iretq restores what it was handed: saved RFLAGS 0x282 (SF set: "not greater") on
+ * 8.2.2 and 0x10206 on 11.1.1, with r14 = 3 and rax = -12 on both; the re-run setg
+ * stored 0, and a kernel whose second fork failed lost its first child. No upstream
+ * fix identified; the nearest is QEMU commit e7bbb7cb71b3 (target/i386: introduce
+ * flags writeback mechanism, after 8.2.0), the same family (a fault restoring the
+ * wrong cc_op) in an ALU-to-memory shape. Here no flag is live across any
+ * of these stores (the loop rewrites the flags after each one, and the asm
+ * clobbers them), and once they have run no store the compiled code makes to a
+ * page they cover faults before the next fork. */
+static i64 fork_touch(void)
+{
+    i64 r;
+    u64 a, last, b;
+    __asm__ volatile(
+        "syscall\n\t"
+        "movb (%[g]), %b[b]\n\t"
+        "movb %b[b], (%[g])\n\t"
+        "mov %%rsp, %[a]\n\t"
+        "and $-4096, %[a]\n\t"
+        "lea 0x1000(%[a]), %[last]\n\t"
+        "sub $0x4000, %[a]\n"
+        "1:\n\t"
+        "cmp %[top], %[a]\n\t"
+        "jae 2f\n\t"
+        "movb (%[a]), %b[b]\n\t"
+        "movb %b[b], (%[a])\n\t"
+        "add $0x1000, %[a]\n\t"
+        "cmp %[last], %[a]\n\t"
+        "jbe 1b\n"
+        "2:"
+        : "=a"(r), [a] "=&r"(a), [last] "=&r"(last), [b] "=&q"(b)
+        : "a"((i64)SYS_fork), [g] "r"((volatile u8 *)&torn_n), [top] "r"(0x7ffffffff000ull)
+        : "rcx", "r11", "memory", "cc");
+    return r;
+}
+
 int main(int argc, char **argv, char **envp)
 {
     struct line l = { 0, {0} };
@@ -279,7 +330,7 @@ int main(int argc, char **argv, char **envp)
     u64 kids = 0;
     for (u64 k = 1; k <= FORKS; k++) {
         *word(X_PAGE, k) = vpre(k);
-        i64 f = sys_fork();
+        i64 f = fork_touch();
         if (f == 0) child(k, go[0], done[1], go2[0]);
         *word(X_PAGE, k) = vpost(k);
         pid[k - 1] = f;
@@ -336,7 +387,7 @@ int main(int argc, char **argv, char **envp)
     /* Row 3: a write into the program's text. */
     volatile u8 *tp = (volatile u8 *)(usize)&text_target;
     u8 before = *tp;
-    i64 d = sys_fork();
+    i64 d = fork_touch();
     if (d == 0) {
         *tp = (u8)(before ^ 0xff);
         sys_exit(77);
@@ -363,7 +414,7 @@ int main(int argc, char **argv, char **envp)
     u64 k4 = 64 + dv % 193;
     u64 first = splitmix64(dv) % (BIG_PAGES - S4_FIRST);
     int st4 = 0;
-    i64 q = sys_fork();
+    i64 q = fork_touch();
     if (q == 0) q_child(k4, first);
     i64 w4 = q > 0 ? sys_wait4(q, &st4, 0) : q;
     line_str(&l, "reaped4 ");

@@ -13,24 +13,24 @@
 /// returns `true` the input device keeps it.
 pub fn push(sc: u8) {
     let _ = sc;
-    todo!("lab 06 step 4 — push: store the scancode if the ring has room")
+    todo!("lab 06 task 4 — push: store the scancode if the ring has room")
 }
 
 /// The oldest scancode not yet popped.
 pub fn pop() -> Option<u8> {
-    todo!("lab 06 step 4 — pop: the oldest scancode, or None")
+    todo!("lab 06 task 4 — pop: the oldest scancode, or None")
 }
 
 /// The ASCII byte a set-1 make code types, if any; a break code types nothing.
 pub fn to_ascii(sc: u8) -> Option<u8> {
     let _ = sc;
-    todo!("lab 06 step 5 — to_ascii: the set-1 table")
+    todo!("lab 06 task 5 — to_ascii: the set-1 table")
 }
 
 /// Lab 23: the wait channel a reader of the keyboard sleeps on. `push` wakes
 /// it (`sched::wakeup`) after each scancode it stores.
 pub fn chan() -> usize {
-    todo!("lab 23 step 2 — chan: one address this file owns; push wakes it")
+    todo!("lab 23 task 2 — chan: one address this file owns; push wakes it")
 }
 
 /// Lab 23: the byte one scancode types with the shift and control keys held
@@ -40,7 +40,7 @@ pub fn chan() -> usize {
 /// with control, a letter types `c & 0x1f` (ctrl+d is 0x04).
 pub fn translate(sc: u8) -> Option<u8> {
     let _ = sc;
-    todo!("lab 23 step 1 — translate: follow shift and control; the shifted symbols, ctrl+letter's control code")
+    todo!("lab 23 task 1 — translate: follow shift and control; the shifted symbols, ctrl+letter's control code")
 }
 
 /// Lab 26: the `KEY_*` number (Linux's input-event-codes.h) of a set-1

@@ -71,15 +71,15 @@ pub static CONSOLE: Console = Console { lock: SpinLock::new(()) };
 
 impl File for Console {
     fn read(&self, _of: &OpenFile, _buf: &mut [u8]) -> Result<usize, Errno> {
-        todo!("lab 09 step 3 — Console::read: end of file until lab 23")
+        todo!("lab 09 task 3 — Console::read: end of file until lab 23")
     }
     fn write(&self, _of: &OpenFile, buf: &[u8]) -> Result<usize, Errno> {
         let _ = (buf, &self.lock);
-        todo!("lab 09 step 3 — Console::write: under the lock, every byte to the serial line")
+        todo!("lab 09 task 3 — Console::write: under the lock, every byte to the serial line")
     }
     fn ioctl(&self, _of: &OpenFile, req: u64, arg: u64) -> Result<i64, Errno> {
         let _ = (req, arg);
-        todo!("lab 09 step 3 — Console::ioctl: TIOCGWINSZ writes 25 rows, 80 cols; anything else ENOTTY")
+        todo!("lab 09 task 3 — Console::ioctl: TIOCGWINSZ writes 25 rows, 80 cols; anything else ENOTTY")
     }
 }
 
@@ -101,15 +101,15 @@ pub struct OpenFile {
 impl OpenFile {
     pub fn read(&self, buf: &mut [u8]) -> Result<usize, Errno> {
         let _ = buf;
-        todo!("lab 09 step 3 — OpenFile::read: ask the object")
+        todo!("lab 09 task 3 — OpenFile::read: ask the object")
     }
     pub fn write(&self, buf: &[u8]) -> Result<usize, Errno> {
         let _ = buf;
-        todo!("lab 09 step 3 — OpenFile::write: ask the object")
+        todo!("lab 09 task 3 — OpenFile::write: ask the object")
     }
     pub fn ioctl(&self, req: u64, arg: u64) -> Result<i64, Errno> {
         let _ = (req, arg);
-        todo!("lab 09 step 3 — OpenFile::ioctl: ask the object")
+        todo!("lab 09 task 3 — OpenFile::ioctl: ask the object")
     }
 }
 
@@ -121,31 +121,31 @@ impl FileRef {
     /// A new open file on `object` with `flags`, holding one reference.
     pub fn open(object: FileObj, flags: u32) -> Result<FileRef, Errno> {
         let _ = (object, flags);
-        todo!("lab 09 step 3 — FileRef::open: claim a free pool slot (count 0 -> 1), fill it")
+        todo!("lab 09 task 3 — FileRef::open: claim a free pool slot (count 0 -> 1), fill it")
     }
     /// How many references this open file has.
     pub fn refs(&self) -> u32 {
         let _ = self.0;
-        todo!("lab 09 step 3 — FileRef::refs: the slot's count")
+        todo!("lab 09 task 3 — FileRef::refs: the slot's count")
     }
 }
 
 impl Clone for FileRef {
     fn clone(&self) -> FileRef {
-        todo!("lab 09 step 3 — FileRef::clone: one more reference")
+        todo!("lab 09 task 3 — FileRef::clone: one more reference")
     }
 }
 
 impl Drop for FileRef {
     fn drop(&mut self) {
-        todo!("lab 09 step 3 — FileRef::drop: one reference fewer")
+        todo!("lab 09 task 3 — FileRef::drop: one reference fewer")
     }
 }
 
 impl Deref for FileRef {
     type Target = OpenFile;
     fn deref(&self) -> &OpenFile {
-        todo!("lab 09 step 3 — FileRef::deref: the open file in the slot")
+        todo!("lab 09 task 3 — FileRef::deref: the open file in the slot")
     }
 }
 
@@ -168,29 +168,29 @@ impl FdTable {
     /// The open file behind `fd` (a new reference), or `EBADF`.
     pub fn get(&self, fd: u64) -> Result<FileRef, Errno> {
         let _ = (fd, &self.slots);
-        todo!("lab 09 step 3 — FdTable::get")
+        todo!("lab 09 task 3 — FdTable::get")
     }
     /// Put `d` in the lowest free slot; returns its number.
     pub fn alloc(&mut self, d: Fd) -> Result<usize, Errno> {
         let _ = d;
-        todo!("lab 09 step 3 — FdTable::alloc: the lowest free slot, or EMFILE")
+        todo!("lab 09 task 3 — FdTable::alloc: the lowest free slot, or EMFILE")
     }
     /// Put `d` in slot `n`, returning what was there.
     pub fn install(&mut self, n: usize, d: Fd) -> Result<Option<Fd>, Errno> {
         let _ = (n, d);
-        todo!("lab 09 step 3 — FdTable::install")
+        todo!("lab 09 task 3 — FdTable::install")
     }
     pub fn close(&mut self, fd: u64) -> Result<(), Errno> {
         let _ = fd;
-        todo!("lab 09 step 3 — FdTable::close: EBADF for a slot that is empty")
+        todo!("lab 09 task 3 — FdTable::close: EBADF for a slot that is empty")
     }
     /// Close every fd.
     pub fn clear(&mut self) {
-        todo!("lab 09 step 3 — FdTable::clear")
+        todo!("lab 09 task 3 — FdTable::clear")
     }
     /// fds 0, 1 and 2 on one open console (read-write).
     pub fn open_std(&mut self) -> Result<(), Errno> {
-        todo!("lab 09 step 3 — FdTable::open_std: one console open file, in slots 0, 1 and 2")
+        todo!("lab 09 task 3 — FdTable::open_std: one console open file, in slots 0, 1 and 2")
     }
 }
 
@@ -203,7 +203,7 @@ impl Default for FdTable {
 /// Run `f` on the running program's fd table.
 pub fn with_fds<R>(f: impl FnOnce(&mut FdTable) -> R) -> R {
     let _ = f;
-    todo!("lab 09 step 3 — with_fds: one table behind a SpinLock, for now")
+    todo!("lab 09 task 3 — with_fds: one table behind a SpinLock, for now")
 }
 
 /// Lab 32 step 5: ctrl+c, from the keyboard interrupt. Every process

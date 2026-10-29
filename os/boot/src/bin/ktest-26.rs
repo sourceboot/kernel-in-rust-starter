@@ -106,10 +106,17 @@
 //!     read that is never woken holds `evtest` until `RUN_MS`.
 //!  10 `input.poll` (plain) — `POLLIN` and `POLLOUT` on a console holding
 //!     a typed line (this file types `zq` and enter into the ring first),
-//!     0 once it is read; when `evtest` prints `inject` this file pushes
-//!     F12's press and release at once, and its `poll(3000)` must wake
-//!     within 2 s with `POLLIN`, `POLLIN` before each of the four events,
-//!     0 after them (`poll ok`).
+//!     0 once it is read; then `evtest` writes `# sboot poll-ready` to
+//!     /dev/console and polls, and the rubric's `[[script]]` types F12
+//!     once that line is on the serial port (the engine reads it there:
+//!     `evtest`'s stdout is this file's pipe, read only when this file
+//!     runs, so it cannot carry the cue). Its `poll(3000)` must wake for
+//!     the press within 2 s with `POLLIN`, and `POLLIN` must come before
+//!     each of the four events, 0 after them (`poll ok`). The key comes
+//!     through the real interrupt, as the script's five do, so the wake is
+//!     graded whether or not this file gets the CPU while `evtest` polls
+//!     (G1820). If `evtest` never prints its `poll` line this file prints
+//!     `# sboot poll-ready` itself, last, so the script runs out.
 //!
 //! Plan 10. A program still running after `RUN_MS` by the PM timer fails
 //! the rows whose lines it had not printed; the vehicle then goes on.
@@ -204,9 +211,9 @@ const LOOK_MS: u64 = 50;
 /// What this file types into the console's ring before `evtest` runs:
 /// z, q, enter, each pressed and released.
 const LINE_KEYS: [u8; 6] = [0x2c, 0xac, 0x10, 0x90, 0x1c, 0x9c];
-/// F12's make and break codes: the key pushed at `inject`, and the one that
-/// wakes a read that slept.
-const F12: [u8; 2] = [0x58, 0xd8];
+/// F12's make code: the key that wakes a read that slept (the script types
+/// the poll's F12 itself).
+const F12_MAKE: u8 = 0x58;
 
 // ── Time that does not depend on the learner's tick ──────────────────────
 
@@ -899,7 +906,6 @@ fn fb_rows() {
 
 /// Read `run`'s pipe until it is at end of file or `RUN_MS` has passed,
 /// acting on its lines as they come: `ready` → `# sboot keys-ready`;
-/// `inject` → F12 pressed and released, both before `evtest` can run;
 /// `poll` printed and `evtest` still there after `UNBLOCK_MS` → one more
 /// key, to wake a read that slept. If `evtest` ends before `ready`, the
 /// keys-ready line is printed anyway so the script runs out.
@@ -907,7 +913,7 @@ fn fb_rows() {
 fn drive(run: &mut Run) -> (u64, bool) {
     let mut buf = alloc::vec![0u8; 4096];
     let mut c = Clock::new();
-    let (mut ready, mut injected, mut woke) = (false, false, false);
+    let (mut ready, mut woke) = (false, false);
     let mut poll_at: Option<u64> = None;
     loop {
         match run.r.read(&mut buf) {
@@ -924,16 +930,12 @@ fn drive(run: &mut Run) -> (u64, bool) {
             ready = true;
             quiet(|| kernel::kprintln!("# sboot keys-ready"));
         }
-        if !injected && has("inject") {
-            injected = true;
-            quiet(|| F12.iter().for_each(|&sc| kbd::push(sc)));
-        }
         if poll_at.is_none() && has("poll") {
             poll_at = Some(c.ms());
         }
         if !woke && run.open && poll_at.is_some_and(|t| c.ms() >= t + UNBLOCK_MS) {
             woke = true;
-            quiet(|| kbd::push(F12[0]));
+            quiet(|| kbd::push(F12_MAKE));
         }
         if !run.open || c.ms() >= RUN_MS {
             break;
@@ -977,6 +979,7 @@ fn input_rows() {
     match launch("/bin/evtest", &["evtest"], false) {
         Err(why) => {
             quiet(|| kernel::kprintln!("# sboot keys-ready"));
+            quiet(|| kernel::kprintln!("# sboot poll-ready"));
             for (row, id) in [(&mut keys, KEYS_ID), (&mut eagain, EAGAIN_ID), (&mut poll, POLL_ID)] {
                 row.fail(format_args!("{id}: /bin/evtest did not start: {why}"));
             }
@@ -1050,6 +1053,13 @@ fn input_rows() {
                 poll.fail(format_args!("{POLL_ID}: {why}"));
             }
             note(format_args!("{KEYS_ID}: {}", ended(&run).unwrap_or_else(|| String::from("/bin/evtest exited 0"))));
+            // evtest writes the script's cue itself, just before its poll; one
+            // that never got there leaves the script waiting, so the line is
+            // printed here, after the last look at the keys (the F12 it brings
+            // lands in a ring nothing reads any more).
+            if line_of(&out, "poll").is_none() {
+                quiet(|| kernel::kprintln!("# sboot poll-ready"));
+            }
         }
     }
     keys.finish(8);
@@ -1110,6 +1120,7 @@ fn prelude() {
 /// Rows 2 to 10 when the file systems did not mount.
 fn not_run(why: &str) {
     quiet(|| kernel::kprintln!("# sboot keys-ready"));
+    quiet(|| kernel::kprintln!("# sboot poll-ready"));
     for (n, id) in [VAR_ID, FIX_ID, FILL_ID, FORK_ID, CAPS_ID, FILES_ID, KEYS_ID, EAGAIN_ID, POLL_ID].into_iter().enumerate() {
         let mut r = Row::new(id);
         r.fail(format_args!("{id}: not run: {why}"));

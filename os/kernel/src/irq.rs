@@ -17,11 +17,11 @@ pub const PIT_DIVISOR: u16 = 1193;
 
 /// Remap and mask the PICs, start the PIT, install the two handlers, `sti`.
 pub fn init() {
-    todo!("lab 06 step 1 — init: remap the PICs to 32–47, unmask IRQ 0 and 1, PIT at 1000 Hz, handlers, sti")
+    todo!("lab 06 task 1 — init: remap the PICs to 32–47, unmask IRQ 0 and 1, PIT at 1000 Hz, handlers, sti")
 }
 
 /// Acknowledge `irq` (0–15) at the PIC that raised it.
 pub fn eoi(irq: u8) {
     let _ = irq;
-    todo!("lab 06 step 2 — eoi: end-of-interrupt to the right PIC (both, for 8–15)")
+    todo!("lab 06 task 2 — eoi: end-of-interrupt to the right PIC (both, for 8–15)")
 }

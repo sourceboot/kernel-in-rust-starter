@@ -15,12 +15,18 @@
 //! of this lab can observe by faulting (2026-10-18, TPM class B ruling).
 //! `idt.vector` (fix round, 2026-10-18, sk05-forger-1) registers a handler
 //! with `set_handler(v, f, 1)` for a nonce-chosen vector v in 32..=255 and
-//! raises it with `int v`: the gate's IST must read back 1, the frame must sit
+//! has the local APIC send it to itself (a fixed self-IPI), so no instruction
+//! names v: the gate's IST must read back 1, the frame must sit
 //! on the IST 1 stack and carry vector v, and every caller-saved register the
 //! handler overwrites must come back as it was — so a vector the run never
 //! named in advance needs real entry code, `set_handler`'s IST and a common
 //! entry that saves what a Rust handler may clobber. `fault.seam` has six
 //! cases, two pairs sharing an error code across the address halves.
+//! Each row that routes a trap to a handler (2026-10-28, sprint 4 #44c,
+//! G1612) registers a second handler, `decoy`, on another vector after the
+//! one it raises, and `int3.resume`'s second `int3` comes after one: a
+//! dispatch that routes by the last `set_handler` instead of the frame's
+//! vector runs `decoy`, which these rows count.
 
 #![no_std]
 #![no_main]
@@ -47,6 +53,11 @@ static AT: AtomicU64 = AtomicU64::new(0);
 static FRAME: AtomicU64 = AtomicU64::new(0);
 /// The local APIC's EOI register while `idt.vector` has the APIC mapped, else 0.
 static APIC_EOI: AtomicU64 = AtomicU64::new(0);
+/// Traps that reached `decoy` (2026-10-28, G1612).
+static DECOY_HITS: AtomicU64 = AtomicU64::new(0);
+/// The vector `int3.resume` and `gp.reported` register `decoy` on: `#OF`,
+/// which nothing raises in 64-bit mode (`into` is invalid there).
+const DECOY_VEC: u8 = 4;
 /// The span of instructions `idt.vector`'s interrupt may arrive in.
 static WIN_LO: AtomicU64 = AtomicU64::new(0);
 static WIN_HI: AtomicU64 = AtomicU64::new(0);
@@ -110,6 +121,31 @@ fn record(tf: &mut TrapFrame) {
     tf.rip = RESUME.load(Ordering::SeqCst);
 }
 
+/// The handler a routing row registers on another vector AFTER the one it
+/// raises (2026-10-28, sprint 4 #44c, G1612): only a dispatch that routes by
+/// the last `set_handler` rather than the frame's vector runs it. It counts,
+/// sends the EOI while `idt.vector` has the APIC mapped, and resumes a fault
+/// a row armed, so a misrouted trap reddens its row instead of hanging the run.
+fn decoy(tf: &mut TrapFrame) {
+    DECOY_HITS.fetch_add(1, Ordering::SeqCst);
+    let eoi = APIC_EOI.load(Ordering::SeqCst);
+    if eoi != 0 {
+        // SAFETY: while `idt.vector` runs, `eoi` is the mapped APIC's EOI register.
+        unsafe { core::ptr::write_volatile(eoi as *mut u32, 0) };
+    }
+    if tf.rip == AT.load(Ordering::SeqCst) {
+        tf.rip = RESUME.load(Ordering::SeqCst);
+    }
+}
+
+/// Fail the row if a trap since `before` reached `decoy`.
+fn no_decoy(t: &mut TestCtx, before: u64, what: core::fmt::Arguments) {
+    let n = DECOY_HITS.load(Ordering::SeqCst) - before;
+    if n != 0 {
+        t.fail(format_args!("{what} reached the handler registered for that other vector ({n} time(s)): dispatch ran the handler set_handler stored last, not the one for the vector in the frame"));
+    }
+}
+
 /// Fault once at `addr` (a write if `write`), through the vehicle's #PF
 /// handler; returns how many traps arrived.
 fn page_fault(addr: u64, write: bool) -> u64 {
@@ -170,6 +206,10 @@ ktest!("int3.resume", fn int3_resume(t: &mut TestCtx) {
     // wire, where this row counts it. (The first runs with the line on the
     // wire, so a run that dies in it still shows its report.) First, let what
     // was already sent leave (LSR TEMT).
+    // Before the second `int3`, a handler goes on another vector (2026-10-28,
+    // G1612): vector 3 still has none, so the default must still answer it.
+    idt::set_handler(DECOY_VEC, decoy, 0);
+    let decoys = DECOY_HITS.load(Ordering::SeqCst);
     let mut spins = 0u32;
     while inb(COM1 + 5) & 0x40 == 0 && spins < 10_000_000 {
         spins += 1;
@@ -190,6 +230,7 @@ ktest!("int3.resume", fn int3_resume(t: &mut TestCtx) {
         n += 1;
     }
     outb(COM1 + 4, mcr);
+    no_decoy(t, decoys, format_args!("the second int3, raised after set_handler({DECOY_VEC}, ...),"));
     if n == 0 {
         t.fail(format_args!("the default for vector 3 sent nothing to the serial line during the int3: no breakpoint line"));
     } else {
@@ -237,6 +278,11 @@ ktest!("idt.vector", fn idt_vector(t: &mut TestCtx) {
     let v = 32 + t.pick("idt.vector", 224);
     t.note(format_args!("idt.vector: set_handler({v}, f, 1), then a fixed interrupt on vector {v} sent by the local APIC to itself (vector chosen by this run's nonce)"));
     idt::set_handler(v as u8, on_vector, 1);
+    // A second handler on another vector, registered after v's (2026-10-28,
+    // G1612): the interrupt on v must still reach v's.
+    let other = if v == 255 { 32 } else { v + 1 };
+    idt::set_handler(other as u8, decoy, 0);
+    let decoys = DECOY_HITS.load(Ordering::SeqCst);
     let mut d = Dtr { limit: 0, base: 0 };
     // SAFETY: `sidt` stores 10 bytes into `d`.
     unsafe { asm!("sidt [{}]", in(reg) &mut d, options(nostack, preserves_flags)) };
@@ -320,6 +366,7 @@ ktest!("idt.vector", fn idt_vector(t: &mut TestCtx) {
         asm!("invlpg [{}]", in(reg) win, options(nostack, preserves_flags));
     }
     t.expect_eq("interrupts delivered to the registered handler", HITS.load(Ordering::SeqCst) - before, 1);
+    no_decoy(t, decoys, format_args!("the interrupt on vector {v}, raised after set_handler({other}, ...),"));
     t.expect_eq("the frame's vector (what the entry for this gate pushed)", VEC.load(Ordering::SeqCst), v);
     let (rip, w0, w1) = (RIP.load(Ordering::SeqCst), WIN_LO.load(Ordering::SeqCst), WIN_HI.load(Ordering::SeqCst));
     if !(rip >= w0 && rip <= w1) {
@@ -434,6 +481,9 @@ ktest!("pf.error_code", fn pf_error_code(t: &mut TestCtx) {
 
 ktest!("gp.reported", fn gp_reported(t: &mut TestCtx) {
     idt::set_handler(13, record, 0);
+    // A second handler on another vector, registered after 13's (2026-10-28, G1612).
+    idt::set_handler(DECOY_VEC, decoy, 0);
+    let decoys = DECOY_HITS.load(Ordering::SeqCst);
     let before = HITS.load(Ordering::SeqCst);
     // SAFETY: selector 0x58 lies past the GDT's limit, so loading it into DS
     // raises #GP(0x58) and DS is unchanged; the handler resumes at label 2.
@@ -443,6 +493,7 @@ ktest!("gp.reported", fn gp_reported(t: &mut TestCtx) {
             t = out(reg) _, r = in(reg) RESUME.as_ptr(), at = in(reg) AT.as_ptr());
     }
     t.expect_eq("traps delivered", HITS.load(Ordering::SeqCst) - before, 1);
+    no_decoy(t, decoys, format_args!("the #GP, raised after set_handler({DECOY_VEC}, ...),"));
     t.expect_eq("vector", VEC.load(Ordering::SeqCst), 13);
     t.expect_eq("the frame's error code (the selector)", ERR.load(Ordering::SeqCst), 0x58);
     t.expect_eq("the frame's rip", RIP.load(Ordering::SeqCst), AT.load(Ordering::SeqCst));

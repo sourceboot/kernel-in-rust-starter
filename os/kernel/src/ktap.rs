@@ -5,7 +5,7 @@
 //! the physical layer of every report. (The vehicles in `boot/src/bin/` call
 //! the published interfaces of the lab under test; this file calls none.)
 //!
-//! The registry is a hand-rolled link-section array (rfk lab 08) — the same
+//! The registry is a hand-rolled link-section array (Rust for Kernels lab 08) — the same
 //! technique the boot shim uses for Limine requests — so the course stays on
 //! stable Rust. `ktest!` places one `KtestDesc` in `.ktest_array`;
 //! boot/linker.ld KEEPs that section and brackets it with
@@ -15,6 +15,16 @@
 //! `# sboot nonce none`), `1..N`, one `ok N - <id>` / `not ok N - <id>` per
 //! test with its `#` evidence lines BEFORE it, then `# sboot end` last.
 //! There is no `# SKIP` and no trailer on a result line.
+//!
+//! The ANCHORS (CONTRACT §A.3a, 2026-10-25). Four kinds of exported symbol
+//! are where the grading engine sets its breakpoints, and their names are
+//! engine contract: `sboot_ktap_run` (the runner, `run_all`), `sboot_ktest_<id>`
+//! (each test fn `ktest!` defines), `sboot_ktap_record` (the recorder: every
+//! `ok`/`not ok` line is printed by it, its arguments in registers) and
+//! `sboot_ktap_halt` (the vehicle's last call). The engine grades a row only
+//! when those breakpoints fired in the runner's order — the transcript alone
+//! is no longer the evidence. Each is `#[inline(never)]` so it stays a real
+//! function with a real entry; a duplicate test id is now also a link error.
 
 use core::cell::Cell;
 use core::fmt::{self, Write};
@@ -38,6 +48,9 @@ pub struct KtestDesc {
 #[macro_export]
 macro_rules! ktest {
     ($id:literal, fn $name:ident($ctx:ident: &mut TestCtx) $body:block) => {
+        // The anchor: an exported, never-inlined entry the engine breaks on.
+        #[inline(never)]
+        #[export_name = concat!("sboot_ktest_", $id)]
         fn $name($ctx: &mut $crate::ktap::TestCtx) $body
         const _: () = {
             #[used]
@@ -231,9 +244,39 @@ pub fn end() {
     let _ = writeln!(Out, "# sboot end");
 }
 
+/// The recorder (anchor `sboot_ktap_record`): prints the `ok N - <id>` /
+/// `not ok N - <id>` line. Its arguments are the engine's row link, read from
+/// the psABI registers at the breakpoint — `n` in rdi, the id's pointer and
+/// length in rsi/rdx, `ok` in rcx — so the id the engine credits is the id the
+/// runner passed, not a function's name.
+///
+/// # Safety
+/// `id_ptr..id_ptr+id_len` must be a valid UTF-8 string.
+#[inline(never)]
+#[export_name = "sboot_ktap_record"]
+pub unsafe extern "C" fn record(n: usize, id_ptr: *const u8, id_len: usize, ok: u64) {
+    // SAFETY: the caller's contract above; `run_all` passes a registry id.
+    let id = unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(id_ptr, id_len)) };
+    if ok != 0 {
+        let _ = writeln!(Out, "ok {n} - {id}");
+    } else {
+        let _ = writeln!(Out, "not ok {n} - {id}");
+    }
+}
+
+/// The vehicle's last call (anchor `sboot_ktap_halt`), after `# sboot end`.
+#[inline(never)]
+#[export_name = "sboot_ktap_halt"]
+pub extern "C" fn halt() -> ! {
+    crate::hcf()
+}
+
 /// Run every registered test, emitting KTAP over the learner's serial port.
 /// A test whose id is registered twice is not run: every copy prints
-/// `not ok` (CONTRACT §A.3). Returns whether all tests passed.
+/// `not ok` (CONTRACT §A.3). Returns whether all tests passed. The runner
+/// anchor (`sboot_ktap_run`): its entry is the trail's first stop.
+#[inline(never)]
+#[export_name = "sboot_ktap_run"]
 pub fn run_all() -> bool {
     let ts = tests();
     let nonce = nonce();
@@ -245,7 +288,8 @@ pub fn run_all() -> bool {
         if dups > 1 {
             all_ok = false;
             let _ = writeln!(Out, "# {id}: registered {dups} times; a duplicate id never passes");
-            let _ = writeln!(Out, "not ok {n} - {id}");
+            // SAFETY: a registry id is a `&'static str`.
+            unsafe { record(n, id.as_ptr(), id.len(), 0) };
             continue;
         }
         let mut ctx = TestCtx { failed: false, nonce, used_nonce: Cell::new(false) };
@@ -256,10 +300,9 @@ pub fn run_all() -> bool {
         }
         if ctx.failed {
             all_ok = false;
-            let _ = writeln!(Out, "not ok {n} - {id}");
-        } else {
-            let _ = writeln!(Out, "ok {n} - {id}");
         }
+        // SAFETY: a registry id is a `&'static str`.
+        unsafe { record(n, id.as_ptr(), id.len(), !ctx.failed as u64) };
     }
     all_ok
 }
@@ -280,5 +323,5 @@ pub fn run_and_halt_after(prelude: fn()) -> ! {
     prelude();
     run_all();
     end();
-    crate::hcf()
+    halt()
 }
