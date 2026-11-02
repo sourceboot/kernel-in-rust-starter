@@ -23,12 +23,20 @@
  * parent is init (getppid() == init's pid, at most ORPHAN_YIELDS times) and
  * exits with orphan_code() -- or with 3 if it never was. init's wait4 sees it.
  * Children print nothing except the one '#' line naming the orphan.
+ *
+ * Lab 28's vehicle runs it as ["forker", <nonce>, <index>, "hold"]: the grandchild
+ * first reads one byte from fd HOLD_FD, a pipe whose only write end the vehicle keeps,
+ * so it lives until the vehicle closes that end (end of file), then exits with
+ * orphan_code(). When that read does not return end of file (fd HOLD_FD is not open,
+ * or is something else), it yields as above. Without "hold" nothing changes.
  */
 #include "../sys.h"
 #include "forker.h"
 
 #define WNOHANG_YIELDS 2000
 #define ORPHAN_YIELDS  200000
+/* The "hold" mode's fd (lab 28's vehicle installs the pipe there, in init, before it runs). */
+#define HOLD_FD        9
 /* fork.child.write.invisible: the child exits with this when its getppid() is not forker's
  * pid. Outside forker.h's two ranges (1..100, 150..249) (class B, TPM log 2026-10-19, B9). */
 #define PPID_WRONG     120
@@ -54,6 +62,7 @@ int main(int argc, char **argv, char **envp)
         return 2;
     }
     const char *nonce = argv[1];
+    int hold = argc > 3 && streq(argv[3], "hold");
     int good_nonce = nonce_valid(nonce);
     i64 init_pid = sys_getppid();
     line_note(&l, "forker: pid=");
@@ -188,6 +197,8 @@ int main(int argc, char **argv, char **envp)
         i64 g = sys_fork();
         if (g == 0) {
             int k = 0;
+            char b;
+            if (hold && sys_read(HOLD_FD, &b, 1) == 0) child_exit(orphan_code(nonce));
             while (sys_getppid() != init_pid && k < ORPHAN_YIELDS) { sys_sched_yield(); k++; }
             child_exit(sys_getppid() == init_pid ? orphan_code(nonce) : 3);
         }
@@ -197,8 +208,12 @@ int main(int argc, char **argv, char **envp)
         line_sdec(&l, g);
         line_str(&l, " and exits first; ");
         line_sdec(&l, g);
-        line_str(&l, " exits once its parent is ");
-        line_sdec(&l, init_pid);
+        if (hold) {
+            line_str(&l, " exits when its fd 9 reads end of file");
+        } else {
+            line_str(&l, " exits once its parent is ");
+            line_sdec(&l, init_pid);
+        }
         line_end(&l);
         child_exit(0);
     }

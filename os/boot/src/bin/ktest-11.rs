@@ -100,6 +100,31 @@ fn reap(ids: &[Tid], ms: u64) -> bool {
     wait_for(|| ids.iter().all(|&id| task::state(id).is_none()), ms, true)
 }
 
+// ── Interrupts off around what must not be cut ───────────────────────────
+
+fn irq_off() -> bool {
+    let rflags: u64;
+    // SAFETY: reads RFLAGS through the stack and clears IF.
+    unsafe { asm!("pushfq", "pop {}", "cli", out(reg) rflags) };
+    rflags & (1 << 9) != 0
+}
+
+fn irq_restore(on: bool) {
+    if on {
+        // SAFETY: setting IF touches no memory.
+        unsafe { asm!("sti", options(nomem, nostack)) };
+    }
+}
+
+/// A window edge: what `f` reads, it reads with no tick between its reads.
+/// A tick held back meanwhile is taken as soon as `f` returns.
+fn quiet<R>(f: impl FnOnce() -> R) -> R {
+    let on = irq_off();
+    let r = f();
+    irq_restore(on);
+    r
+}
+
 // ── This vehicle's own helpers for the machine ───────────────────────────
 
 /// CR0.EM = 0, CR0.TS = 0, CR0.MP = 1; CR4.OSFXSR = 1, CR4.OSXMMEXCPT = 1;
@@ -322,6 +347,9 @@ static PSTOP: AtomicBool = AtomicBool::new(false);
 static PTIMEOUT: AtomicBool = AtomicBool::new(false);
 static BSTOP: AtomicBool = AtomicBool::new(false);
 static BRUNS: AtomicU64 = AtomicU64::new(0);
+/// Set once the pair window is read: from the tick window on, the partner
+/// runs with interrupts off (`bounce`).
+static BQUIET: AtomicBool = AtomicBool::new(false);
 
 /// Pass the token back and forth through `yield_now`: a handoff is counted
 /// only by the task holding the token, and the other must run to hand it
@@ -357,8 +385,15 @@ fn pong() {
 }
 
 /// The boot task's only partner: yield straight back, every time it runs.
+/// Once BQUIET is set it turns interrupts off at the top of each run, and a
+/// `yield_now` that gives them back as it found them keeps them off, so from
+/// then on the tick can take the CPU only from the boot task, never from the
+/// partner (one that ends in `sti` turns them back on: G1908).
 fn bounce() {
     while !BSTOP.load(Ordering::SeqCst) {
+        if BQUIET.load(Ordering::SeqCst) {
+            irq_off();
+        }
         BRUNS.fetch_add(1, Ordering::SeqCst);
         sched::yield_now();
     }
@@ -400,11 +435,26 @@ const TICK_SPIN_MS: u64 = 100;
 /// Ticks the boot task waits through, spinning alone, at 1000 Hz.
 const LONE_TICKS: u64 = 20;
 
-/// Switches beyond two per partner run that an honest count may show: a
-/// tick that lands while the partner runs, before it counts itself, takes
-/// it out and back in without a run being counted. Measured 2026-10-19:
-/// none in 24 boots of eight honest kernels (r = 64-67 each).
-const TICK_SLACK: u64 = 2;
+/// Switches an honest count may show beyond two per counted partner run in
+/// the tick window, and beyond the exit's two in the exit window (and a term
+/// of the token row's upper bound). From the tick window on the partner runs
+/// with interrupts off (BQUIET), so a tick takes the CPU only while this
+/// task spins and each counted run is one switch in by the tick and one out
+/// by the yield. What the slack covers now is a tick a busy host delivers
+/// while the learner's own code still has interrupts on: inside the
+/// partner's first run after BQUIET, which resumes in its pair-window yield
+/// with them on (G1907's hypothesis, unmeasured), and in the exit window,
+/// where an exit handed on through another task (a reaper) reads 3 and a
+/// late tick lands 55 ms from the next. It holds for a `yield_now` that gives
+/// IF back as it found it: one that ends in `sti` turns interrupts on inside
+/// every partner run, a tick cuts each run in two, and the tick window reads
+/// about 2r + 60 (G1908). On this vehicle (#42q, 2026-10-30, lab-linux01
+/// under 10 busy loops) 255 loaded honest boots read the tick window at
+/// 2r + 2 in 7, 2r + 4 in 3 and 2r + 6 in 1 (G1907), and no exit window over
+/// the cap. 4 since 2026-10-29 (#42i, class B, sized on the vehicle before
+/// this one). A real miscount is 3r-4r, and the 2r floor, the pair and the
+/// trio catch the rest.
+const TICK_SLACK: u64 = 4;
 
 // The whole row runs with the PIT slowed to 18.2 Hz: a handoff that rides a
 // tick instead of a yield then makes at most a few dozen in the time the
@@ -522,28 +572,51 @@ ktest!("task.1000.switches", fn thousand_switches(t: &mut TestCtx) {
         }
         let ms = c.ms();
         let pair = sched::switches().wrapping_sub(b0);
+        BQUIET.store(true, Ordering::SeqCst);
         // The tick's switches too: back at the kernel's own rate, this task
         // spins without yielding while the partner is Ready, so each of the
         // partner's runs is one switch the tick made and one its yield made.
+        // The partner runs with interrupts off from here on (BQUIET), so no
+        // tick lands inside its run, however long the learner's yield_now
+        // takes, and cuts it into two runs' worth of switches (G1900), as
+        // long as yield_now gives IF back as it found it (G1908).
         // The partner counts its own runs, so this reads no counter of the
-        // kernel's but switches().
+        // kernel's but switches(). Each edge reads the two counts with
+        // interrupts off: a tick taken between them would split a run from
+        // its two switches (G1841, 2026-10-29: on x86-64 TCG's 1 kHz tick an
+        // honest kernel read 2r - 2).
         pit(irq::PIT_DIVISOR);
-        let r0 = BRUNS.load(Ordering::SeqCst);
-        let k0 = sched::switches();
+        let (r0, k0) = quiet(|| (BRUNS.load(Ordering::SeqCst), sched::switches()));
         let mut sc = Clock::new();
         while sc.ms() < TICK_SPIN_MS {
             core::hint::spin_loop();
         }
-        let ticked = sched::switches().wrapping_sub(k0);
-        let r = BRUNS.load(Ordering::SeqCst).wrapping_sub(r0);
+        let (ticked, r) = quiet(|| (sched::switches().wrapping_sub(k0), BRUNS.load(Ordering::SeqCst).wrapping_sub(r0)));
         // The exit's switch: told to stop, the partner ends at its next run,
         // and this task spins without yielding until it has: the tick's switch
         // in and the exit's switch out, 2, and up to TICK_SLACK more when a
         // tick lands first or the exit hands the CPU on through another task.
-        let e0 = sched::switches();
-        BSTOP.store(true, Ordering::SeqCst);
-        let ended = wait_for(|| matches!(task::state(b), None | Some(State::Dead)), 1000, false);
-        let exited = sched::switches().wrapping_sub(e0);
+        // With the PIT at 18.2 Hz, as the token row runs, so a loaded host's
+        // extra ticks inside the window are 55 ms apart, not 1 (G1900).
+        // Both edges with interrupts off (G1842): the count and the stop are
+        // one step, so no partner run falls between them, and so are the
+        // partner seen ended and the count read with it.
+        pit(0);
+        let e0 = quiet(|| {
+            let e0 = sched::switches();
+            BSTOP.store(true, Ordering::SeqCst);
+            e0
+        });
+        let mut ec = Clock::new();
+        let (ended, exited) = loop {
+            let (gone, sw) = quiet(|| (matches!(task::state(b), None | Some(State::Dead)), sched::switches()));
+            if gone || ec.ms() >= 1000 {
+                break (gone, sw.wrapping_sub(e0));
+            }
+            core::hint::spin_loop();
+        };
+        let eus = ec.us();
+        pit(irq::PIT_DIVISOR);
         let bgone = reap(&[b], 1000);
         let slack = 2 * (ms * SLOW_HZ / 1000 + 2);
         t.note(format_args!(
@@ -593,7 +666,7 @@ ktest!("task.1000.switches", fn thousand_switches(t: &mut TestCtx) {
             ));
         }
         t.note(format_args!(
-            "task.1000.switches: from telling the partner to stop until it had ended, this task spinning, sched::switches() moved {exited}"
+            "task.1000.switches: from telling the partner to stop until it had ended, this task spinning, sched::switches() moved {exited}; that took {eus} us, with the PIT at 18.2 Hz"
         ));
         if !ended {
             t.fail(format_args!("the partner had not ended 1 s after it was told to stop, while this task spun without yielding"));

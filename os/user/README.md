@@ -87,7 +87,7 @@ VEX-encoded `v…` instruction on `xmm`); SSE is allowed — musl's own `memcpy`
 | `hostile-spin` | flat-sse | 8640 | `0x1e78` | `002ea10a3dfaf38a1dacb9283f4af1f440bd512ee9fa01d7a05e55554af976d4` |
 | `args` | elf | 10064 | `0x240c` | `bf8a80598fc034baa81dd182805d4ae05f6e18721febcec79f14055fd397b660` |
 | `init` | elf | 34016 | `0x713e` · `0`/`0x50` | `d2dd69b4228abb1843ce17b20b4a9b4829db071921004304ee0dfec8bf820732` |
-| `forker` | elf | 17504 | `0x38f4` · `0x8`/`0x8` | `150cdfb5efd7075e12f5cb1439d2f73a7eb01ea725a41f6f91d20e40f2264741` |
+| `forker` | elf | 17504 | `0x39d0` · `0x8`/`0x8` | `b05fd6b6a8115a1763b2ec3f0494208d8e965189b6cbf38280e9f9e9d59305a1` |
 | `producer` | elf | 7640 | `0x1acc` | `fdce8ead361a6d7f884f53332fde169524450ee45f55057b2044963b04bbf6f6` |
 | `consumer` | elf | 15384 | `0x38cd` | `ee14e6fed940c9327b9bd013fea6ee56ec28391046f9caa3e451b8792d136414` |
 | `ls` | elf | 9112 | `0x1420` · `0`/`0x7020` | `72fc4e4253d54c90f6862cef1d7f3fbb2fea11732565f0d4ed8ba62bbddab5d5` |
@@ -107,9 +107,9 @@ VEX-encoded `v…` instruction on `xmm`); SSE is allowed — musl's own `memcpy`
 | `fbtest` | musl | 27456 | (below) | `5ff9f1d2baec8efd9497a3cdcaab7e72922690e1e6bade61b7f803e2d3edb53d` |
 | `evtest` | musl | 35880 | (below) | `44302055d13e07ad9b3cd00fb5dbff0059c33598309058dfc1bd0738296b03f5` |
 | `doomgeneric` | port | 513776 | (below) | `2c39dbdf976f82bf46816210f897ddd0206bf73eab2f594d88b25f1f4a0474a5` |
-| `boot.archive` | — | 113704 | — | `9a0e2fe37356123d33c16cd714155b6aba76ba5adc952e1cf3644dd5fdbde147` |
+| `boot.archive` | — | 113704 | — | `4d1c61f6564fd5736e6aeadcedc7214f4253fcee79dc9c564491ab59c000fc8a` |
 
-`bin/SHA256SUMS` is the authority; this table is its copy as of 2026-10-19 (forker rebuilt for lab 14's `getppid` and `sched_yield` checks; then init and consumer for lab 15's fix round 1: `dup2.shared.flags` reads `F_GETFL` before, during and after the set and on a second open file, and `pipe.cloexec` checks an unmarked fd above 2 when argv names one; then both again for its fix round 2: that fd is drawn from the nonce, `dup2.shared.flags` uses eight nonce-shuffled fds and reads `F_GETFL` on another pipe's read end; then both again for its fix round 3: `pipe.cloexec` checks eight nonce-drawn fds, some marked with `F_SETFD` and some not, and `dup2.shared.flags` holds a different flag on two open files at once; `doomgeneric` added 2026-10-22, lab 27; `hostile-badnum` and `boot.archive` rebuilt 2026-10-22, slice 7: lab 12's third number is 174; `cowtest`, `mem`, `fbtest` and `evtest` rebuilt 2026-10-22 by slice 7's fix rounds for labs 24–26, their rows re-copied from `bin/SHA256SUMS` the same day; `cowtest` rebuilt 2026-10-28, ledger G1821: each fork is followed, in the same asm, by a write to the stack and `torn_*` pages it shared, so QEMU 8.2's stale RFLAGS at a copy-on-write fault cannot reach a compiled `setcc`).
+`bin/SHA256SUMS` is the authority; this table is its copy as of 2026-10-19 (forker rebuilt for lab 14's `getppid` and `sched_yield` checks; then init and consumer for lab 15's fix round 1: `dup2.shared.flags` reads `F_GETFL` before, during and after the set and on a second open file, and `pipe.cloexec` checks an unmarked fd above 2 when argv names one; then both again for its fix round 2: that fd is drawn from the nonce, `dup2.shared.flags` uses eight nonce-shuffled fds and reads `F_GETFL` on another pipe's read end; then both again for its fix round 3: `pipe.cloexec` checks eight nonce-drawn fds, some marked with `F_SETFD` and some not, and `dup2.shared.flags` holds a different flag on two open files at once; `doomgeneric` added 2026-10-22, lab 27; `hostile-badnum` and `boot.archive` rebuilt 2026-10-22, slice 7: lab 12's third number is 174; `cowtest`, `mem`, `fbtest` and `evtest` rebuilt 2026-10-22 by slice 7's fix rounds for labs 24–26, their rows re-copied from `bin/SHA256SUMS` the same day; `cowtest` rebuilt 2026-10-28, ledger G1821: each fork is followed, in the same asm, by a write to the stack and `torn_*` pages it shared, so QEMU 8.2's stale RFLAGS at a copy-on-write fault cannot reach a compiled `setcc`; `forker` and `boot.archive` rebuilt 2026-10-29 for lab 28's fix round 2: the `hold` argument, below — the same sizes, every other binary byte-identical).
 
 ## The protocol every program follows (CONTRACT §A.3)
 
@@ -266,6 +266,15 @@ within 20 `sched_yield()`s, each answering 0 (added 2026-10-19, lab 14 B9). Then
 exits at once; the grandchild yields until `getppid()` is `init`'s pid (forker's own `getppid()`),
 at most 200,000 times, and exits with `orphan_code` — or 3 if it never was reparented. Syscalls:
 `fork`, `wait4`, `getpid`, `getppid`, `sched_yield`, `write`, `exit`.
+
+Lab 28's vehicle runs it as `[forker, nonce, index, hold]` (added 2026-10-29, lab 28 fix round 2):
+the grandchild first reads one byte from fd 9, a pipe whose only write end the vehicle keeps (it
+installs the read end as fd 9 of the shell at its prompt, just before `forker` is typed, so `forker`
+and the grandchild inherit it; lab 28's fix round 3 moved it there from `init`, which could close it), and exits with
+`orphan_code` when that read returns end of file — so the vehicle, by the PM timer, decides when the
+orphan ends, not the guest CPU's speed. A read that does not return end of file (fd 9 closed, or
+something else) falls back to the yields above. With `hold` the `#` line ends `exits when its fd 9
+reads end of file`; without it, nothing changes. Adds `read`.
 
 ## Lab 15: `producer` and `consumer`
 
@@ -497,6 +506,69 @@ every earlier image leaves busybox out. `ktest-30` runs `ash` over the busybox-s
 session; what it executes, and the two numbers with no arm it survives (`sendfile`, `access`), is
 in `busybox/README.md`. Its licence is GPL-2.0, and its source offer is there: the pinned tarball is
 hosted at https://sourceboot.com/third-party/busybox-1.37.0.tar.bz2.
+
+### `sigprobe` (lab 31; `sigprobe/sigprobe.c`, layout `musl`)
+
+`sigprobe <mode> <word>` makes every signal call as the raw syscall (`rt_sigaction` 13,
+`rt_sigprocmask` 14, `kill` 62), so what it prints is what the kernel answered, and each mode
+prints one line that starts with `<word>`. `dfl`: SIGCHLD, SIGWINCH and SIGURG set to SIG_DFL
+and sent to itself, `<word> dfl`, exit 0 (each default does nothing). `order`: SIGHUP, SIGUSR1
+and SIGUSR2 blocked, SIGHUP ignored, all three sent, `<word> held`, then the unblock: SIGHUP is
+dropped and SIGUSR1 ends it (138). `uncatch`: SIGKILL, SIGSTOP and SIGUSR2 blocked, the mask read
+back, `rt_sigaction` asked to ignore 9 and to catch 19, `<word> <mask hex> <answer> <answer>`
+(Linux: `800 -22 -22`), then SIGKILL to itself (137). `nap`: SIGUSR1 ignored; a child sends
+SIGUSR1, SIGWINCH and SIGURG during the parent's 600 ms `nanosleep`, which none of them may
+end: `<word> <first non-zero answer, else 0>`. `queue`: a blocked SIGUSR2 sent while ignored,
+its action put back to SIG_DFL, `<word> queued`, then the unblock ends it (140). `send`: a
+zombie child, then `kill(child, 0)`, `kill(0, 0)`, `kill(-1, 0)` and `kill(0, 15)`: `<word> 0 -3
+-3 -3` here (no process groups). A wrong argument prints `sigprobe: usage` and exits 1. ext2's
+`/bin` carries it from lab 31's image on (`SIGNAL_PROGRAMS`, `SIGNALS_LAB`), never earlier;
+sha256 `9702963e…7340`. The source's header is the full statement of each mode.
+
+### `sigregs` (lab 32; `sigregs/sigregs.c`, layout `musl`)
+
+`sigregs <mode> <16 hex digits>`, five modes. `regs`: every general register but rsp, and xmm1,
+drawn from the nonce, a spin loop with no syscall so the SIGUSR1 a child sends arrives through an
+interrupt; the handler checks its arguments and the ucontext, overwrites what it may, and after
+`rt_sigreturn` every register must be what it was (`sigregs regs <fold>`). `restart`: `wait4`
+cut short by a SIGUSR1 handler installed with SA_RESTART starts again and returns the child's
+status (`sigregs restart <pid matched> status <n>`). `suspend`: `rt_sigsuspend` with an empty mask
+returns -1/EINTR once the handler has run, the old mask back (`sigregs suspend EINTR <nonce>`).
+Added in slice 9 (2026-10-29): `rflags`: the handler rewrites the frame's saved eflags, and only
+the FIX_EFLAGS bits (DF, the arithmetic flags) may come back, never IOPL, IF or NT; the handler
+also reads its blocked mask (the action's `sa_mask` included) and its frame pointer's alignment,
+and the mask after `rt_sigreturn` must be the program's own (`sigregs rflags kept <nonce>`).
+`ring3`: sixteen children, each forging one thing `rt_sigreturn` returns to (rsp, rip or fpstate
+in the kernel half, past the user half, unmapped, or straddling a hole; ring-0 cs and ss; a
+reserved MXCSR bit; SIGKILL and SIGSTOP in `uc_sigmask`, `sa_mask` or `rt_sigsuspend`'s mask),
+each of which must end with SIGSEGV, go on in ring 3 with the bad value refused, or still die of
+the SIGKILL its parent sends. A wrong argument prints `sigregs: usage: …` and exits 1. ext2's `/bin`
+carries it from lab 32's image on (`HANDLER_PROGRAMS`, `HANDLERS_LAB`), never earlier; sha256
+`d4b8720a…0a0a`. The source's header lists every `ring3` child.
+
+### `ttyprobe` (lab 33; `ttyprobe/ttyprobe.c`, layout `musl`)
+
+`ttyprobe <mode> <16 hex digits>`, five modes, of which `tcgets`, `tcsets` and `raw` open
+`/dev/tty` (`access` and `trunc` never do), each printing, when it passes, lines that end with
+the nonce: one, or eight for `raw`.
+`tcgets`: TCGETS into a buffer whose tail holds bytes drawn from the
+nonce, of which exactly 36 (Linux's `struct termios`) may be written (`ttyprobe tcgets <the 36
+bytes in hex> <nonce>`). `tcsets`: a termios with every one of its 36 bytes changed (ICANON and
+ECHO off, ICRNL flipped, c_line and each c_cc byte, VMIN and VTIME among them, drawn from the
+nonce) is set with TCSETS and read back the same, through that file and through a second open of
+`/dev/tty`, then the first is set again and read back (`ttyprobe tcsets ok <nonce>`). `raw`: four
+reads in raw mode with no poll, each announced by a line before it and the last three answered by
+`= <answer> <hex>`: six typed bytes read 20 ms apart on an O_NONBLOCK file (50 tries), VMIN 0 with
+nothing typed (returns 0 at once, `vmin0`), a read that sleeps until ctrl+c's SIGINT ends it with
+-EINTR (`isig`), and VMIN 21 while nine keys are typed (`keys`); the first termios is put back at
+the end. `access`: access(2) as root on files of mode 0 and 0644, a missing name, `/tmp`,
+`/bin/busybox`, a mode above 7, and X_OK on a group-only and an other-only executable and a
+mode-0 directory (`ttyprobe access ok <nonce>`). `trunc`: ftruncate(2) cuts a 12,411-byte file to
+100, grows it to 5000 (zeros), and refuses a negative length, a read-only file and a pipe with
+EINVAL (`ttyprobe trunc ok <nonce>`). A failed check prints `ttyprobe: <what>` and a wrong
+argument `ttyprobe: usage: …`; both exit 1. ext2's `/bin` carries it from lab 33's image on
+(`TERMIOS_PROGRAMS`, `TERMIOS_LAB`), never earlier; sha256 `2f9d1c06…1013`. The source's header
+is the full statement of each mode; `ktest-33` drives it and types the keys.
 
 ## Native check on Linux
 

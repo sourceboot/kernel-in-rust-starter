@@ -108,17 +108,17 @@ pub fn dispatch(nr: u64, a: [u64; 6], f: &mut SyscallFrame) -> i64 {
 }
 
 impl crate::fs::vfs::Stat {
-    /// Lab 30 step 1: what `path` names, as `lstat` (syscall 6) sees it —
+    /// Lab 30 task 1: what `path` names, as `lstat` (syscall 6) sees it —
     /// the name itself, never what a final symlink points at.
     pub fn lstat(path: &str) -> Result<crate::fs::vfs::Stat, Errno> {
         let _ = path;
-        todo!("lab 30 step 1 — Stat::lstat: the stat of what the path names, without following a final symlink")
+        todo!("lab 30 task 1 — Stat::lstat: the stat of what the path names, without following a final symlink")
     }
 
-    /// Lab 33 step 5: whether root may do what `amode` asks of this file
+    /// Lab 33 task 5: whether root may do what `amode` asks of this file
     /// (`access`, syscall 21): `R_OK` 4, `W_OK` 2, `X_OK` 1, `F_OK` 0.
     pub fn access(&self, amode: u32) -> Result<(), Errno> {
         let _ = amode;
-        todo!("lab 33 step 5 — Stat::access: root reads and writes anything; X_OK needs a directory or an execute bit, else EACCES")
+        todo!("lab 33 task 5 — Stat::access: root reads and writes anything; X_OK needs a directory or an execute bit, else EACCES")
     }
 }

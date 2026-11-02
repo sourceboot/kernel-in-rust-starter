@@ -13,23 +13,54 @@
  *
  *   ttyprobe tcgets <the 36 bytes in hex> <the nonce>
  *
- * tcsets: a termios made from the one read (ICANON and ECHO off, ICRNL
- * flipped, VMIN and VTIME drawn from the nonce) is set with TCSETS and read
- * back the same; then the first is set again and read back the same:
+ * tcsets: a termios made from the one read, with every one of its 36 bytes
+ * changed (ICANON and ECHO off, ICRNL flipped, a bit of c_oflag and one of
+ * c_cflag flipped, c_line and each byte of c_cc drawn from the nonce, VMIN
+ * and VTIME among them), is set with TCSETS and read back the same, on that
+ * file and on a second open of /dev/tty made, and set to the termios it
+ * reads, before that TCSETS (the terminal has one termios, not one per open
+ * file: fix round 2; opened before, fix round 3); then the first is set
+ * again and read back the same (every byte: 2026-10-29, slice 9 fix round 1):
  *
  *   ttyprobe tcsets ok <the nonce>
  *
- * raw: ICANON, ECHO, ISIG and ICRNL off, VMIN 1, VTIME 0; it prints
- * `ttyprobe raw ready <the nonce>`, then reads what is typed until six
- * bytes came or 20 s passed. The reads are O_NONBLOCK, 20 ms apart, with
- * no poll: what a raw read returns is the read's own answer (busybox's
- * line editor and vi poll first; rows 6 and 7 of ktest-33 take that
- * path). It puts the termios back and prints
+ * raw: four reads in raw mode, with no poll: what a raw read returns is
+ * the read's own answer (busybox's line editor and vi poll first; rows 6
+ * and 7 of ktest-33 take that path). Each step prints a line when it is
+ * about to read, and the reads after the first print their answer (the
+ * count, or minus the errno) and the bytes in hex (`-` for none):
  *
- *   ttyprobe raw <the bytes in hex> <the nonce>
+ *   1. ICANON, ECHO, ISIG and ICRNL off, VMIN 1, VTIME 0, on an O_NONBLOCK
+ *      file: `ttyprobe raw ready <the nonce>`, then the six bytes typed at
+ *      the keyboard, read 20 ms apart (each read asks for no more than the
+ *      bytes still owed) until six came or 50 reads were tried;
+ *      `ttyprobe raw <the bytes in hex> <the nonce>`.
+ *   2. VMIN 0 on a file without O_NONBLOCK, nothing typed: one read of 32
+ *      bytes, which returns 0 at once (`vmin0`).
+ *   3. ISIG back on, ICRNL on, VMIN 1: a SIGINT handler (no SA_RESTART) and
+ *      one read of 8 bytes that sleeps, nothing typed, until ctrl+c sends
+ *      SIGINT and the signal ends it, -EINTR (`isig`; the line adds how many
+ *      times the handler ran, and 1 if it had run before the read began).
+ *   4. ISIG off, ICRNL on, VMIN 21: one read of 21 bytes, while x, Enter, up,
+ *      down, right, Home, End, Esc and Backspace are typed, returns their
+ *      21 bytes in one call, Enter a NL (`keys`). Keys typed after those
+ *      stay for whatever reads the console next.
+ *
+ *   ttyprobe raw vmin0 <the nonce>
+ *   ttyprobe raw vmin0 = <answer> <hex> <the nonce>
+ *   ttyprobe raw isig <the nonce>
+ *   ttyprobe raw isig = <answer> <hex> <runs> <early> <the nonce>
+ *   ttyprobe raw keys <the nonce>
+ *   ttyprobe raw keys = <answer> <hex> <the nonce>
+ *
+ * Steps 2-4 were added 2026-10-29 (slice 9 fix round 1). The keys of
+ * steps 3 and 4 are the vehicle's, pushed into the keyboard's ring once the
+ * line before the read is out. The first termios is put back at the end.
  *
  * access: access(2) as root on a file it makes with mode 0, one with mode
- * 0644, a name that is not there, /tmp and /bin/busybox; then X_OK on a
+ * 0644, a name that is not there, /tmp and /bin/busybox (a mode above 7
+ * is EINVAL for a name that is there and for one that is not: the mode is
+ * checked first); then X_OK on a
  * file whose only execute bit is the group's, one whose only execute bit
  * is other's (their read and write bits drawn from the nonce), and a
  * directory made with mode 0 -- root may run the two files (any of the
@@ -52,6 +83,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -64,7 +96,12 @@
 #define TCGETS 0x5401
 #define TCSETS 0x5402
 #define T_IFLAG 0
+#define T_OFLAG 4
+#define T_CFLAG 8
 #define T_LFLAG 12
+#define T_LINE 16
+#define NCCS 19
+#define KEYS 21
 #define T_CC 17
 #define V_TIME 5
 #define V_MIN 6
@@ -151,11 +188,29 @@ static void tcsets(void) {
     unsigned char t0[36], t1[36], back[36];
     int fd = tty();
     tcget(fd, t0);
+    /* The second open is made, and set to what it reads, before the TCSETS
+     * on the first: a console that keeps a termios per open file, or copies
+     * the terminal's at open, then reads t0 through it (fix round 3: opened
+     * after, a per-file copy synced on TCSETS read back right). */
+    int fd2 = tty();
+    tcset(fd2, t0);
     memcpy(t1, t0, 36);
     set_word(t1, T_LFLAG, word(t0, T_LFLAG) & ~(F_ICANON | F_ECHO));
     set_word(t1, T_IFLAG, word(t0, T_IFLAG) ^ F_ICRNL);
+    /* Every byte of the struct changes: the words the console does not act
+     * on, c_line and all of c_cc too, so a TCSETS that keeps any of them
+     * reads back wrong. */
+    set_word(t1, T_OFLAG, word(t0, T_OFLAG) ^ (1u << ((nonce >> 16) % 16)));
+    set_word(t1, T_CFLAG, word(t0, T_CFLAG) ^ (1u << ((nonce >> 20) % 16)));
+    t1[T_LINE] = (unsigned char)(t0[T_LINE] ^ (1 + (nonce >> 24) % 255));
+    for (int i = 0; i < NCCS; i++)
+        t1[T_CC + i] = (unsigned char)(t0[T_CC + i] ^ (1 + splitmix64(nonce ^ (0x100u + (unsigned)i)) % 255));
     t1[T_CC + V_MIN] = (unsigned char)(1 + nonce % 200);
     t1[T_CC + V_TIME] = (unsigned char)((nonce >> 8) % 200);
+    if (t1[T_CC + V_MIN] == t0[T_CC + V_MIN])
+        t1[T_CC + V_MIN]++;
+    if (t1[T_CC + V_TIME] == t0[T_CC + V_TIME])
+        t1[T_CC + V_TIME]++;
     tcset(fd, t1);
     tcget(fd, back);
     if (memcmp(back, t1, 36)) {
@@ -167,6 +222,17 @@ static void tcsets(void) {
         printf("\n");
         exit(1);
     }
+    tcget(fd2, back);
+    close(fd2);
+    if (memcmp(back, t1, 36)) {
+        tcset(fd, t0);
+        printf("ttyprobe: TCGETS on a second open of /dev/tty read ");
+        hex(back, 36);
+        printf(", not the termios TCSETS set on the first, ");
+        hex(t1, 36);
+        printf("\n");
+        exit(1);
+    }
     tcset(fd, t0);
     tcget(fd, back);
     if (memcmp(back, t0, 36))
@@ -174,21 +240,55 @@ static void tcsets(void) {
     printf("ttyprobe tcsets ok %016" PRIx64 "\n", nonce);
 }
 
+/* t0 with ICANON and ECHO off, ISIG and ICRNL as asked, VMIN `vmin`,
+ * VTIME 0, set on `fd`. */
+static void raw_mode(int fd, const unsigned char t0[36], int isig, int icrnl, int vmin) {
+    unsigned char t[36];
+    memcpy(t, t0, 36);
+    uint32_t l = word(t0, T_LFLAG) & ~(F_ICANON | F_ECHO | F_ISIG);
+    set_word(t, T_LFLAG, isig ? l | F_ISIG : l);
+    uint32_t i = word(t0, T_IFLAG) & ~F_ICRNL;
+    set_word(t, T_IFLAG, icrnl ? i | F_ICRNL : i);
+    t[T_CC + V_MIN] = (unsigned char)vmin;
+    t[T_CC + V_TIME] = 0;
+    tcset(fd, t);
+}
+
+/* One step's answer: the count, or minus the errno, and the bytes. */
+static void answer(const char *step, ssize_t k, int err, const unsigned char *b) {
+    printf("ttyprobe raw %s = %ld ", step, k < 0 ? -(long)err : (long)k);
+    if (k > 0)
+        hex(b, (size_t)k);
+    else
+        printf("-");
+}
+
+static volatile sig_atomic_t sigints;
+
+static void on_sigint(int sig) {
+    (void)sig;
+    sigints++;
+}
+
 static void raw(void) {
-    unsigned char t0[36], t1[36], got[16];
+    unsigned char t0[36], got[32];
     size_t n = 0;
-    int fd = tty_flags(O_NONBLOCK);
-    tcget(fd, t0);
-    memcpy(t1, t0, 36);
-    set_word(t1, T_LFLAG, word(t0, T_LFLAG) & ~(F_ICANON | F_ECHO | F_ISIG));
-    set_word(t1, T_IFLAG, word(t0, T_IFLAG) & ~F_ICRNL);
-    t1[T_CC + V_MIN] = 1;
-    t1[T_CC + V_TIME] = 0;
-    tcset(fd, t1);
+    int nb = tty_flags(O_NONBLOCK), fd = tty();
+    tcget(nb, t0);
+
+    /* 1: the keys typed at the keyboard, O_NONBLOCK reads. It gives up after
+     * 50 naps of 20 ms, 1 s by the guest's own clock, so that a kernel that
+     * never hands over six bytes still prints them and reaches steps 2-4
+     * inside the vehicle's 40 s wait for the next step's line (by the PM
+     * timer), even when the host starves the guest's PIT: under background
+     * QoS it delivered 99-106 ticks in 3000 PM-timer ms (fix round 3; 10 s
+     * or 500 naps outlasted the 40 s there; fix round 1: 1,000 naps crossed
+     * it at load 13-21). */
+    raw_mode(nb, t0, 0, 0, 1);
     printf("ttyprobe raw ready %016" PRIx64 "\n", nonce);
     struct timespec tick = {0, 20 * 1000 * 1000};
-    for (int waited = 0; n < 6 && waited < 1000; waited++) {
-        ssize_t k = read(fd, got + n, sizeof got - n);
+    for (int waited = 0; n < 6 && waited < 50; waited++) {
+        ssize_t k = read(nb, got + n, 6 - n);
         if (k > 0)
             n += (size_t)k;
         else if (k == 0 || errno != EAGAIN)
@@ -196,10 +296,44 @@ static void raw(void) {
         else
             nanosleep(&tick, 0);
     }
-    tcset(fd, t0);
     printf("ttyprobe raw ");
     hex(got, n);
     printf(" %016" PRIx64 "\n", nonce);
+
+    /* 2: VMIN 0, nothing typed: 0 bytes at once, even on a blocking file. */
+    raw_mode(fd, t0, 0, 0, 0);
+    printf("ttyprobe raw vmin0 %016" PRIx64 "\n", nonce);
+    errno = 0;
+    ssize_t k = read(fd, got, sizeof got);
+    answer("vmin0", k, errno, got);
+    printf(" %016" PRIx64 "\n", nonce);
+
+    /* 3: ISIG on; a blocking read with nothing typed sleeps until ctrl+c's
+     * SIGINT ends it. */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_sigint;
+    if (sigaction(SIGINT, &sa, 0))
+        die("sigaction(SIGINT) failed");
+    raw_mode(fd, t0, 1, 1, 1);
+    printf("ttyprobe raw isig %016" PRIx64 "\n", nonce);
+    int early = sigints;
+    errno = 0;
+    k = read(fd, got, 8);
+    int err = errno;
+    answer("isig", k, err, got);
+    printf(" %d %d %016" PRIx64 "\n", (int)sigints, early, nonce);
+
+    /* 4: ISIG off, VMIN 21: one read takes the 21 bytes of the vehicle's
+     * keys, Enter a NL; the keys after them stay in the ring. */
+    raw_mode(fd, t0, 0, 1, KEYS);
+    printf("ttyprobe raw keys %016" PRIx64 "\n", nonce);
+    errno = 0;
+    k = read(fd, got, KEYS);
+    answer("keys", k, errno, got);
+    printf(" %016" PRIx64 "\n", nonce);
+
+    tcset(fd, t0);
 }
 
 static void want_access(const char *path, int mode, int err) {
@@ -246,6 +380,7 @@ static void accessp(void) {
     want_access("/bin/busybox", X_OK, 0);
     want_access("/tmp", X_OK | W_OK, 0);
     want_access(rw, 8, EINVAL);
+    want_access(none, 8, EINVAL);
     unlink(ro);
     unlink(rw);
 

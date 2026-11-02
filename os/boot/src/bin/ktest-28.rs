@@ -24,38 +24,74 @@
 //! never by the learner's clock: init's key line on OUT; the shell's first
 //! prompt (`$ `); then, one line at a time after each prompt, typed through
 //! `kbd::push` (make codes only, a whole line at once, under the ring's 64):
-//! `echo <w1>`, `cat /proc/mounts`, `cat /<n1>`, `forker <nonce> 1`, `exit`,
-//! and at the new shell's prompt `echo <w2>`. `w1`, `n1` and `w2` are drawn
-//! from the nonce. If init ends, or a step does not happen within its bound,
-//! the session stops there: the rows it did not reach say what did not
-//! happen, each on its own line, and the run ends as usual.
+//! `echo <w1>`, `cat /proc/mounts`, `cat /<n1>`, `forker <nonce> 1 hold`,
+//! and `exit` at once, while the grandchild `forker` leaves behind is held.
+//! The HOLD is a third pipe whose only write end this file keeps: just before
+//! `forker` is typed, its read end goes into the first shell's table as fd 9
+//! (`HOLD_FD`), in place of whatever was there, so `forker` inherits it from
+//! the shell, and init, which forked that shell earlier, cannot close it or
+//! put another file there (fix round 3, 2026-10-29: round 2 gave it to init,
+//! and an init that closed or reused its fd 9 let the orphan run unheld).
+//! `hold` makes the grandchild read its fd 9 before anything else, and that
+//! read returns only when this file closes the hold's write end, so the orphan's life is
+//! this file's to end, by the PM timer, whatever the guest CPU's speed (fix
+//! round 2, 2026-10-29: the 200,000 yields it ran before took 2-4 s at
+//! ambient load and over 20 s under a starved host). The hold is released
+//! once the new shell has prompted, or once `STEP_MS` has passed without
+//! one; then the wait for the orphan to be collected (`ORPHAN_MS` from when
+//! it is first seen ended, which for a held orphan is the release; when no
+//! prompt came while the orphan was held, the same wait also watches for a
+//! late one), and `echo <w2>`. `w1`, `n1` and `w2` are drawn from the nonce. If init ends,
+//! or a step does not happen within its bound, the session stops there: the
+//! rows it did not reach say what did not happen, each on its own line, and
+//! the run ends as usual.
 //!
 //! The seven rows, printed after the session in this order:
 //!   1 `init.nonce.line` (derived) — OUT carries exactly one line `init: key
-//!     <16 hex>`, the digits `derive(nonce, "init.nonce.line")`.
-//!   2 `init.mounts.own` (plain) — the mount table holds `/proc` as "proc"
-//!     and `/dev` as "devfs" exactly once each (this file mounted neither,
-//!     so a user program did, through `mount`), `cat /proc/mounts` in the
-//!     shell lists both, and syscall 165's work for a second `/proc` at the
-//!     end is `-EBUSY`.
+//!     <16 hex>`, the digits `derive(nonce, "init.nonce.line")`. (The digits
+//!     are compared whole, so an unpadded `{:x}` is caught only on a run
+//!     whose key starts with a zero digit, one in 16. A wrong key is
+//!     reported as wrong; the right one is never printed.)
+//!   2 `init.mounts.own` (plain) — neither `/proc` nor `/dev` is mounted
+//!     when init is started (read in the same interrupts-off block as the
+//!     exec, before init runs), and at the end the mount table holds `/proc`
+//!     as "proc" and `/dev` as "devfs" exactly once each (this file mounted
+//!     neither, so a user program did, through `mount`; which user program
+//!     is not seen), `cat /proc/mounts` in the shell lists both, and
+//!     syscall 165's work for a second `/proc` at the end is `-EBUSY`.
 //!   3 `init.shell.started` (derived) — at the first prompt a process
-//!     running `sh` (argv[0]), not pid 1, whose parent is pid 1, is alive;
-//!     and `echo <w1>` typed into it prints `<w1>` on OUT: fd 0 is the
-//!     console and fd 1 the tee, inherited.
+//!     running `sh` (argv[0] `sh`, or a path ending in `/sh`), not pid 1,
+//!     whose parent is pid 1, is alive; and `echo <w1>` typed into it prints
+//!     `<w1>` on OUT: fd 0 is the console and fd 1 the tee, inherited.
 //!   4 `init.fds.inherited` (derived) — `cat /<n1>` prints `cat: /<n1>:
 //!     ENOENT` on ERR and nothing of it on OUT: fd 2 reached init's child's
 //!     child, unchanged.
-//!   5 `init.orphans.reaped` (derived) — `forker <nonce> 1` names the
+//!   5 `init.orphans.reaped` (derived) — `forker <nonce> 1 hold` names the
 //!     grandchild it leaves behind (`fork.orphan.to_init: pid C forked G`);
 //!     G, whose argv carries the nonce, is seen with parent pid 1 (the
 //!     kernel hands an orphan to init, lab 14), and then its record is gone
-//!     within `ORPHAN_MS` — so nothing but init's `wait4` collected it.
+//!     within `ORPHAN_MS` of its end (the hold's release) — so, as far as this file can
+//!     see, init's `wait4` collected it (the kernel's own process table is
+//!     trusted: a kernel that drops a record unasked is not caught here).
+//!     When init itself has ended first, the orphan has no init to collect
+//!     it and only the first two are asked (rows 6 and 7 are red then).
 //!   6 `init.shell.respawn` (derived) — after `exit`, the shell's record is
-//!     gone (init reaped it), a new process running `sh` with a new pid
-//!     prints a prompt, and `echo <w2>` typed into it prints `<w2>`.
+//!     gone (init reaped it); a new process running `sh` prompts within
+//!     `STEP_MS`, while the orphan is held, so an init that waits for every
+//!     child cannot (one whose prompt comes only after the release is red by
+//!     name); that shell's pid, or its parent's, is the next one after the
+//!     orphan's, so init's first new process after `exit` is the shell or
+//!     the one that starts it (nothing else forks between the orphan and
+//!     `exit`; a child that exits at once before the shell is red); `echo <w2>` typed into it prints `<w2>`; and after it at
+//!     most one process runs `sh` (a shell's builtin runs in a child that
+//!     keeps the name `sh`, so a second shell beside the first can count 3). When the orphan was not held (a
+//!     kernel whose fork did not pass fd 9 on: its read fails and it yields
+//!     200,000 times, as before) and it ended while the shell was gone and before init's
+//!     next child, that order is red as well, as in fix round 1.
 //!   7 `init.pid1.cmdline` (derived) — at the end pid 1 is alive and its
-//!     argv (what `/proc/1/cmdline` serves) is exactly `init <nonce>`, as
-//!     this file started it.
+//!     argv in the kernel's process record is exactly `init <nonce>`, as
+//!     this file started it. (The record, not `/proc/1/cmdline`: procfs is
+//!     lab 22's and is not read here.)
 //!
 //! Plan 7.
 
@@ -111,9 +147,21 @@ const INIT: &str = "/bin/init";
 /// How long one step of the session may take, by the PM timer: init's key
 /// line, a prompt, a command's answer, a respawned shell.
 const STEP_MS: u64 = 15_000;
-/// How long the orphan may take to be collected once its parent has ended:
-/// it yields up to 200,000 times before it exits (`user/forker/forker.c`).
-const ORPHAN_MS: u64 = 20_000;
+/// How long an ended orphan may stay uncollected, from when this file first
+/// sees it ended. A held orphan ends once the hold is released: its read
+/// returns end of file and it exits at once (`user/forker/forker.c`,
+/// `hold`), so this is the release's bound too. (Before fix round 2 it was
+/// 20 s from `forker`'s end, for 200,000 yields whose length was the guest
+/// CPU's.)
+const ORPHAN_MS: u64 = 10_000;
+/// An orphan still running (not a zombie) is also given this long from
+/// `forker`'s end, round 1's bound: an orphan whose fd 9 is not the hold
+/// (a fork that did not pass it on) yields 200,000 times instead, at the
+/// guest CPU's pace, as before.
+const ORPHAN_RUN_MS: u64 = 20_000;
+/// The fd the hold's read end is installed at in the first shell, just
+/// before `forker` is typed; `forker`'s `hold` reads it (`HOLD_FD` there).
+const HOLD_FD: usize = 9;
 /// fcntl's `O_NONBLOCK`, on the tee's read ends.
 const O_NONBLOCK: u32 = 0x800;
 
@@ -224,8 +272,27 @@ fn procs() -> Vec<Rec> {
     out
 }
 
+/// One record, copying only that one: the session's waits poll this, and
+/// each poll runs with interrupts off, so a poll that copied the whole
+/// table would take CPU from the processes being waited for (the orphan's
+/// 200,000 yields each give way to one poll).
 fn find(pid: Pid) -> Option<Rec> {
-    procs().into_iter().find(|r| r.pid == pid)
+    let mut out = None;
+    quiet(|| {
+        proc::each(|p| {
+            if p.pid == pid {
+                out = Some(Rec { pid: p.pid, ppid: p.ppid, exit: p.exit, argv: p.argv.clone() });
+            }
+        })
+    });
+    out
+}
+
+/// Whether `parent` has a child with a pid above `above`, copying nothing.
+fn child_above(parent: Pid, above: u64) -> bool {
+    let mut any = false;
+    quiet(|| proc::each(|p| any |= p.ppid == parent && p.pid.0 > above));
+    any
 }
 
 fn task_of(pid: Pid) -> Option<Tid> {
@@ -238,9 +305,21 @@ fn task_of(pid: Pid) -> Option<Tid> {
     tid
 }
 
-/// The live processes running `sh` (argv[0]).
+/// argv[0] names the shell: `sh`, or a path ending in `/sh` (C's habit of
+/// passing the path as argv[0]).
+fn is_sh(argv: &[String]) -> bool {
+    argv.first().is_some_and(|a| a == "sh" || a.ends_with("/sh"))
+}
+
+/// The live processes running `sh`.
 fn shells() -> Vec<Rec> {
-    procs().into_iter().filter(|r| r.exit.is_none() && r.argv.first().map(String::as_str) == Some("sh")).collect()
+    procs().into_iter().filter(|r| r.exit.is_none() && is_sh(&r.argv)).collect()
+}
+
+/// Pids and argvs, for a message.
+fn listed(rs: &[Rec]) -> String {
+    let each: Vec<String> = rs.iter().map(|r| format!("pid {} {:?}", r.pid.0, r.argv)).collect();
+    each.join(", ")
 }
 
 /// `start`, then `fds` installed in the new process's table before it runs
@@ -278,6 +357,22 @@ fn start_with(what: &str, start: impl FnOnce() -> Result<Pid, Errno>, fds: &[(us
             Err(why)
         }
     }
+}
+
+/// `f` installed as fd `n` of a running process, in place of whatever was
+/// there (dropped outside the table's lock, as `start_with`'s are). False
+/// when `pid` has no task.
+fn install_in(pid: Pid, n: usize, f: &FileRef) -> bool {
+    let d = Fd { file: f.clone(), cloexec: false };
+    let (ok, back) = quiet(|| match task_of(pid) {
+        Some(tid) => task::with_table(move |tt| match tt.get_mut(tid) {
+            Some(t) => (true, t.fds.install(n, d).ok().flatten()),
+            None => (false, Some(d)),
+        }),
+        None => (false, Some(d)),
+    });
+    drop(back);
+    ok
 }
 
 // ── Mounting: ext2 at `/` and the archive at `/boot`, nothing else ───────
@@ -375,8 +470,13 @@ struct Seen {
     init: Option<Pid>,
     /// Why the session stopped early, if it did.
     stop: Option<String>,
+    /// What was mounted on `/proc` or `/dev` as init was started, before it
+    /// ran: `(target, fstype)`.
+    premounted: Vec<(String, String)>,
     /// The first shell: its pid and its parent's, at the first prompt.
     shell: Option<(Pid, Pid)>,
+    /// When no process but pid 1 runs `sh` at the first prompt: what ran.
+    no_shell: Option<String>,
     /// OUT from the moment `echo <w1>` was typed to the next prompt.
     echo1: Option<Vec<u8>>,
     /// OUT between typing `cat /proc/mounts` and the next prompt.
@@ -390,16 +490,43 @@ struct Seen {
     orphan_ppid1: bool,
     orphan_named: bool,
     orphan_gone: Option<Result<(), String>>,
-    /// The respawn: the old shell gone, the new shell, its echo.
+    /// Init ended while the orphan was still there: no init to collect it.
+    orphan_init_ended: bool,
+    /// The respawn: the old shell gone, and whether the orphan was still
+    /// there at that moment; at init's first new child, whether the orphan
+    /// had been collected by then; the new shell, its echo, and the shells
+    /// alive after it.
     old_gone: bool,
+    orphan_at_old_gone: Option<bool>,
+    orphan_before_respawn: Option<bool>,
+    /// The highest pid when `exit` was typed (the orphan's): the new shell,
+    /// init's first new child, is the next.
+    high: u64,
+    /// The pid whose fd `HOLD_FD` the hold's read end went into.
+    hold_in: Option<Pid>,
+    /// The orphan was still running when the hold was released.
+    orphan_held: bool,
+    /// Ms after the release when the orphan's record went, if it did.
+    orphan_gone_ms: Option<u64>,
+    /// No prompt came while the orphan was held, and one came this many ms
+    /// after the release.
+    late_shell: Option<u64>,
     new_shell: Option<Pid>,
+    new_shell_ppid: Option<Pid>,
+    new_shell_why: Option<String>,
     echo2: Option<Vec<u8>>,
+    shells_after: Option<Vec<Rec>>,
 }
 
 struct Session {
     out: Tee,
     err: Tee,
     init: Pid,
+    /// The hold's write end; `None` once released (dropping it is the
+    /// release: the pipe's readers see end of file).
+    hold: Option<FileRef>,
+    /// The hold's read end, until it is installed in the first shell.
+    hold_r: Option<FileRef>,
 }
 
 impl Session {
@@ -410,6 +537,7 @@ impl Session {
     /// Pumps the tee and yields until `done` holds, init ends, or `ms` pass.
     fn wait(&mut self, ms: u64, what: &str, mut done: impl FnMut(&mut Session) -> bool) -> Result<(), String> {
         let mut c = Clock::new();
+        let from = self.err.all.len();
         loop {
             self.pump();
             if done(self) {
@@ -417,14 +545,24 @@ impl Session {
             }
             if let Some(v) = find(self.init).and_then(|r| r.exit) {
                 self.pump();
-                let last = self.err.all.split(|&b| b == b'\n').filter(|l| !l.is_empty()).last().map(String::from_utf8_lossy);
+                let last = self.err.all[from..].split(|&b| b == b'\n').filter(|l| !l.is_empty()).last().map(String::from_utf8_lossy);
                 return Err(match last {
-                    Some(l) => format!("init (pid {}) ended with {} before {what}; the last line it or its children wrote on fd 2: {l}", self.init.0, status_text(v)),
-                    None => format!("init (pid {}) ended with {} before {what}, and wrote nothing on fd 2", self.init.0, status_text(v)),
+                    Some(l) => format!("init (pid {}) ended with {} before {what}; the last line it or its children wrote on fd 2 meanwhile: {l}", self.init.0, status_text(v)),
+                    None => format!("init (pid {}) ended with {} before {what}, and nothing came on fd 2 meanwhile", self.init.0, status_text(v)),
                 });
             }
             if c.ms() >= ms {
-                return Err(format!("{what} did not happen within {ms} ms"));
+                // What came on fd 2 while waiting: a prompt (fd 1 pointed
+                // elsewhere), or the last whole line (an exec refused, …).
+                let new = &self.err.all[from..];
+                let last = new.split(|&b| b == b'\n').filter(|l| !l.is_empty()).last().map(String::from_utf8_lossy);
+                return Err(if new.ends_with(b"$ ") {
+                    format!("{what} did not happen within {ms} ms; a prompt `$ ` came on fd 2 instead")
+                } else if let Some(l) = last {
+                    format!("{what} did not happen within {ms} ms; the last line on fd 2 meanwhile: {l}")
+                } else {
+                    format!("{what} did not happen within {ms} ms")
+                });
             }
             sched::yield_now();
         }
@@ -432,6 +570,10 @@ impl Session {
     /// Waits for the shell's next prompt.
     fn prompt(&mut self, what: &str) -> Result<(), String> {
         self.wait(STEP_MS, what, |s| s.out.take_prompt())
+    }
+    /// The last whole line on fd 2 since byte `from`, for a message.
+    fn err_since(&self, from: usize) -> Option<String> {
+        self.err.all[from..].split(|&b| b == b'\n').filter(|l| !l.is_empty()).last().map(|l| String::from_utf8_lossy(l).into_owned())
     }
     /// Types `line` at a prompt, waits for the next one, and returns what
     /// came on OUT and ERR in between.
@@ -469,12 +611,26 @@ fn nonce_text(w: &Words) -> String {
 }
 
 /// Starts init and drives the session; fills `seen` as far as it gets, and
-/// `out` with everything OUT carried.
-fn session(w: &Words, seen: &mut Seen, out_all: &mut Vec<u8>) -> Result<(), String> {
+/// `out_all`/`err_all` with everything OUT and ERR carried.
+fn session(w: &Words, seen: &mut Seen, out_all: &mut Vec<u8>, err_all: &mut Vec<u8>) -> Result<(), String> {
     let (out, out_w) = Tee::new()?;
     let (err, err_w) = Tee::new()?;
+    let (hold_r, hold_w) = pipe::open(0).map_err(|e| format!("pipe::open(0) for the hold returned {}", errno_text(e)))?;
     let nonce = nonce_text(w);
-    let init = start_with(INIT, || exec::spawn(INIT, &["init", &nonce], &[]), &[(1, &out_w), (2, &err_w)]);
+    let premounted = &mut seen.premounted;
+    // The mount table is read in the same interrupts-off block as the exec
+    // (`start_with`), so init has not run yet: whatever is on `/proc` or
+    // `/dev` now, the kernel put there.
+    let start = || {
+        let r = exec::spawn(INIT, &["init", &nonce], &[]);
+        for m in mount::table() {
+            if m.target == "/proc" || m.target == "/dev" {
+                premounted.push((String::from(m.target.as_str()), String::from(m.fstype.as_str())));
+            }
+        }
+        r
+    };
+    let init = start_with(INIT, start, &[(1, &out_w), (2, &err_w)]);
     drop(out_w);
     drop(err_w);
     let init = init?;
@@ -482,10 +638,11 @@ fn session(w: &Words, seen: &mut Seen, out_all: &mut Vec<u8>) -> Result<(), Stri
     if init != Pid(1) {
         note(format_args!("{CMDLINE_ID}: {INIT} started as pid {}, not 1: something was started before it", init.0));
     }
-    let mut s = Session { out, err, init };
+    let mut s = Session { out, err, init, hold: Some(hold_w), hold_r: Some(hold_r) };
     let r = drive(&mut s, w, seen);
     s.pump();
     *out_all = core::mem::take(&mut s.out.all);
+    *err_all = core::mem::take(&mut s.err.all);
     r
 }
 
@@ -497,8 +654,19 @@ fn drive(s: &mut Session, w: &Words, seen: &mut Seen) -> Result<(), String> {
     s.prompt("the shell's first prompt")?;
     let sh = shells().into_iter().find(|r| r.pid != init);
     seen.shell = sh.as_ref().map(|r| (r.pid, r.ppid));
-    if let Some(r) = sh {
-        note(format_args!("{SHELL_ID}: at the first prompt, pid {} runs sh; its parent is {}", r.pid.0, r.ppid.0));
+    match sh {
+        Some(r) => note(format_args!("{SHELL_ID}: at the first prompt, pid {} runs sh; its parent is {}", r.pid.0, r.ppid.0)),
+        None => {
+            let all = procs();
+            let one_sh = all.iter().find(|r| r.pid == init).is_some_and(|p| is_sh(&p.argv));
+            let one_argv = all.iter().find(|r| r.pid == init).map(|p| p.argv.clone()).unwrap_or_default();
+            let kids: Vec<Rec> = all.into_iter().filter(|r| r.ppid == init && r.pid != init && r.exit.is_none()).collect();
+            seen.no_shell = Some(match () {
+                _ if one_sh => format!("at the first prompt pid 1 itself was running {one_argv:?}: init forks, and only the child execs /bin/sh"),
+                _ if kids.is_empty() => String::from("at the first prompt no process but pid 1 was alive, and none ran `sh`"),
+                _ => format!("at the first prompt no process had argv[0] `sh`; pid 1's live children: {}", listed(&kids)),
+            });
+        }
     }
 
     let (o, _) = s.command(&format!("echo {}", w.w1))?;
@@ -508,8 +676,18 @@ fn drive(s: &mut Session, w: &Words, seen: &mut Seen) -> Result<(), String> {
     let (o, e) = s.command(&format!("cat /{}", w.n1))?;
     seen.cat_out = Some((o, e));
 
-    // Step 4: the orphan.
-    let (o, _) = s.command(&format!("forker {nonce} 1"))?;
+    // Step 4: the orphan, held (the file's header). The shell is asleep at
+    // its prompt; its fd 9 becomes the hold's read end, which `forker` and
+    // its grandchild inherit. With no shell found, pid 1 gets it (an init
+    // that is itself the shell).
+    let into = seen.shell.map_or(init, |(p, _)| p);
+    if let Some(r) = s.hold_r.take() {
+        seen.hold_in = install_in(into, HOLD_FD, &r).then_some(into);
+    }
+    if seen.hold_in.is_none() {
+        note(format_args!("{ORPHAN_ID}: pid {} had no task to take the hold; the orphan runs unheld", into.0));
+    }
+    let (o, _) = s.command(&format!("forker {nonce} 1 hold"))?;
     seen.forker_ran = true;
     let g = o
         .split(|&b| b == b'\n')
@@ -521,58 +699,144 @@ fn drive(s: &mut Session, w: &Words, seen: &mut Seen) -> Result<(), String> {
         })
         .map(Pid);
     seen.orphan = g;
-    if let Some(g) = g {
-        let mut c = Clock::new();
-        let gone = loop {
-            s.pump();
-            match find(g) {
-                None => break Ok(()),
-                Some(r) => {
-                    seen.orphan_ppid1 |= r.ppid == Pid(1);
-                    seen.orphan_named |= r.argv.iter().any(|a| a.as_bytes() == w.nonce);
-                    if c.ms() >= ORPHAN_MS {
-                        break Err(format!(
-                            "pid {} was still there {ORPHAN_MS} ms after `forker` ended: parent {}, {}",
-                            g.0,
-                            r.ppid.0,
-                            r.exit.map_or(String::from("still running"), |v| format!("{} and never collected", status_text(v)))
-                        ));
-                    }
-                }
-            }
-            sched::yield_now();
-        };
-        if gone.is_ok() {
-            note(format_args!(
-                "{ORPHAN_ID}: pid {}{}{}; its record is gone",
-                g.0,
-                if seen.orphan_named { ", the nonce in its argv" } else { "" },
-                if seen.orphan_ppid1 { ", was seen with parent 1" } else { "" }
-            ));
-        }
-        seen.orphan_gone = Some(gone);
-    }
+    let mut fc = Clock::new();
+    let watch = |seen: &mut Seen, g: Pid| -> Option<Rec> {
+        let r = find(g)?;
+        seen.orphan_ppid1 |= r.ppid == Pid(1);
+        seen.orphan_named |= r.argv.iter().any(|a| a.as_bytes() == w.nonce);
+        Some(r)
+    };
 
-    // Step 5: `exit`, and a new shell.
+    // Step 5: `exit` at once, while the orphan is held, and a new shell
+    // within STEP_MS. Nothing forks between the orphan and `exit` (the
+    // orphan waits in its read; the shell's `exit` is a builtin), so init's
+    // first new child gets the pid after the orphan's. The order kept from
+    // fix round 1 (init's first new child before or after the orphan went)
+    // still matters when the orphan was not held.
     let old = seen.shell.map(|(p, _)| p);
+    let high = old.map_or(0, |p| p.0).max(g.map_or(0, |p| p.0));
+    seen.high = high;
+    let from_err = s.err.all.len();
+    let mut next_ms: Option<u64> = None;
+    let mut ac = Clock::new();
     type_line("exit");
-    s.wait(STEP_MS, "a new shell's prompt after `exit`", |s| {
+    let mut respawned = s.wait(STEP_MS, "a new shell's prompt after `exit`", |s| {
+        // Every clock is read on every pass: the PM timer wraps every 4.7 s.
+        fc.ms();
+        let a = ac.ms();
+        let orphan_there = g.map(|g| watch(seen, g).is_some());
         if let Some(old) = old {
-            if find(old).is_none() {
+            if !seen.old_gone && find(old).is_none() {
                 seen.old_gone = true;
+                seen.orphan_at_old_gone = orphan_there;
             }
+        }
+        if seen.orphan_before_respawn.is_none() && child_above(init, high) {
+            seen.orphan_before_respawn = orphan_there.map(|there| !there);
+            next_ms = Some(a);
         }
         s.out.take_prompt()
-    })?;
-    if let Some(old) = old {
-        seen.old_gone |= find(old).is_none();
+    });
+
+    // The release, prompt or no prompt. Then ORPHAN_MS for the orphan to
+    // end and be collected; when no prompt came while it was held, the same
+    // wait watches for a late one (an init that starts the next shell only
+    // once its last child has ended).
+    seen.orphan_held = g.and_then(find).is_some_and(|r| r.exit.is_none());
+    let init_alive = find(init).is_some_and(|r| r.exit.is_none());
+    let late_wanted = respawned.is_err() && init_alive;
+    let prompt_held = respawned.is_ok();
+    drop(s.hold.take());
+    let mut oc = Clock::new();
+    let mut still: Option<Rec> = None;
+    let mut ended_at: Option<u64> = None;
+    loop {
+        s.pump();
+        let now = oc.ms();
+        let since_forker = fc.ms();
+        if find(init).is_some_and(|r| r.exit.is_some()) {
+            seen.orphan_init_ended = g.is_some();
+            if let Some(g) = g {
+                watch(seen, g);
+            }
+            break;
+        }
+        if late_wanted && seen.late_shell.is_none() && s.out.take_prompt() {
+            seen.late_shell = Some(now);
+        }
+        let there = g.and_then(|g| watch(seen, g));
+        if seen.orphan_held && there.is_none() && seen.orphan_gone_ms.is_none() {
+            seen.orphan_gone_ms = Some(now);
+        }
+        if there.is_none() && (!late_wanted || seen.late_shell.is_some()) {
+            break;
+        }
+        let give_up = match there.as_ref().map(|r| r.exit.is_some()) {
+            // Gone: only a late prompt is still awaited.
+            None => now >= ORPHAN_MS,
+            // Ended: ORPHAN_MS from when it is first seen ended.
+            Some(true) => now >= *ended_at.get_or_insert(now) + ORPHAN_MS,
+            // Still running (not held): round 1's bound from `forker`'s end.
+            Some(false) => now >= ORPHAN_MS && since_forker >= ORPHAN_RUN_MS,
+        };
+        if give_up {
+            still = there;
+            break;
+        }
+        sched::yield_now();
     }
-    seen.new_shell = shells().into_iter().find(|r| Some(r.pid) != old && r.pid != init).map(|r| r.pid);
-    if let Some(p) = seen.new_shell {
-        note(format_args!("{RESPAWN_ID}: after `exit`, pid {} runs sh", p.0));
+    if seen.late_shell.is_some() {
+        respawned = Ok(());
     }
+    if respawned.is_ok() {
+        if let Some(old) = old {
+            seen.old_gone |= find(old).is_none();
+        }
+        let ns = shells().into_iter().find(|r| Some(r.pid) != old && r.pid != init);
+        seen.new_shell = ns.as_ref().map(|r| r.pid);
+        seen.new_shell_ppid = ns.map(|r| r.ppid);
+        match seen.new_shell {
+            Some(p) => note(format_args!("{RESPAWN_ID}: after `exit`, pid {} runs sh", p.0)),
+            None => {
+                seen.new_shell_why = Some(match s.err_since(from_err) {
+                    Some(l) => format!("after `exit` a prompt came, but no new process running `sh` was alive at it; the last line on fd 2 since `exit`: {l}"),
+                    None => String::from("after `exit` a prompt came, but no new process running `sh` was alive at it"),
+                })
+            }
+        }
+    }
+    if let Some(g) = g {
+        seen.orphan_gone = Some(match &still {
+            Some(r) if !seen.orphan_init_ended => Err(match r.exit {
+                Some(v) => format!("pid {} ended with {} and was still not collected {ORPHAN_MS} ms later: its parent is {}", g.0, status_text(v), r.ppid.0),
+                None => format!("pid {} was still running {ORPHAN_RUN_MS} ms after `forker` ended: parent {}", g.0, r.ppid.0),
+            }),
+            _ => Ok(()),
+        });
+        if still.is_none() && !seen.orphan_init_ended {
+            note(format_args!(
+                "{ORPHAN_ID}: pid {}{}{}{}; its record is gone{}",
+                g.0,
+                if seen.orphan_named { ", the nonce in its argv" } else { "" },
+                if seen.orphan_ppid1 { ", was seen with parent 1" } else { "" },
+                match (seen.orphan_held, prompt_held) {
+                    (true, true) => ", was still running at the new shell's prompt",
+                    (true, false) => ", was still running when it was let end, with no new prompt yet",
+                    (false, _) => ", ended by itself, not held",
+                },
+                match (seen.orphan_gone_ms, next_ms) {
+                    (Some(at), _) => format!(", {at} ms after that"),
+                    (None, Some(m)) => format!(" before init's next child came, {m} ms after `exit`"),
+                    (None, None) => String::new(),
+                }
+            ));
+        }
+    }
+
+    respawned?;
     let (o, _) = s.command(&format!("echo {}", w.w2))?;
     seen.echo2 = Some(o);
+    seen.shells_after = Some(shells());
     Ok(())
 }
 
@@ -623,7 +887,7 @@ fn shown(bytes: &[u8]) -> String {
     format!("{:?}", String::from_utf8_lossy(bytes))
 }
 
-fn rows(w: &Words, seen: &Seen, out: &[u8]) {
+fn rows(w: &Words, seen: &Seen, out: &[u8], err: &[u8]) {
     let stopped = |what: &str| match &seen.stop {
         Some(why) => format!("the session did not get as far as {what}: {why}"),
         None => format!("the session did not get as far as {what}"),
@@ -635,9 +899,11 @@ fn rows(w: &Words, seen: &Seen, out: &[u8]) {
     if n != 1 {
         let theirs: Vec<String> =
             out.split(|&b| b == b'\n').filter(|l| l.starts_with(b"init: key")).map(|l| String::from_utf8_lossy(l).into_owned()).collect();
+        let on_err = err.split(|&b| b == b'\n').any(|l| l.starts_with(b"init: key"));
         r.fail(match (n, theirs.is_empty(), &seen.stop) {
+            (0, true, _) if on_err => String::from("no line `init: key <16 hex digits>` on fd 1; the key line came on fd 2"),
             (0, true, _) => String::from("no line `init: key <16 hex digits>` on fd 1"),
-            (0, false, _) => format!("init printed {theirs:?}; the key for this run's nonce is `{}`", w.key),
+            (0, false, _) => format!("init printed {theirs:?}, not the key for this run's nonce"),
             _ => format!("init printed its key line {n} times; once is the line"),
         });
     }
@@ -645,6 +911,9 @@ fn rows(w: &Words, seen: &Seen, out: &[u8]) {
 
     // 2: the mounts.
     let mut r = Row::new(2, MOUNTS_ID);
+    for (target, fstype) in &seen.premounted {
+        r.check(false, || format!("{target} was already mounted (\"{fstype}\") when init was started, before it ran: the kernel mounts only what a program asks for"));
+    }
     let table = mount::table();
     for (fstype, target) in [("proc", "/proc"), ("devfs", "/dev")] {
         let k = table.iter().filter(|m| m.target == target).count();
@@ -675,8 +944,10 @@ fn rows(w: &Words, seen: &Seen, out: &[u8]) {
     // 3: the shell init started.
     let mut r = Row::new(3, SHELL_ID);
     match seen.shell {
-        None if seen.echo1.is_none() => r.fail(stopped("the first prompt")),
-        None => r.fail(String::from("at the first prompt no process but pid 1 was running `sh`")),
+        None => match &seen.no_shell {
+            Some(why) => r.fail(why.clone()),
+            None => r.fail(stopped("the first prompt")),
+        },
         Some((pid, ppid)) => r.check(ppid == Pid(1), || format!("the shell (pid {}) has parent {}, not 1: init forks it and execs /bin/sh in that child", pid.0, ppid.0)),
     }
     match &seen.echo1 {
@@ -706,6 +977,8 @@ fn rows(w: &Words, seen: &Seen, out: &[u8]) {
         (Some(g), Some(gone)) => {
             r.check(seen.orphan_named, || format!("pid {} was never seen with the nonce in its argv", g.0));
             r.check(seen.orphan_ppid1, || format!("pid {} was never seen with parent 1", g.0));
+            // Init ended first (rows 6 and 7 say so): no init was left to
+            // collect it, so only the hand-over is asked.
             if let Err(why) = gone {
                 r.fail(why.clone());
             }
@@ -715,12 +988,59 @@ fn rows(w: &Words, seen: &Seen, out: &[u8]) {
 
     // 6: the respawn.
     let mut r = Row::new(6, RESPAWN_ID);
+    if let Some(m) = seen.late_shell {
+        let held = match seen.orphan {
+            Some(g) if seen.orphan_held => format!(" while pid {}, also init's child, still ran", g.0),
+            _ => String::new(),
+        };
+        let after = match (seen.orphan, seen.orphan_gone_ms) {
+            (Some(g), Some(at)) if seen.orphan_held && at <= m => format!(", after pid {} had ended", g.0),
+            _ => String::new(),
+        };
+        r.fail(format!(
+            "no new shell came in the {STEP_MS} ms after `exit`{held}; one came {} ms after it{after}: when the shell ends, init starts the next one at once, whatever its other children are doing",
+            STEP_MS + m
+        ));
+    }
+    if let (Some(g), Some(true), Some(true)) = (seen.orphan, seen.orphan_at_old_gone, seen.orphan_before_respawn) {
+        r.fail(format!(
+            "init started its next child only after pid {}, also its child and still running when the shell ended, had ended and been collected: when the shell ends, init starts the next one at once, whatever its other children are doing",
+            g.0
+        ));
+    }
     match &seen.echo2 {
-        None => r.fail(stopped("a new shell")),
+        None => match &seen.new_shell_why {
+            Some(why) => r.fail(why.clone()),
+            None => r.fail(stopped("a new shell")),
+        },
         Some(o) => {
-            let old = seen.shell.map_or(0, |(p, _)| p.0);
-            r.check(seen.old_gone, || format!("the shell that ran `exit` (pid {old}) was never collected"));
-            r.check(seen.new_shell.is_some(), || String::from("after `exit` no new process running `sh` was alive"));
+            if let Some((old, _)) = seen.shell {
+                r.check(seen.old_gone, || format!("the shell that ran `exit` (pid {}) was never collected", old.0));
+            }
+            match &seen.new_shell_why {
+                Some(why) => r.fail(why.clone()),
+                None => r.check(seen.new_shell.is_some(), || String::from("after `exit` no new process running `sh` was alive")),
+            }
+            if let (Some(p), Some(_)) = (seen.new_shell, seen.orphan) {
+                let first = seen.high + 1;
+                r.check(p.0 == first || seen.new_shell_ppid.is_some_and(|q| q.0 == first), || {
+                    format!(
+                        "after `exit`, init started another process before the new shell (pid {}, not pid {}): when the shell ends, the next process init starts is the shell",
+                        p.0,
+                        seen.high + 1
+                    )
+                });
+            }
+            if let Some(after) = &seen.shells_after {
+                r.check(after.len() <= 1, || {
+                    format!(
+                        "after `echo {}`, more than one process was running `sh`, {} of them ({}); init keeps one shell, and starts the next when it ends",
+                        w.w2,
+                        after.len(),
+                        listed(after)
+                    )
+                });
+            }
             r.check(has_line(o, &w.w2), || format!("`echo {}` at the new prompt printed {} on fd 1", w.w2, shown(o)));
         }
     }
@@ -797,6 +1117,7 @@ unsafe extern "C" fn _start() -> ! {
     prelude();
     let mut seen = Seen::default();
     let mut out = Vec::new();
+    let mut err = Vec::new();
     match ktap::nonce() {
         None => seen.stop = Some(String::from("this run carries no nonce, and every row is drawn from it")),
         Some(nonce) => {
@@ -804,7 +1125,7 @@ unsafe extern "C" fn _start() -> ! {
             if let Err(why) = mount_disk() {
                 seen.stop = Some(format!("the file systems did not mount: {why}"));
             } else {
-                let r = session(&w, &mut seen, &mut out);
+                let r = session(&w, &mut seen, &mut out, &mut err);
                 if let Err(why) = r {
                     note(format_args!("init: the session stopped: {why}"));
                     seen.stop = Some(why);
@@ -812,7 +1133,7 @@ unsafe extern "C" fn _start() -> ! {
             }
             irq_off();
             kernel::kprintln!();
-            rows(&w, &seen, &out);
+            rows(&w, &seen, &out, &err);
             ktap::end();
             halt()
         }

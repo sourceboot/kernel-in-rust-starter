@@ -11,14 +11,14 @@
 //! the learner's `Ata`, `partition2` and `Ext2::mount`: `/proc` and `/dev`
 //! are init's to mount.
 //!
-//! Step 1 first: before any program runs, the vehicle asks the learner's
-//! `Stat::lstat` (lab 30 step 1, the kernel half of syscall 6) about
+//! Task 1 first: before any program runs, the vehicle asks the learner's
+//! `Stat::lstat` (lab 30 task 1, the kernel half of syscall 6) about
 //! `/bin/busybox` and each applet name, and the VFS (lab 17's walk) about the
 //! same names: one inode, `st_nlink` 19, a regular file of busybox's size.
 //!
-//! Lab 30's kernel work is two steps: `Stat::lstat` (1) and syscall 6's
+//! Lab 30's kernel work is two tasks: `Stat::lstat` (1) and syscall 6's
 //! arm, `sys_lstat` (2), which hands busybox the 144-byte `struct stat` of
-//! step 1's answer. Without step 2 every `ls`, `cp`, `mv` and `rm` prints
+//! task 1's answer. Without task 2 every `ls`, `cp`, `mv` and `rm` prints
 //! "Function not implemented" and rows 2 and 7-9 say so.
 //!
 //! Then it starts the learner's `/bin/init <nonce>` through the learner's
@@ -41,7 +41,11 @@
 //!
 //!   1 `bb.links.one_inode` (K, plain) — `Stat::lstat` and the VFS walk
 //!     agree on `/bin/busybox` and every applet name: one inode number, a
-//!     regular file, `st_nlink` = 1 + the applet count, busybox's size.
+//!     regular file, `st_nlink` = 1 + the applet count, busybox's size;
+//!     `/bin/busybox`'s owner, block count and three times are the walk's
+//!     (not `st_blksize` or `st_rdev`: a kernel may fill a block size of its
+//!     own, and a regular file's `rdev` is 0); and `Stat::lstat("")` is
+//!     `-ENOENT`.
 //!   2 `bb.cd` (derived) — `mkdir` and `cd` into this run's directory, `cd`
 //!     into a subdirectory, a file written there by a relative name, `cd ..`
 //!     and the file read back through `s1/`; `cd` to a missing name refused
@@ -54,16 +58,31 @@
 //!   5 `bb.subst` (derived) — `$(…)` around `wc -l <`, a pipeline and `head`.
 //!   6 `bb.for` (derived) — a `for` over three words, a `for` writing three
 //!     files read back through `sort -r`, a `while` counting with `$((…))`.
-//!   7 `bb.ls.proc` (derived) — `ls -l /proc` (busybox's `ls -l` calls
+//!   7 `bb.ls.proc` (derived) — `ls -lis /bin/sh` (through `lstat`)
+//!     and `ls -lisL /bin/sh` (through `stat`) print the same line, whose
+//!     inode number is the walk's: syscall 6 answers what `stat` answers,
+//!     every field `ls` prints (inode, blocks, mode, links, owner, size,
+//!     time). `ls -l /proc` (busybox's `ls -l` calls
 //!     `lstat` on every name): `/proc`'s names with their types, init's pid
 //!     and the shell's among them; `ls -l f1 /bin/sh`: `f1`'s size and one link,
-//!     `/bin/sh` with 19 links and busybox's size.
+//!     `/bin/sh` with 19 links and busybox's size. Then, with init's mounts
+//!     in place, `Stat::lstat` and the VFS walk agree on `/proc`, `/dev` (a
+//!     final name that is a mount point: the mounted root, not the ext2
+//!     directory it covers) and `/proc/meminfo` (a name inside one): device,
+//!     mode and `st_nlink` (procfs's sizes and inode numbers are its own
+//!     business; row 1 owns the inode number).
 //!   8 `bb.applets` (derived) — `cp`, `sed`, `mv`, `rm`; `rm /bin/yes`
 //!     removes one name of busybox's inode and leaves the rest: `ls -l
 //!     /bin/busybox` shows 18 links, and the shell still runs busybox
 //!     (the file's bytes are intact, `wc -c`); then `exit <derived>`, and
 //!     init, which reaps it, reports `init: sh (pid P) ended, exit <that
-//!     number>`.
+//!     number>`. Then, when group 7 printed its marker, the kernel half:
+//!     every block busybox's inode maps (data and pointer blocks, one data
+//!     block per 4 KiB of its size) still marked in use in the block bitmap,
+//!     read from the disk — an `unlink` of one name of several frees none,
+//!     whatever block the allocator hands out next — then every byte of
+//!     busybox read through the VFS, a new 256 KiB file written in `/tmp`,
+//!     and busybox read again, unchanged.
 //!   9 `bb.enosys.exact` (K, plain) — in each group
 //!     `syscall::enosys_count()` moved by exactly the calls of the stubs
 //!     the kernel leaves: `sendfile` (40) always, and `access` (21) until
@@ -102,6 +121,7 @@ use kernel::fs::ext2::Ext2;
 use kernel::fs::mount;
 use kernel::fs::vfs::{self, InodeRef, Stat};
 use kernel::ktap;
+use kernel::sync::SpinLock;
 use kernel::pipe;
 use kernel::proc::{self, Pid};
 use kernel::syscall::{self, Errno, SyscallFrame};
@@ -156,6 +176,8 @@ fn access_armed() -> bool {
 /// How long a group may run before the session counts as stopped, by the
 /// PM timer.
 const GROUP_MS: u64 = 20_000;
+/// The drive `mount_all` probed, for row 8's read of the block bitmap.
+static DRIVE: SpinLock<Option<Arc<dyn BlockDevice>>> = SpinLock::new(None);
 
 /// The learner's init (lab 28), and how long it has to print its hello line
 /// and fork the shell, by the PM timer.
@@ -352,6 +374,7 @@ fn start_with(what: &str, start: impl FnOnce() -> Result<Pid, Errno>, fds: &[(us
 /// (lab 28).
 fn mount_all() -> Result<(), String> {
     let drive: Arc<dyn BlockDevice> = Arc::new(quiet(Ata::probe).map_err(|e| format!("Ata::probe() returned {}", errno_text(e)))?);
+    *DRIVE.lock() = Some(drive.clone());
     let fs = quiet(|| ata::partition2(drive))
         .and_then(Ext2::mount)
         .map_err(|e| format!("partition2 then Ext2::mount returned {}", errno_text(e)))?;
@@ -360,13 +383,13 @@ fn mount_all() -> Result<(), String> {
     mount::mount("/dev/hda2", "/", "ext2", root).map_err(|e| format!("mount::mount(\"/dev/hda2\", \"/\", \"ext2\", its root) returned {}", errno_text(e)))
 }
 
-// ── Step 1: the links, through the learner's lstat ───────────────────────
+// ── Task 1: the links, through the learner's lstat ───────────────────────
 
-/// `Stat::lstat` (lab 30 step 1, the kernel half of syscall 6: the stat of
+/// `Stat::lstat` (lab 30 task 1, the kernel half of syscall 6: the stat of
 /// what a path names without following a final symlink) arrives with lab
 /// 30. This twin lets the file build against the cuts before it and the
 /// learner's template (G1380's class): the inherent function wins once the
-/// cut has it, and before that this one answers `-ENOSYS`, so step 1 fails
+/// cut has it, and before that this one answers `-ENOSYS`, so task 1 fails
 /// as it should.
 #[allow(dead_code)]
 trait LstatOf {
@@ -398,6 +421,13 @@ fn links_row(n: usize) -> u64 {
                     l.ino, l.mode, l.nlink, l.size, w.ino, w.mode, w.nlink, w.size
                 ));
             }
+            let rest = |s: &Stat| (s.uid, s.gid, s.blocks, s.atime, s.mtime, s.ctime);
+            if rest(&l) != rest(&w) {
+                r.fail(format_args!(
+                    "lstat(\"/bin/busybox\") gave owner {}:{} blocks {} atime {} mtime {} ctime {}; the walk's stat owner {}:{} blocks {} atime {} mtime {} ctime {}",
+                    l.uid, l.gid, l.blocks, l.atime, l.mtime, l.ctime, w.uid, w.gid, w.blocks, w.atime, w.mtime, w.ctime
+                ));
+            }
             if !w.is_reg() || w.nlink != want_links {
                 r.fail(format_args!("/bin/busybox: mode {:#o}, {} links; expected a regular file with {want_links}", w.mode, w.nlink));
             }
@@ -412,6 +442,13 @@ fn links_row(n: usize) -> u64 {
             None
         }
     };
+    match lstat("") {
+        Err(2) => {}
+        got => r.fail(format_args!(
+            "lstat(\"\") {}; an empty path names nothing: -ENOENT",
+            got.map(|s| format!("answered mode {:#o} ino {}", s.mode, s.ino)).unwrap_or_else(errno_text)
+        )),
+    }
     let mut same = 0;
     if let Some(bb) = &bb {
         for a in APPLETS {
@@ -608,12 +645,13 @@ impl Sh {
     }
 }
 
-/// The live child of `init` running `sh` (argv[0]).
+/// The live child of `init` running `sh`: argv[0] `sh`, or a path ending in
+/// `/sh`, as ktest-28 counts it (CONTRACT §B.2-28).
 fn shell_of(init: Pid) -> Option<Pid> {
     let mut out = None;
     quiet(|| {
         proc::each(|p| {
-            if p.ppid == init && p.exit.is_none() && p.argv.first().map(String::as_str) == Some("sh") {
+            if p.ppid == init && p.exit.is_none() && p.argv.first().is_some_and(|a| a == "sh" || a.ends_with("/sh")) {
                 out = Some(p.pid);
             }
         })
@@ -638,7 +676,7 @@ fn expect(r: &mut Row, n: usize, got: &Result<Vec<u8>, String>, want: &str) {
 fn enosys_hint(r: &mut Row, out: &[u8]) {
     if out.windows(24).any(|w| w == b"Function not implemented") {
         r.fail(format_args!(
-            "a call answered -ENOSYS (\"Function not implemented\"): `ls`, `cp`, `mv` and `rm` ask about every name with lstat, syscall 6 (lab 30 step 2, its arm)"
+            "a call answered -ENOSYS (\"Function not implemented\"): `ls`, `cp`, `mv` and `rm` ask about every name with lstat, syscall 6 (lab 30 task 2, its arm)"
         ));
     }
 }
@@ -654,6 +692,141 @@ fn ls_fields(line: &str) -> Option<(char, u64, u64, &str)> {
         return None;
     }
     Some((f[0].chars().next()?, f[1].parse().ok()?, f[4].parse().ok()?, f[f.len() - 1]))
+}
+
+/// Row 7's kernel half, run while init's mounts are in place: a final name
+/// that is a mount point, and a name inside one, through `Stat::lstat` and
+/// the VFS walk. Device, mode and link count: what tells a mounted root from
+/// the directory it covers, and a found name from `-ENOENT`.
+fn mounted_names(r: &mut Row) {
+    for path in ["/proc", "/dev", "/proc/meminfo"] {
+        match (lstat(path), walk_stat(path)) {
+            (Ok(l), Ok(w)) if (l.dev, l.mode, l.nlink) == (w.dev, w.mode, w.nlink) => {}
+            (Ok(l), Ok(w)) => r.fail(format_args!(
+                "lstat(\"{path}\") gave dev {} mode {:#o} nlink {}; the walk's stat dev {} mode {:#o} nlink {}",
+                l.dev, l.mode, l.nlink, w.dev, w.mode, w.nlink
+            )),
+            (l, w) => r.fail(format_args!(
+                "lstat(\"{path}\") {}; the walk {}",
+                l.map(|_| String::from("answered")).unwrap_or_else(errno_text),
+                w.map(|_| String::from("answered")).unwrap_or_else(errno_text)
+            )),
+        }
+    }
+}
+
+/// Row 8's kernel half, first, after group 7 (`rm /bin/yes`): every block
+/// `/bin/busybox`'s inode maps, data and pointer blocks, as the disk holds
+/// them (an unlink reaches the disk when it returns: labs 19 and 21), is
+/// still marked in use in the block bitmap, and the inode maps one data
+/// block per 4 KiB of the file's size. An unlink of one name of several
+/// frees nothing, so this holds whatever block the allocator takes next.
+fn blocks_held() -> Result<(), String> {
+    use kernel::blk::ata::BLOCK_SIZE;
+    fn le32(b: &[u8], at: usize) -> u64 {
+        u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]) as u64
+    }
+    // The non-zero pointers of pointer block `n`.
+    fn ptrs(d: &dyn BlockDevice, n: u64, out: &mut Vec<u64>) -> Result<(), Errno> {
+        let mut b = alloc::boxed::Box::new([0u8; BLOCK_SIZE]);
+        d.read_block(n, &mut b)?;
+        out.extend((0..BLOCK_SIZE / 4).map(|k| le32(&b[..], 4 * k)).filter(|&x| x != 0));
+        Ok(())
+    }
+    let st = walk_stat("/bin/busybox").map_err(|e| format!("the walk of /bin/busybox returned {}", errno_text(e)))?;
+    let drive = DRIVE.lock().clone().ok_or_else(|| String::from("no drive was probed"))?;
+    let res = quiet(|| -> Result<(usize, usize, usize), Errno> {
+        let p = ata::partition2(drive)?;
+        let mut b = alloc::boxed::Box::new([0u8; BLOCK_SIZE]);
+        p.read_block(1, &mut b)?;
+        let (bitmap, table) = (le32(&b[..], 0), le32(&b[..], 8));
+        let at = (st.ino - 1) * 128;
+        p.read_block(table + at / BLOCK_SIZE as u64, &mut b)?;
+        let i = &b[(at % BLOCK_SIZE as u64) as usize..][..128];
+        let (mut data, mut meta) = (Vec::new(), Vec::new());
+        data.extend((0..12).map(|k| le32(i, 40 + 4 * k)).filter(|&x| x != 0));
+        let (ind, dind) = (le32(i, 88), le32(i, 92));
+        if ind != 0 {
+            meta.push(ind);
+            ptrs(&p, ind, &mut data)?;
+        }
+        if dind != 0 {
+            meta.push(dind);
+            let mut inds = Vec::new();
+            ptrs(&p, dind, &mut inds)?;
+            for n in inds {
+                meta.push(n);
+                ptrs(&p, n, &mut data)?;
+            }
+        }
+        p.read_block(bitmap, &mut b)?;
+        let used = |n: &&u64| (**n as usize) < BLOCK_SIZE * 8 && b[**n as usize / 8] >> (**n % 8) & 1 == 1;
+        let free = data.iter().chain(meta.iter()).filter(|n| !used(n)).count();
+        Ok((data.len(), meta.len(), free))
+    });
+    let want = st.size.div_ceil(BLOCK_SIZE as u64) as usize;
+    match res {
+        Err(e) => Err(format!("reading /bin/busybox's inode and the block bitmap from the disk: {}", errno_text(e))),
+        Ok((d, _, _)) if d != want => Err(format!(
+            "after `rm /bin/yes`, /bin/busybox's inode maps {d} data blocks for its {} bytes, which take {want}: a file with names keeps its blocks",
+            st.size
+        )),
+        Ok((d, m, 0)) => {
+            note(format_args!("{APPLETS_ID}: after `rm /bin/yes`, all {} blocks /bin/busybox's inode maps are in use in the block bitmap", d + m));
+            Ok(())
+        }
+        Ok((d, m, free)) => Err(format!(
+            "after `rm /bin/yes`, {free} of the {} blocks /bin/busybox's inode maps are free in the block bitmap: an unlink freed blocks of a file that still has names",
+            d + m
+        )),
+    }
+}
+
+/// Row 8's kernel half, then: every byte of
+/// busybox through the VFS, a new 256 KiB file written in `/tmp`, and
+/// busybox again: no write elsewhere may take a block busybox holds.
+fn bytes_kept() -> Result<(), String> {
+    const FILL: usize = 256 * 1024;
+    // Whole reads and writes, however many calls the file system takes.
+    fn read_all(f: &InodeRef, buf: &mut [u8]) -> Result<(), Errno> {
+        let mut at = 0;
+        while at < buf.len() {
+            match f.read_at(at as u64, &mut buf[at..])? {
+                0 => return Err(5),
+                n => at += n,
+            }
+        }
+        Ok(())
+    }
+    let res = quiet(|| -> Result<usize, Errno> {
+        let root = vfs::root()?;
+        let bb = vfs::walk(&root, "/bin/busybox")?;
+        let size = bb.stat().size as usize;
+        let mut a = alloc::vec![0u8; size];
+        read_all(&bb, &mut a)?;
+        let f = vfs::walk(&root, "/tmp")?.create("k30-fill", 0o644)?;
+        let fill = alloc::vec![0xa5u8; 16 * 1024];
+        let mut at = 0;
+        while at < FILL {
+            match f.write_at(at as u64, &fill[..(FILL - at).min(fill.len())])? {
+                0 => return Err(28),
+                n => at += n,
+            }
+        }
+        let mut b = alloc::vec![0u8; size];
+        read_all(&bb, &mut b)?;
+        Ok(a.iter().zip(b.iter()).filter(|(x, y)| x != y).count())
+    });
+    match res {
+        Ok(0) => {
+            note(format_args!("{APPLETS_ID}: every byte of /bin/busybox unchanged after a 256 KiB write to /tmp/k30-fill"));
+            Ok(())
+        }
+        Ok(n) => Err(format!(
+            "/bin/busybox changed after a 256 KiB write to /tmp/k30-fill ({n} bytes differ): a write to another file took blocks busybox still holds"
+        )),
+        Err(e) => Err(format!("reading /bin/busybox and writing /tmp/k30-fill through the VFS: {}", errno_text(e))),
+    }
 }
 
 /// The seven groups and their rows; returns each group's enosys delta.
@@ -759,13 +932,24 @@ fn session(w: &Words, bb_size: u64, base: usize) -> Vec<Option<u64>> {
     r.finish(base + 4);
 
     // Group 6: ls -l, through lstat.
-    let g = run(&mut sh, 6, String::from("ls -l /proc\nls -l f1 /bin/sh\n"));
+    let g = run(&mut sh, 6, String::from("ls -lis /bin/sh\nls -lisL /bin/sh\nls -l /proc\nls -l f1 /bin/sh\n"));
     let mut r = Row::new(LS_ID);
     match &g {
         Err(why) => r.fail(format_args!("{why}")),
         Ok(out) => {
             enosys_hint(&mut r, out);
-            let ls = lines(out);
+            let all = lines(out);
+            let (by_lstat, by_stat) = (all.first().copied().unwrap_or(""), all.get(1).copied().unwrap_or(""));
+            if by_lstat != by_stat {
+                r.fail(format_args!("`ls -lis /bin/sh` (lstat) printed {by_lstat:?}; `ls -lisL /bin/sh` (stat) printed {by_stat:?}"));
+            }
+            let bb_ino = walk_stat("/bin/sh").map_or(0, |s| s.ino);
+            match by_lstat.split_whitespace().next().and_then(|i| i.parse::<u64>().ok()) {
+                Some(i) if i == bb_ino => {}
+                Some(i) => r.fail(format_args!("`ls -lis /bin/sh` shows inode {i}; the file system's walk says {bb_ino}")),
+                None => r.fail(format_args!("`ls -lis /bin/sh` printed no inode number: {by_lstat:?}")),
+            }
+            let ls: Vec<&str> = all.iter().skip(2).copied().collect();
             let f1_size = (w1.len() + w2.len() + 2) as u64;
             let shell = format!("{}", sh.pid.0);
             let init = format!("{}", sh.init.0);
@@ -802,6 +986,7 @@ fn session(w: &Words, bb_size: u64, base: usize) -> Vec<Option<u64>> {
             note(format_args!("{LS_ID}: {} lines; init's pid {} and the shell's {} listed in /proc", ls.len(), sh.init.0, sh.pid.0));
         }
     }
+    mounted_names(&mut r);
     r.finish(base + 5);
 
     // Group 7: the other applets, and one name of busybox removed.
@@ -819,6 +1004,13 @@ fn session(w: &Words, bb_size: u64, base: usize) -> Vec<Option<u64>> {
     );
     let exit = sh.finish(w.exit);
     let mut r = Row::new(APPLETS_ID);
+    if g.is_ok() {
+        for probe in [blocks_held, bytes_kept] {
+            if let Err(why) = probe() {
+                r.fail(format_args!("{why}"));
+            }
+        }
+    }
     match &g {
         Err(why) => r.fail(format_args!("{why}")),
         Ok(out) => {

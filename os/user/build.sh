@@ -87,6 +87,9 @@ PROGRAMS=(
   # lab 29 (the learner's shell's script): not in ARCHIVE; ext2's /bin carries it from lab 29's
   # image on (xtask/src/ext2.rs SHELL_PROGRAMS)
   "mark|mark/mark.c|elf"
+  # lab 31 (signals: what the mask holds, a send from a process, an ignored signal and a
+  # sleep), layout musl; not in ARCHIVE, and kept out of ext2's /bin before 31 (SIGNAL_PROGRAMS)
+  "sigprobe|sigprobe/sigprobe.c|musl"
   # lab 32 (handlers: the registers a handler may not disturb, SA_RESTART, rt_sigsuspend),
   # layout musl; not in ARCHIVE, and kept out of ext2's /bin before 32 (HANDLER_PROGRAMS)
   "sigregs|sigregs/sigregs.c|musl"

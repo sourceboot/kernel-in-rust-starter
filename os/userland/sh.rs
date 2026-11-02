@@ -101,11 +101,12 @@ fn expand<'a>(words: &mut [&'a CStr], last: i32, num: &'a mut [u8; 12]) {
     todo!("lab 29 step 6 — expand: each `$?` word becomes the last status")
 }
 
-/// Step 7: the builtin `echo`, in the child: its words joined by one space,
-/// then a newline, in one `write`. Returns the exit code.
+/// Step 7: the builtin `echo`, in the child: its words (the ones after
+/// `echo`) joined by one space, then a newline, in one `write`. Returns the
+/// exit code.
 fn echo(words: &[&CStr]) -> i32 {
     let _ = words;
-    todo!("lab 29 step 7 — echo: the words joined by one space, and a newline")
+    todo!("lab 29 step 7 — echo: the words after `echo` joined by one space, and a newline")
 }
 
 /// Step 8: in the child, `cmd`'s `< path` and `> path` applied to fds 0 and
@@ -128,8 +129,9 @@ fn pipeline(words: &[&CStr]) -> i32 {
     todo!("lab 29 step 9 — pipeline: `a | b` started at once, joined by a pipe")
 }
 
-/// Step 10: the builtin `cd`, in the shell itself: to `dir`, or to `/` with
-/// no argument. Returns 0, or 1 when the kernel refuses.
+/// Step 10: the builtin `cd`, in the shell itself; `words` is the whole
+/// line, `cd` first: to the directory after it, or to `/` with no
+/// argument. Returns 0, or 1 when the kernel refuses.
 fn cd(words: &[&CStr]) -> i32 {
     let _ = words;
     todo!("lab 29 step 10 — cd: change the shell's own directory")

@@ -488,7 +488,7 @@ impl fmt::Display for WaitStatus {
 }
 /// `wait4(pid, &status, options, NULL)` (61): `pid` -1 (or any `pid <= 0`) is any
 /// child. `Ok((pid, status))`; `Ok((0, _))` under `WNOHANG` when no child has
-/// changed yet; `Err(ECHILD)` when there is no child to wait for.
+/// changed yet; `Err(Errno::ECHILD)` when there is no child to wait for.
 pub fn wait4(pid: i32, options: u32) -> Result<(i32, WaitStatus)> {
     let mut status: i32 = 0;
     let r = unsafe { syscall4(nr::WAIT4, pid as isize as usize, &mut status as *mut i32 as usize, options as usize, 0) };

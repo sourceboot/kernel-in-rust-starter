@@ -20,7 +20,7 @@
 //!
 //! The rows, printed in this order:
 //!
-//!   1 `tty.tcgets` (K + derived) — `Console::tcgets` (lab 33 step 1) is
+//!   1 `tty.tcgets` (K + derived) — `Console::tcgets` (lab 33 task 1) is
 //!     Linux's cooked termios, the 36 bytes of `tc::COOKED`; and
 //!     `ttyprobe tcgets <hex>`: `ioctl(TCGETS)` on `/dev/tty` writes those
 //!     36 bytes and not one more.
@@ -32,8 +32,17 @@
 //!     ISIG and ICRNL off; the vehicle prints its raw-ready marker and the
 //!     script types q, Enter, the left arrow and ctrl+c. Each comes as it is
 //!     typed, with no line to wait for: `q`, CR (0x0d: ICRNL off), `ESC [ D`
-//!     (`kbd::vt100`) and 0x03 (ISIG off: a byte, not SIGINT). Afterwards
-//!     the termios is cooked again and no key is left over.
+//!     (`kbd::vt100`) and 0x03 (ISIG off: a byte, not SIGINT). Then three
+//!     reads with keys the vehicle pushes into the keyboard's ring
+//!     (`kbd::push`, interrupts off; amended 2026-10-29, slice 9 fix round
+//!     1, the robust lens's F1-F6 and F9): VMIN 0 with nothing typed is 0
+//!     bytes at once; with ISIG on, ctrl+c pushed while a blocking read
+//!     sleeps sends SIGINT, which ends the read, -EINTR; with VMIN 21 and
+//!     ICRNL on, one read returns x, NL, up, down, right, Home, End, Esc and
+//!     Backspace, 21 bytes, though x and Enter came first and alone, and
+//!     leaves the five keys pushed behind them in the ring. Afterwards the
+//!     termios is cooked again, and those five keys, a, b, Backspace, c,
+//!     Enter, read cooked as `ac\n`, nothing after.
 //!   4 `tty.access` (derived) — `ttyprobe access <hex>`: `access` (21) as
 //!     root: what is there is readable and writable whatever its mode, only
 //!     a file with an execute bit (or a directory) may be run (`-EACCES`
@@ -56,7 +65,13 @@
 //!     the script types `vi $F`; `$F` holds a long line and a short one,
 //!     both from the nonce. Once vi has drawn its screen (`ESC [ r ; c H`
 //!     through the tee) the vehicle prints its vi-open marker and the script
-//!     types `dd`, `G`, `o`, `vi`, Esc, `:wq`, Enter. vi asks `access(F,
+//!     types `dd`, `G`, `o`, `vi` and Esc; once vi's status line shows its
+//!     command mode again (`-`, where insert mode showed `I`) the vehicle
+//!     prints its vi-command marker and the script types `:wq`, Enter
+//!     (amended 2026-10-29, slice 9: typed in one go, Esc and `:wq` reached
+//!     vi together on a loaded host, inside its wait for the rest of an
+//!     escape sequence, and vi never left insert mode; the reference failed
+//!     rows 7 and 8 so in two of three boots at load 33-39). vi asks `access(F,
 //!     W_OK)` before it will write, writes over the file and cuts it with
 //!     `ftruncate`: the file read back through the VFS is the short line and
 //!     `vi`, nothing after.
@@ -65,11 +80,20 @@
 //!     Backspace, `c`, Enter, `echo $v$W`, Enter and `exit`, Enter: ash's
 //!     `read` reads the console cooked again, the line discipline's erase
 //!     included, so it prints `abc<W>`; the shell exits and the console's
-//!     termios is cooked (K).
+//!     termios is cooked (K). Then the vehicle pushes a, b, x, Backspace, c,
+//!     Enter and reads the console non-blocking until the first answer
+//!     other than -EAGAIN, for at most `STEP_MS`: `abc\n`, in that one read
+//!     (amended 2026-10-29, slice 9 fix round 1, the robust lens's F1:
+//!     busybox's `read` edits the line itself, so a console that stayed raw
+//!     printed the same word; the wait is the honest case keys-typed-ahead's,
+//!     whose kernel shows pushed keys 300 ms late).
 //!
 //! A group that prints no marker within `GROUP_MS`, or keys that do not
 //! come within `KEYS_MS`, by the PM timer, stop the session: the rows still
-//! owed fail with the reason. The plan always completes.
+//! owed fail with the reason. A read of row 3's still asleep `STEP_MS`
+//! after the vehicle's keys gets Enter pushed, and the row fails. The plan always completes. A session that
+//! stopped before row 8's keys ends on a panic report after the eight
+//! rows, because the typed script can no longer finish.
 //!
 //! Plan 8.
 
@@ -86,7 +110,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::arch::asm;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use kernel::addr::VirtAddr;
 use kernel::blk::ata::{self, Ata, BlockDevice};
@@ -95,6 +119,7 @@ use kernel::exec;
 use kernel::fs::ext2::Ext2;
 use kernel::fs::mount;
 use kernel::fs::vfs::{self, InodeRef};
+use kernel::kbd;
 use kernel::ktap;
 use kernel::pipe;
 use kernel::proc::{self, Pid};
@@ -129,7 +154,17 @@ const RAW_READY: &str = "# sboot tty-raw-ready";
 const EDIT_READY: &str = "# sboot tty-edit-ready";
 const VI_READY: &str = "# sboot tty-vi-ready";
 const VI_OPEN: &str = "# sboot tty-vi-open";
+const VI_COMMAND: &str = "# sboot tty-vi-command";
 const COOKED_READY: &str = "# sboot tty-cooked-ready";
+/// Whether the cooked-ready marker went out: the `[[script]]`'s last wait.
+/// A capture settles only once its script has finished (the engine's
+/// rule), so a session that stopped before row 8 would leave the capture
+/// to the rubric's timeout; the run ends on a panic report instead, after
+/// the eight rows, as ktest-23's does (measured 2026-10-29: a poll(-1)
+/// answered at once stopped the session at row 8's key bound and then ran
+/// a 150 s timeout out, 150.08 s; with this panic end the same kernel's
+/// capture took 41.69 s).
+static SCRIPT_CAN_FINISH: AtomicBool = AtomicBool::new(false);
 
 /// The learner's init (lab 28), and how long it has to print its hello line
 /// and fork the shell, by the PM timer.
@@ -151,6 +186,41 @@ const COOKED: [u8; 36] = [
 /// What row 3's keys send in raw mode with ICRNL and ISIG off: `q`, CR, the
 /// left arrow (`ESC [ D`), ctrl+c (0x03).
 const RAW_KEYS: &str = "710d1b5b4403";
+
+// Row 3's keys of its own (fix round 1, 2026-10-29), pushed into the
+// keyboard's ring through `kbd::push` as IRQ 1 would, each burst with
+// interrupts off: set-1 make codes (a break code types nothing, so only
+// ctrl's and c's are pushed, which change the control state).
+/// ctrl+c: left ctrl down, c, c up, ctrl up.
+const CTRL_C: [u8; 4] = [0x1d, 0x2e, 0xae, 0x9d];
+/// Step 4's first keys, x and Enter, pushed while its VMIN 21 read sleeps.
+const KEYS_FIRST: [u8; 2] = [0x2d, 0x1c];
+/// Then up, down, right, Home, End (each after the 0xe0 prefix), Esc and
+/// Backspace: with the first two, 21 bytes.
+const KEYS_REST: [u8; 12] = [0xe0, 0x48, 0xe0, 0x50, 0xe0, 0x4d, 0xe0, 0x47, 0xe0, 0x4f, 0x01, 0x0e];
+/// And behind them, in the same burst, a, b, Backspace, c, Enter: keys the
+/// read did not take, which wait in the ring and read cooked as `ac\n`.
+const AFTER: [u8; 5] = [0x1e, 0x30, 0x0e, 0x2e, 0x1c];
+const AFTER_LINE: &[u8] = b"ac\n";
+/// What step 4's read returns: x, NL (ICRNL on), `ESC [ A`, `ESC [ B`,
+/// `ESC [ C`, `ESC [ 1 ~`, `ESC [ 4 ~`, ESC, DEL.
+const KEYS_WANT: &str = "780a1b5b411b5b421b5b431b5b317e1b5b347e1b7f";
+/// Row 8's own keys, read cooked by the vehicle: a, b, x, Backspace, c,
+/// Enter — the line discipline makes them `abc\n`.
+const COOKED_KEYS: [u8; 6] = [0x1e, 0x30, 0x2d, 0x0e, 0x2e, 0x1c];
+const COOKED_LINE: &[u8] = b"abc\n";
+/// Enter, pushed when a read slept on past `STEP_MS`, so the step ends
+/// and the session goes on.
+const ENTER: [u8; 2] = [0x1c, 0x9c];
+/// How long one of ttyprobe's steps may take after its keys, by the PM
+/// timer, before the vehicle pushes Enter, and how long the vehicle's own
+/// reads of pushed keys may wait. A correct kernel answers in milliseconds,
+/// but one that times a key gate in PIT ticks waits far longer when the
+/// host starves the guest's timer: under background QoS the PIT delivered
+/// 99-106 ticks in 3000 PM-timer ms, and the honest case keys-typed-ahead's
+/// 300-tick gate took 8.5-9.1 s (20 s since 2026-10-29, slice 9 fix
+/// round 2; it was 10 s).
+const STEP_MS: u64 = 20_000;
 
 // ── Time that does not depend on the learner's tick ──────────────────────
 
@@ -324,12 +394,67 @@ fn live_with(argv: &[&str]) -> Option<Pid> {
     out
 }
 
-/// The live child of `init` running `sh` (argv[0]).
+/// Process `pid`'s task is alive and off the CPU and the run queue:
+/// asleep (ttyprobe in its read, once the line it prints before the read
+/// is out — the only sleep after that line).
+fn asleep(pid: Pid) -> bool {
+    quiet(|| match task_of(pid) {
+        Some(t) => task::with_table(|tt| tt.current != t && !tt.ready.contains(&t) && tt.get(t).is_some_and(|x| x.state != task::State::Dead)),
+        None => false,
+    })
+}
+
+/// `codes` into the keyboard's ring, as IRQ 1 would push them, with
+/// interrupts off so no typed key lands between them.
+fn push(codes: &[u8]) {
+    quiet(|| codes.iter().for_each(|&sc| kbd::push(sc)));
+}
+
+/// What a non-blocking read of the console returns now. A newline goes
+/// to the serial line after it: the read echoes what it takes (`ECHO` is
+/// on), and an echo that ends inside a line would join the next KTAP line
+/// to it (the engine skips a blank line).
+fn read_console() -> Result<Vec<u8>, String> {
+    let con = FileRef::open(FileObj::CONSOLE, O_NONBLOCK).map_err(|e| format!("FileRef::open(the console, O_NONBLOCK) returned {}", errno_text(e)))?;
+    let mut buf = [0u8; 64];
+    let r = con.read(&mut buf);
+    quiet(|| kernel::kprintln!(""));
+    match r {
+        Ok(k) => Ok(buf[..k].to_vec()),
+        Err(e) => Err(errno_text(e)),
+    }
+}
+
+/// The first answer other than -EAGAIN of non-blocking reads of the
+/// console, tried until `ms` pass by the PM timer (-EAGAIN if none came).
+/// A correct kernel may hand out pushed keys a little later than the push
+/// (the honest case keys-typed-ahead holds keys back for 300 ms), so a key
+/// the vehicle pushed is read by this, never by one read at once. One
+/// newline goes to the serial line after it, as `read_console` sends.
+fn read_console_within(ms: u64) -> Result<Vec<u8>, String> {
+    let con = FileRef::open(FileObj::CONSOLE, O_NONBLOCK).map_err(|e| format!("FileRef::open(the console, O_NONBLOCK) returned {}", errno_text(e)))?;
+    let mut buf = [0u8; 64];
+    let mut c = Clock::new();
+    let r = loop {
+        match con.read(&mut buf) {
+            Err(EAGAIN) if c.ms() < ms => sched::yield_now(),
+            r => break r,
+        }
+    };
+    quiet(|| kernel::kprintln!(""));
+    match r {
+        Ok(k) => Ok(buf[..k].to_vec()),
+        Err(e) => Err(errno_text(e)),
+    }
+}
+
+/// The live child of `init` running `sh`: argv[0] `sh` or one ending in
+/// `/sh`, as lab 28's vehicle counts it (CONTRACT §B.2-28; fix round 3).
 fn shell_of(init: Pid) -> Option<Pid> {
     let mut out = None;
     quiet(|| {
         proc::each(|p| {
-            if p.ppid == init && p.exit.is_none() && p.argv.first().map(String::as_str) == Some("sh") {
+            if p.ppid == init && p.exit.is_none() && p.argv.first().is_some_and(|a| a == "sh" || a.ends_with("/sh")) {
                 out = Some(p.pid);
             }
         })
@@ -417,6 +542,17 @@ fn count(hay: &[u8], needle: &[u8]) -> usize {
     n
 }
 
+/// Whether vi's status line shows its command mode (`-`) after it last
+/// showed insert mode (`I`): busybox's vi redraws the line, `ESC [ K` and
+/// then the mode, whenever the mode changes.
+fn back_in_command(b: &[u8]) -> bool {
+    let ins = b"\x1b[KI ";
+    match b.windows(ins.len()).rposition(|w| w == ins) {
+        Some(at) => find(&b[at..], b"\x1b[K- ").is_some(),
+        None => false,
+    }
+}
+
 /// Whether `b` holds a cursor move, `ESC [ <row> ; <col> H`.
 fn has_cursor_move(b: &[u8]) -> bool {
     let mut i = 0;
@@ -434,9 +570,9 @@ fn has_cursor_move(b: &[u8]) -> bool {
     false
 }
 
-// ── Lab 33 step 1, through a twin ────────────────────────────────────────
+// ── Lab 33 task 1, through a twin ────────────────────────────────────────
 
-/// `Console::tcgets` (lab 33 step 1) arrives with lab 33. This twin lets
+/// `Console::tcgets` (lab 33 task 1) arrives with lab 33. This twin lets
 /// the file build against the cuts before it and the learner's template
 /// (G1380's class): the inherent method wins once the cut has it, and
 /// before that this one answers 36 zero bytes, so row 1 fails as it should.
@@ -743,58 +879,267 @@ fn session(w: &Words) {
     interactive(&mut sh, w);
 }
 
-/// Row 3: raw keys. False when the session cannot go on.
+/// One of ttyprobe's raw answers, `ttyprobe raw <step> = <answer> <hex>
+/// [<runs> <early>] <nonce>`: the answer (a count, or minus the errno),
+/// the bytes (`-` for none) and the step's extra words.
+struct Answer {
+    ret: i64,
+    hex: String,
+    extra: Vec<String>,
+}
+
+impl Answer {
+    fn text(&self) -> String {
+        if self.ret < 0 {
+            errno_text(-self.ret)
+        } else if self.ret == 0 {
+            String::from("0 bytes")
+        } else {
+            format!("{} byte(s), {}", self.ret, self.hex)
+        }
+    }
+}
+
+fn answer_of(text: &str, step: &str, nonce: &str) -> Option<Answer> {
+    let head = format!("ttyprobe raw {step} = ");
+    let line = text.lines().find_map(|l| l.strip_prefix(head.as_str()))?;
+    let mut words: Vec<&str> = line.split(' ').collect();
+    if words.last() != Some(&nonce) || words.len() < 3 {
+        return None;
+    }
+    words.pop();
+    Some(Answer { ret: words[0].parse().ok()?, hex: String::from(words[1]), extra: words[2..].iter().map(|w| String::from(*w)).collect() })
+}
+
+/// Whether `seg` holds the line `line` (whole, at a line start).
+fn has_line(seg: &[u8], line: &str) -> bool {
+    let l = line.as_bytes();
+    seg.starts_with(l) || seg.windows(l.len() + 1).any(|w| w[0] == b'\n' && &w[1..] == l)
+}
+
+/// Row 3: raw reads, in four steps of `ttyprobe raw`. False when the
+/// session cannot go on.
+///
+/// 1. The script's q, Enter, left and ctrl+c, typed once the raw-ready
+///    marker is out, read with O_NONBLOCK, ICRNL and ISIG off.
+/// 2. VMIN 0 with nothing typed: 0 bytes at once.
+/// 3. ISIG on: once ttyprobe sleeps in its read, the vehicle pushes ctrl+c;
+///    SIGINT ends the read, -EINTR, its handler run once.
+/// 4. VMIN 21, ICRNL on: once ttyprobe sleeps in its read the vehicle
+///    pushes x and Enter, and once it sleeps again (2 bytes are fewer than
+///    VMIN) the other seven keys and, behind them, a, b, Backspace, c,
+///    Enter; one read returns the 21 bytes and leaves the last five keys in
+///    the ring, where line mode reads them as `ac\n` after the row.
+///
+/// A step whose read is still asleep `STEP_MS` after its keys (step 2: after
+/// its line) gets Enter pushed, so the session goes on, and the row fails
+/// whatever that read answered: a correct read answers at once (step 2) or
+/// as soon as its keys or its signal are there (amended 2026-10-29, slice 9
+/// fix round 2, the robust lens's F1: a VMIN 0 read that slept until a key
+/// came and then answered 0 scored full marks). The failure says `only once
+/// Enter was typed for it` only where the read slept past an answer it had:
+/// step 2, or step 4 with the 21 bytes right; step 3's own text says what
+/// the signal did (fix round 3: a read that waited for keys that never
+/// came, or a signal that never ended the sleep, read as the first cause).
 fn raw_row(sh: &mut Sh, w: &Words) -> bool {
     let n = 3;
     let mut r = Row::new(RAW_ID);
     let from = sh.out.len();
-    let ready = format!("ttyprobe raw ready {:016x}\n", w.raw);
-    if let Err(why) = sh.send(&format!("ttyprobe raw {:016x}\necho ':q{n}:'\n", w.raw)) {
+    let nonce = format!("{:016x}", w.raw);
+    let ready = format!("ttyprobe raw ready {nonce}\n");
+    if let Err(why) = sh.send(&format!("ttyprobe raw {nonce}\necho ':q{n}:'\n")) {
         r.fail(format_args!("{why}"));
         r.finish(n);
         return false;
     }
-    if !sh.until(GROUP_MS, |s| find(&s.out[from..], ready.as_bytes()).is_some() || find(&s.out[from..], b":q3:\n").is_some()) {
+    let end = |s: &Sh| has_line(&s.out[from..], ":q3:");
+    if !sh.until(GROUP_MS, |s| find(&s.out[from..], ready.as_bytes()).is_some() || end(s)) {
         forward(&sh.out[from..]);
         r.fail(format_args!("`ttyprobe raw` printed no ready line within {GROUP_MS} ms by the PM timer"));
         sh.stopped = Some(String::from("row 3's ttyprobe never got ready"));
         r.finish(n);
         return false;
     }
+    let probe = live_with(&["ttyprobe", "raw"]).unwrap_or(Pid(0));
     quiet(|| kernel::kprintln!("{RAW_READY}"));
-    let g = sh.collect(n, from, KEYS_MS);
-    let want = format!("{ready}ttyprobe raw {RAW_KEYS} {:016x}\n", w.raw);
-    match &g {
-        Ok(got) if got.as_slice() != want.as_bytes() => {
-            let text = String::from_utf8_lossy(got);
-            let keys = text.lines().find_map(|l| l.strip_prefix("ttyprobe raw ").filter(|k| !k.starts_with("ready")).map(|k| String::from(k.split(' ').next().unwrap_or(""))));
-            match keys {
-                Some(k) => r.fail(format_args!(
-                    "with ICANON, ECHO, ISIG and ICRNL off and VMIN 1, the keys q, Enter, left, ctrl+c read as {k:?}; on Linux they are {RAW_KEYS:?}: each byte as it comes, Enter a CR (0x0d, ICRNL off), the left arrow ESC [ D, ctrl+c the byte 0x03 (ISIG off: no SIGINT)"
-                )),
-                None => r.fail(format_args!(
-                    "group {n} printed {text:?}; on Linux it prints {want:?} — ttyprobe ended without its result line (ctrl+c with ISIG off is a byte, not SIGINT)"
-                )),
+
+    // Step 1: the script types; step 2 starts once ttyprobe has six bytes
+    // or gave up.
+    let start2 = format!("ttyprobe raw vmin0 {nonce}");
+    let mut late: Vec<&str> = Vec::new();
+    let mut stuck = false;
+    if !sh.until(KEYS_MS, |s| has_line(&s.out[from..], &start2) || end(s)) {
+        stuck = true;
+    }
+    // Step 2: nothing to push.
+    if !stuck && !end(sh) && !sh.until(STEP_MS, |s| find(&s.out[from..], b"ttyprobe raw vmin0 = ").is_some() || end(s)) {
+        push(&ENTER);
+        late.push("vmin0");
+    }
+    // Step 3: ctrl+c once the read sleeps.
+    let start3 = format!("ttyprobe raw isig {nonce}");
+    let isig_done = |s: &Sh| find(&s.out[from..], b"ttyprobe raw isig = ").is_some() || end(s);
+    if !stuck && sh.until(GROUP_MS, |s| has_line(&s.out[from..], &start3) || end(s)) && !end(sh) {
+        sh.until(STEP_MS, |s| asleep(probe) || isig_done(s));
+        if !isig_done(sh) {
+            push(&CTRL_C);
+            if !sh.until(STEP_MS, isig_done) {
+                push(&ENTER);
+                late.push("isig");
             }
         }
-        Ok(_) => {}
-        Err(why) => r.fail(format_args!("{why}")),
+    }
+    // Step 4: x and Enter once the read sleeps, the rest once it sleeps again.
+    let start4 = format!("ttyprobe raw keys {nonce}");
+    let keys_done = |s: &Sh| find(&s.out[from..], b"ttyprobe raw keys = ").is_some() || end(s);
+    let mut after = false;
+    if !stuck && sh.until(GROUP_MS, |s| has_line(&s.out[from..], &start4) || end(s)) && !end(sh) {
+        sh.until(STEP_MS, |s| asleep(probe) || keys_done(s));
+        if !keys_done(sh) {
+            push(&KEYS_FIRST);
+            sched::yield_now();
+            sh.until(STEP_MS, |s| asleep(probe) || keys_done(s));
+        }
+        if !keys_done(sh) {
+            let mut rest = Vec::from(KEYS_REST);
+            rest.extend_from_slice(&AFTER);
+            push(&rest);
+            after = true;
+            if !sh.until(STEP_MS, keys_done) {
+                push(&[ENTER; 21].concat());
+                late.push("keys");
+            }
+        }
+    }
+    let g = sh.collect(n, from, GROUP_MS);
+    let text = match &g {
+        Ok(got) => String::from_utf8_lossy(got).into_owned(),
+        Err(why) => {
+            r.fail(format_args!("{why}"));
+            String::new()
+        }
+    };
+    let pushed = |step: &str| if late.contains(&step) { format!(" only once Enter was typed for it, the read still asleep {STEP_MS} ms on by the PM timer") } else { String::new() };
+
+    // Step 1.
+    let keys = text.lines().find_map(|l| {
+        let rest = l.strip_prefix("ttyprobe raw ")?;
+        let (k, tail) = rest.split_once(' ')?;
+        (tail == nonce && k.bytes().all(|b| b.is_ascii_hexdigit())).then(|| String::from(k))
+    });
+    match &keys {
+        Some(k) if k == RAW_KEYS => {}
+        Some(k) => r.fail(format_args!(
+            "with ICANON, ECHO, ISIG and ICRNL off and VMIN 1, the keys q, Enter, left, ctrl+c read as {k:?}; on Linux they are {RAW_KEYS:?}: each byte as it comes, Enter a CR (0x0d, ICRNL off), the left arrow ESC [ D, ctrl+c the byte 0x03 (ISIG off: no SIGINT)"
+        )),
+        None if g.is_ok() => r.fail(format_args!(
+            "group {n} printed {text:?}: ttyprobe ended without the line of the keys it read (ctrl+c with ISIG off is a byte, not SIGINT)"
+        )),
+        None => {}
+    }
+    if stuck {
+        r.fail(format_args!("the keys q, Enter, left, ctrl+c were typed and `ttyprobe raw` had not finished reading them within {KEYS_MS} ms by the PM timer"));
+    }
+    // Step 2.
+    match answer_of(&text, "vmin0", &nonce) {
+        Some(a) if a.ret == 0 && !late.contains(&"vmin0") => {}
+        Some(a) => r.fail(format_args!(
+            "with VMIN 0 and nothing typed, a raw read of 32 bytes on a file opened without O_NONBLOCK answered {}{}; VMIN 0 asks for no byte, so the read returns what is there, 0 bytes, at once",
+            a.text(),
+            pushed("vmin0")
+        )),
+        None if keys.is_some() => r.fail(format_args!("group {n} printed {text:?}: ttyprobe ended before the answer of its VMIN 0 read")),
+        None => {}
+    }
+    // Step 3.
+    match answer_of(&text, "isig", &nonce) {
+        Some(a) => {
+            let runs = a.extra.first().map(String::as_str).unwrap_or("?");
+            let early = a.extra.get(1).map(String::as_str) == Some("1");
+            if runs != "1" || (a.ret != -4 && !early) || late.contains(&"isig") {
+                let what = if a.ret == -4 && runs == "1" {
+                    String::from("SIGINT ended the read only once a key woke it: sending a signal ends a raw read's sleep as it ends a cooked one's")
+                } else if a.ret > 0 && a.hex == "03" {
+                    String::from("ctrl+c reached the read as the byte 0x03: with ISIG on it is SIGINT, not a byte")
+                } else if a.ret == -11 {
+                    String::from("a raw read with nothing typed, on a file opened without O_NONBLOCK, does not answer -EAGAIN: it sleeps until VMIN bytes come or a signal ends it")
+                } else if a.ret == 0 {
+                    String::from("the read returned 0 bytes before ctrl+c came: only VMIN 0 answers 0 bytes, and VMIN is 1 here (c_cc[6], byte 23 of the struct)")
+                } else if a.ret > 0 && runs == "1" {
+                    String::from("SIGINT came and its handler ran, but the read slept on: a signal ends a raw read's sleep as it ends a cooked one's (-EINTR, the handler has no SA_RESTART)")
+                } else if runs == "0" {
+                    String::from("ctrl+c sent no SIGINT to the program holding the console")
+                } else {
+                    format!("the handler ran {runs} time(s); ctrl+c sends SIGINT once, and it ends the read with -EINTR")
+                };
+                r.fail(format_args!(
+                    "with ISIG on and a SIGINT handler (no SA_RESTART), a blocking raw read with nothing typed got ctrl+c and answered {}: {what}",
+                    a.text()
+                ));
+            }
+        }
+        None if answer_of(&text, "vmin0", &nonce).is_some() => r.fail(format_args!("group {n} printed {text:?}: ttyprobe ended before the answer of its read with ISIG on")),
+        None => {}
+    }
+    // Step 4.
+    match answer_of(&text, "keys", &nonce) {
+        Some(a) if a.ret == 21 && a.hex == KEYS_WANT && !late.contains(&"keys") => {}
+        Some(a) => {
+            let what = if a.ret == 21 && a.hex == KEYS_WANT {
+                String::from("the 21 bytes were there and the read slept on: a raw read returns once VMIN bytes are there")
+            } else if a.ret == 0 {
+                String::from("only VMIN 0 answers 0 bytes, and VMIN is 21 here (c_cc[6], byte 23 of the struct)")
+            } else if a.ret > 0 && a.ret < 21 && !late.contains(&"keys") {
+                String::from("it returned before 21 bytes were there: a raw read sleeps until VMIN bytes are there (VMIN is c_cc[6], byte 23 of the struct)")
+            } else if a.ret == 21 && a.hex.get(2..4) == Some("0d") {
+                String::from("Enter read as CR with ICRNL on, which makes it NL (0x0a)")
+            } else {
+                format!("a Linux console sends {KEYS_WANT:?}: x, NL (ICRNL on), ESC [ A, ESC [ B, ESC [ C, ESC [ 1 ~, ESC [ 4 ~, ESC, DEL")
+            };
+            r.fail(format_args!(
+                "with ISIG off, ICRNL on and VMIN 21, one raw read of 21 bytes, while x, Enter, up, down, right, Home, End, Esc and Backspace were typed, answered {}{}: {what}",
+                a.text(),
+                if a.ret == 21 && a.hex == KEYS_WANT { pushed("keys") } else { String::new() }
+            ));
+        }
+        None if answer_of(&text, "isig", &nonce).is_some() => r.fail(format_args!("group {n} printed {text:?}: ttyprobe ended before the answer of its VMIN 21 read")),
+        None => {}
+    }
+    // The whole group, line for line: nothing printed twice or between.
+    if !r.failed && g.is_ok() {
+        let isig = text.lines().find(|l| l.starts_with("ttyprobe raw isig = ")).unwrap_or("");
+        let want = format!(
+            "{ready}ttyprobe raw {RAW_KEYS} {nonce}\n{start2}\nttyprobe raw vmin0 = 0 - {nonce}\n{start3}\n{isig}\n{start4}\nttyprobe raw keys = 21 {KEYS_WANT} {nonce}\n"
+        );
+        if text != want {
+            r.fail(format_args!("group {n} printed {text:?}; on Linux the same program prints {want:?}"));
+        }
     }
     cooked_check(&mut r, "after `ttyprobe raw` set its first termios back");
-    // Nothing typed is left over.
-    match FileRef::open(FileObj::CONSOLE, O_NONBLOCK) {
-        Ok(con) => {
-            let mut buf = [0u8; 64];
-            match con.read(&mut buf) {
-                Err(EAGAIN) => {}
-                Ok(k) => r.fail(format_args!(
-                    "after row 3 a non-blocking read of the console returned {:?}: ttyprobe read every key typed, so nothing is waiting (-EAGAIN)",
-                    String::from_utf8_lossy(&buf[..k])
-                )),
-                Err(e) => r.fail(format_args!("a non-blocking read of the console after row 3 returned {}; nothing is waiting, so -EAGAIN", errno_text(e))),
-            }
+    // The keys behind step 4's: still in the ring, read in line mode now.
+    if after && late.is_empty() {
+        match read_console_within(STEP_MS) {
+            Ok(got) if got == AFTER_LINE => match read_console() {
+                Err(e) if e == errno_text(EAGAIN) => {}
+                Ok(more) => r.fail(format_args!("after row 3's line `ac`, a second non-blocking read of the console returned {:?}: nothing else was typed, so -EAGAIN", String::from_utf8_lossy(&more))),
+                Err(e) => r.fail(format_args!("after row 3's line `ac`, a second non-blocking read of the console returned {e}; nothing else was typed, so -EAGAIN")),
+            },
+            Ok(got) => r.fail(format_args!(
+                "after row 3, the keys a, b, Backspace, c and Enter, pushed behind the 21 bytes ttyprobe's last raw read asked for, read cooked as {:?}: keys a raw read did not take stay in the ring for whatever reads next, so line mode edits them into {:?}",
+                String::from_utf8_lossy(&got),
+                String::from_utf8_lossy(AFTER_LINE)
+            )),
+            Err(e) => r.fail(format_args!(
+                "after row 3, non-blocking reads of the console for {STEP_MS} ms by the PM timer returned {e}; a, b, Backspace, c and Enter, pushed behind the 21 bytes ttyprobe's last raw read asked for, stay in the ring and read cooked as {:?}",
+                String::from_utf8_lossy(AFTER_LINE)
+            )),
         }
-        Err(e) => r.fail(format_args!("FileRef::open(the console, O_NONBLOCK) returned {}", errno_text(e))),
+    } else if !after && late.is_empty() {
+        match read_console() {
+            Err(e) if e == errno_text(EAGAIN) => {}
+            Ok(k) => r.fail(format_args!("after row 3 a non-blocking read of the console returned {:?}: ttyprobe read every key typed, so nothing is waiting (-EAGAIN)", String::from_utf8_lossy(&k))),
+            Err(e) => r.fail(format_args!("a non-blocking read of the console after row 3 returned {e}; nothing is waiting, so -EAGAIN")),
+        }
     }
     r.finish(n);
     g.is_ok()
@@ -884,6 +1229,18 @@ fn interactive(sh: &mut Sh, w: &Words) {
     }
     let vi = live_with(&["vi"]).unwrap_or(Pid(0));
     quiet(|| kernel::kprintln!("{VI_OPEN}"));
+    // `:wq` only once vi is out of insert mode: Esc must reach it alone.
+    if !sh.until(KEYS_MS, |s| back_in_command(&s.out[from7..])) {
+        forward(&sh.out[from7..]);
+        r.fail(format_args!(
+            "after `dd`, `G`, `o`, `vi` and Esc, vi (pid {}) showed no return to its command mode within {KEYS_MS} ms: Esc reaches a raw-mode reader as the one byte 0x1b, and vi takes a lone ESC once nothing follows it",
+            vi.0
+        ));
+        r.finish(7);
+        sh.stopped = Some(String::from("row 7's vi never left insert mode"));
+        return fail_rest(8, "not run: vi did not leave insert mode");
+    }
+    quiet(|| kernel::kprintln!("{VI_COMMAND}"));
     let base = count(&sh.out[from7..], p);
     let closed = sh.until(KEYS_MS, |s| live_with(&["vi"]).is_none() && count(&s.out[from7..], p) > base);
     let shown = sh.out[from7..].to_vec();
@@ -917,6 +1274,7 @@ fn interactive(sh: &mut Sh, w: &Words) {
         return fail_rest(8, "not run: vi did not end");
     }
     let from8 = sh.out.len();
+    SCRIPT_CAN_FINISH.store(true, Ordering::Relaxed);
     quiet(|| kernel::kprintln!("{COOKED_READY}"));
 
     // Row 8: cooked again.
@@ -938,6 +1296,23 @@ fn interactive(sh: &mut Sh, w: &Words) {
     if !done {
         r.finish(8);
         return;
+    }
+    // Line mode read by a reader that edits nothing itself (ash's `read`
+    // edits on its own, so it cannot tell): the vehicle's keys, a cooked
+    // line with an erase in it, in the first non-blocking read that is not
+    // -EAGAIN.
+    push(&COOKED_KEYS);
+    match read_console_within(STEP_MS) {
+        Ok(got) if got == COOKED_LINE => {}
+        Ok(got) => r.fail(format_args!(
+            "after the interactive shell exited, the keys a, b, x, Backspace, c, Enter read from the console by a non-blocking read as {:?}; line mode hands out the finished line in one read, the Backspace applied: {:?}",
+            String::from_utf8_lossy(&got),
+            String::from_utf8_lossy(COOKED_LINE)
+        )),
+        Err(e) => r.fail(format_args!(
+            "after the interactive shell exited, non-blocking reads of the console for {STEP_MS} ms by the PM timer, with a, b, x, Backspace, c, Enter typed, returned {e}; line mode hands out the finished line {:?}",
+            String::from_utf8_lossy(COOKED_LINE)
+        )),
     }
     let _ = sh.collect(7, from8, GROUP_MS);
     r.finish(8);
@@ -1001,6 +1376,11 @@ unsafe extern "C" fn _start() -> ! {
     match mount_all() {
         Err(why) => fail_rest(1, &format!("not run: the file systems did not mount: {why}")),
         Ok(()) => session(&words()),
+    }
+    if !SCRIPT_CAN_FINISH.load(Ordering::Relaxed) {
+        // The rows are out; the script waits for a marker that will never
+        // come, so end the capture on the panic report.
+        panic!("the typed script cannot finish (the session stopped before row 8's keys); the eight rows above are this run's result");
     }
     irq_off();
     ktap::end();

@@ -42,31 +42,32 @@ fn main(args: Args) -> i32 {
     }
 }
 
-/// Step 1: print `init: key <16 hex digits>`, `derive(argv[1], "init.nonce.line")`.
+/// Task 1: print `init: key <16 hex digits>`, `derive(argv[1], "init.nonce.line")`.
 fn hello(args: &Args) {
     let _ = args;
-    todo!("lab 28 step 1 — hello: print the key line derived from the nonce in argv[1]")
+    todo!("lab 28 task 1 — hello: print the key line derived from the nonce in argv[1]")
 }
 
-/// Step 2: mount "proc" on `/proc` and "devfs" on `/dev`.
+/// Task 2: mount "proc" on `/proc` and "devfs" on `/dev`.
 fn mount_all() {
-    todo!("lab 28 step 2 — mount_all: mount /proc and /dev")
+    todo!("lab 28 task 2 — mount_all: mount /proc and /dev")
 }
 
-/// Step 3: fork; the child execs `/bin/sh`. Return the shell's pid.
+/// Task 3: fork; the child execs `/bin/sh`. Return the shell's pid.
 fn start_shell() -> i32 {
-    todo!("lab 28 step 3 — start_shell: fork, and exec /bin/sh in the child")
+    todo!("lab 28 task 3 — start_shell: fork, and exec /bin/sh in the child")
 }
 
-/// Step 4: `wait4(-1)` until the child that ends is `shell`; reap every
+/// Task 4: `wait4(-1)` until the child that ends is `shell`; reap every
 /// other child on the way. Return the shell's status.
 fn reap_until(shell: i32) -> WaitStatus {
     let _ = shell;
-    todo!("lab 28 step 4 — reap_until: wait for any child until the shell ends")
+    todo!("lab 28 task 4 — reap_until: wait for any child until the shell ends")
 }
 
-/// Step 5: the shell ended — start another, and return its pid.
+/// Task 5: the shell ended — first print `init: sh (pid <old>) ended, <status>; …`
+/// on fd 1, then start another, and return its pid.
 fn respawn(old: i32, status: WaitStatus) -> i32 {
     let _ = (old, status);
-    todo!("lab 28 step 5 — respawn: start a new shell when the old one ends")
+    todo!("lab 28 task 5 — respawn: start a new shell when the old one ends")
 }

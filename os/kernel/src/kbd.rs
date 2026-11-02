@@ -53,12 +53,12 @@ pub fn to_keycode(sc: u8) -> Option<u16> {
     todo!("lab 26 step 1 — to_keycode: a set-1 scancode to Linux's KEY_* number")
 }
 
-/// Lab 33 step 4: the bytes one scancode sends to a raw-mode reader, as the
+/// Lab 33 task 4: the bytes one scancode sends to a raw-mode reader, as the
 /// Linux console sends them, into `out`; the count (0 for a prefix, a break
 /// code, a modifier). Esc 0x1b, Enter CR, Backspace DEL; after the 0xe0
 /// prefix up, down, right, left `ESC [ A`/`B`/`C`/`D`, Home `ESC [ 1 ~`,
 /// End `ESC [ 4 ~`; any other key what `translate` types (ctrl+c 0x03).
 pub fn vt100(sc: u8, out: &mut [u8; 4]) -> usize {
     let _ = (sc, out);
-    todo!("lab 33 step 4 — vt100: what the Linux console sends for this key: ESC, CR, DEL, ESC [ A..D, ESC [ 1 ~, ESC [ 4 ~")
+    todo!("lab 33 task 4 — vt100: what the Linux console sends for this key: ESC, CR, DEL, ESC [ A..D, ESC [ 1 ~, ESC [ 4 ~")
 }

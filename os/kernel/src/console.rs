@@ -215,36 +215,36 @@ pub fn interrupt() -> bool {
 }
 
 impl Console {
-    /// Lab 33 step 1: the termios `TCGETS` writes — Linux's 36-byte
+    /// Lab 33 task 1: the termios `TCGETS` writes — Linux's 36-byte
     /// `struct termios` (`c_iflag`, `c_oflag`, `c_cflag`, `c_lflag`,
     /// `c_line`, `c_cc[19]`), `tc::COOKED` until a `TCSETS` replaced it.
     pub fn tcgets(&self) -> [u8; 36] {
-        todo!("lab 33 step 1 — Console::tcgets: the console's termios, Linux's 36 bytes, cooked until TCSETS changed it")
+        todo!("lab 33 task 1 — Console::tcgets: the console's termios, Linux's 36 bytes, cooked until TCSETS changed it")
     }
 
-    /// Lab 33 step 2: `TCSETS` — the console's termios is now `t`, for
+    /// Lab 33 task 2: `TCSETS` — the console's termios is now `t`, for
     /// every open file on it, from the next key read.
     pub fn tcsets(&self, t: &[u8; 36]) {
         let _ = t;
-        todo!("lab 33 step 2 — Console::tcsets: the 36 bytes are the console's termios now")
+        todo!("lab 33 task 2 — Console::tcsets: the 36 bytes are the console's termios now")
     }
 
-    /// Lab 33 step 3: `read` with `ICANON` off — keys as they come, no line
+    /// Lab 33 task 3: `read` with `ICANON` off — keys as they come, no line
     /// and no editing: until `VMIN` bytes are there (what there is when it
     /// is 0), CR made NL under `ICRNL`, echoed under `ECHO`; keys typed
     /// beyond what the read takes stay in the ring.
     pub fn read_raw(&self, of: &OpenFile, buf: &mut [u8]) -> Result<usize, Errno> {
         let _ = (of, buf);
-        todo!("lab 33 step 3 — Console::read_raw: keys as they come, until VMIN bytes; ICRNL, ECHO; the rest stays in the ring")
+        todo!("lab 33 task 3 — Console::read_raw: keys as they come, until VMIN bytes; ICRNL, ECHO; the rest stays in the ring")
     }
 }
 
 impl OpenFile {
-    /// Lab 33 step 6: `ftruncate` (77) — the file is now `len` bytes, cut
+    /// Lab 33 task 6: `ftruncate` (77) — the file is now `len` bytes, cut
     /// or grown with zeros; only a regular file opened for writing,
     /// `-EINVAL` for anything else.
     pub fn truncate(&self, len: u64) -> Result<(), Errno> {
         let _ = len;
-        todo!("lab 33 step 6 — OpenFile::truncate: a regular file open for writing is len bytes now; anything else EINVAL")
+        todo!("lab 33 task 6 — OpenFile::truncate: a regular file open for writing is len bytes now; anything else EINVAL")
     }
 }

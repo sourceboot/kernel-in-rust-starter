@@ -41,9 +41,17 @@
 //! first key not echoed in time is noted, and the second prompt goes out as
 //! `$~ `; the line's echo is then forwarded as it came. The second prompt is
 //! held until `# sboot keys-ready` has been printed, which is the rubric
-//! script's first `wait`; the script then types one command group at a time
-//! and waits for that group's last line, the shell's own `echo $? "q"N` (the
-//! quotes keep `qN` out of the echo). The shell ends on `exit`; the rows are
+//! script's first `wait`; the script then types one command group at a time,
+//! each ending with `echo $? "q"N`, and waits for `# sboot mark-N`, a line
+//! this file prints on the serial line right after the tee has forwarded that
+//! command's whole output `<status> qN` (marker 1, `echo "q"1`, prints `q1`).
+//! The waits are this file's lines, not the shell's (G1844, ruled 2026-10-29
+//! 12:18): an engine `wait` matches the serial from its first byte, so a
+//! short `qN` was met by a kernel's own log line (`irq2`, `irq3`) before the
+//! shell had run the group. `# sboot mark-N` holds a space and a `-`, which
+//! are in neither the drawn first-line word's alphabet nor the nonce's hex,
+//! and no typed key, no program and no plausible log line prints it. The
+//! shell ends on `exit`; the rows are
 //! judged on what came through the tee, split at each prompt (`$ `) into one
 //! segment per command typed.
 //!
@@ -118,8 +126,9 @@
 //! timer; a script that stalls leaves the rows to say which marker never came.
 //!
 //! A run that ends without all eight markers can never finish the typed
-//! script — each marker is one of its `wait`s, and the engine counts `# sboot
-//! end` only once the script has run out — so it would wait out the rubric's
+//! script — each marker's `# sboot mark-N` is one of its `wait`s, and the
+//! engine counts `# sboot end` only once the script has run out — so it
+//! would wait out the rubric's
 //! whole timeout. Instead, after the seven rows, this file panics through the
 //! course's panic path (lab 03's `report`): the engine also ends a capture on
 //! a complete panic report. A run with every marker ends on `# sboot end`.
@@ -662,8 +671,13 @@ fn first_line(seed: u64) -> (Vec<(u8, Option<u8>)>, String) {
     for (k, c) in [(0x12, b'e'), (0x2e, b'c'), (0x23, b'h'), (0x18, b'o'), (0x39, b' ')] {
         tap(&mut sc, k, c);
     }
-    // Letters and digits; shift+4 (`$`) would be the shell's.
-    let pool: Vec<u8> = (0x02..=0x35u8).filter(|&k| plain_shifted(k).is_some_and(|(p, _)| p.is_ascii_alphanumeric())).collect();
+    // Letters and digits; shift+4 (`$`) would be the shell's. No `q` (G1843,
+    // 2026-10-29): the script then waited for the shell's markers
+    // `q1`..`q8`, an engine `wait` matches the serial from its first byte,
+    // and this line's echo is on it, so a word holding `q3` met that wait
+    // early. The waits are this file's `# sboot mark-N` since G1844, and the
+    // pool stays without `q` (ruled 2026-10-29 12:18).
+    let pool: Vec<u8> = (0x02..=0x35u8).filter(|&k| plain_shifted(k).is_some_and(|(p, _)| p.is_ascii_alphanumeric() && p != b'q')).collect();
     let letters = row_keys(true);
     let wrong_at = 1 + d.below(8);
     let mut word = String::new();
@@ -707,6 +721,13 @@ struct Tee {
     /// Why the first line was not echoed key by key, once its check is
     /// over: the second prompt then goes out as `$~ `.
     unechoed: Option<String>,
+    /// The shell's current line, since its last `\n` or `$ `.
+    line: Vec<u8>,
+    /// Whether `line` started at a `$ `: the first line of a segment, as
+    /// `segments` splits them.
+    fresh: bool,
+    /// The markers whose `# sboot mark-N` line is out.
+    marks: u32,
 }
 
 impl Tee {
@@ -741,12 +762,29 @@ impl Tee {
                         self.send(&first);
                         w.clear();
                     }
+                    self.line.clear();
+                    self.fresh = true;
                     continue;
                 }
             }
             w.push(b);
             if b == b'\n' {
                 self.at_start = true;
+                self.line.push(b);
+                // The next marker's line as a whole segment: its `# sboot
+                // mark-N` follows it, on a line of its own (G1844).
+                if self.fresh && self.marks < 8 && marker_line(&self.line, self.marks + 1).is_some() {
+                    self.marks += 1;
+                    w.extend_from_slice(format!("# sboot mark-{}\n", self.marks).as_bytes());
+                }
+                self.line.clear();
+                self.fresh = false;
+            } else if b == b' ' && self.line.last() == Some(&b'$') {
+                // A `$ ` inside a line ends a segment too, as `segments` reads it.
+                self.line.clear();
+                self.fresh = true;
+            } else {
+                self.line.push(b);
             }
         }
         match self.held.as_mut() {
@@ -936,7 +974,7 @@ fn session(words: &Words, line: &[(u8, Option<u8>)]) -> Result<Session, String> 
     let sh = start_with("/bin/sh", || exec::spawn("/bin/sh", &["sh"], &envp), &[(1, &w), (2, &w)]);
     drop(w);
     let sh = sh?;
-    let mut tee = Tee { at_start: true, dollar: false, prompts: 0, held: None, last: None, unechoed: None };
+    let mut tee = Tee { at_start: true, dollar: false, prompts: 0, held: None, last: None, unechoed: None, line: Vec::new(), fresh: false, marks: 0 };
     // The first line's scancodes go in one per turn of the loop once the
     // first prompt is out, each after the last one's echo, so the shell
     // takes them as they come.
@@ -1043,9 +1081,9 @@ fn session(words: &Words, line: &[(u8, Option<u8>)]) -> Result<Session, String> 
 }
 
 /// Why the typed script cannot have run out, or `None` if it did: its waits
-/// after the first are markers 1 to 8, in order (marker 1 is `echo "q"1`'s
-/// own line, `q1`), and nothing is typed after the `exit` that follows
-/// marker 8.
+/// after the first are markers 1 to 8, in order, each by the `# sboot
+/// mark-N` the tee prints after it (marker 1 is `echo "q"1`'s own line,
+/// `q1`), and nothing is typed after the `exit` that follows marker 8.
 fn unfinished(s: &Session, segs: &[&[u8]]) -> Option<String> {
     let first = segs.iter().any(|g| *g == b"q1\n");
     let missing = if first { (2..=8).find(|&n| marker(segs, n).is_none())? } else { 1 };
@@ -1076,16 +1114,24 @@ fn segments(out: &[u8]) -> Vec<&[u8]> {
     segs
 }
 
-/// The segment that is marker N's `echo $? "q"N`: `<status> qN\n`. Its
-/// index and the status it showed. No note this file prints names a marker
-/// as `q` and its number: the script's waits would take it for the shell's.
+/// Whether one segment (what the shell printed after a prompt) is marker
+/// N's line, and the status it showed: `q1\n` for marker 1 (`echo "q"1`,
+/// status 0), `<status> qN\n` for marker N's `echo $? "q"N`. The tee prints
+/// `# sboot mark-N`, the script's wait, when the line holds; the rows read
+/// the markers themselves (`marker`). No note this file prints holds `sboot
+/// mark-`: the script's waits would take it for a marker.
+fn marker_line(seg: &[u8], n: u32) -> Option<u32> {
+    if n == 1 {
+        return (seg == b"q1\n").then_some(0);
+    }
+    let s = core::str::from_utf8(seg).ok()?;
+    s.strip_suffix(&format!(" q{n}\n"))?.parse().ok()
+}
+
+/// The segment that is marker N's `echo $? "q"N` (`marker_line`): its
+/// index and the status it showed.
 fn marker(segs: &[&[u8]], n: u32) -> Option<(usize, u32)> {
-    let tail = format!(" q{n}\n");
-    segs.iter().enumerate().find_map(|(i, s)| {
-        let s = core::str::from_utf8(s).ok()?;
-        let status = s.strip_suffix(&tail)?;
-        Some((i, status.parse().ok()?))
-    })
+    segs.iter().enumerate().find_map(|(i, s)| Some((i, marker_line(s, n)?)))
 }
 
 /// Marker N, its `$?` expected to be `want`, and the `before` commands

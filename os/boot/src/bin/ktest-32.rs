@@ -21,9 +21,10 @@
 //!
 //!   1 `sig.trap.usr1` (derived) — `trap '…' USR1; kill -USR1 $$`: the
 //!     handler ash installed runs, then the next command.
-//!   2 `sig.chld.wakes.wait` (derived) — `sleep 2 & wait`: ash's `wait`
+//!   2 `sig.chld.wakes.wait` (derived) — `sleep 1 & wait`: ash's `wait`
 //!     sleeps in `rt_sigsuspend` until SIGCHLD, which the kernel sends the
-//!     parent when a child ends. Its own bound, `CHLD_MS`: a wait that never
+//!     parent when a child ends. Its own bound, `CHLD_TICKS` of the guest's
+//!     timer under a `CHLD_MS` ceiling by the PM timer: a wait that never
 //!     returns ends the run here (the rest of the rows fail, with that reason).
 //!   3 `sig.int.ctrl_c` (derived) — an interactive shell that opened the
 //!     console as fd 3 (`sh -c 'exec 3</dev/console; exec sh -i +m'`: the
@@ -45,12 +46,50 @@
 //!   6 `sig.sigsuspend.eintr` (derived) — `sigregs suspend <hex>`:
 //!     `rt_sigsuspend` returns -1/EINTR once the handler ran, and the mask it
 //!     replaced is back.
+//!   7 `sig.sigreturn.rflags` (derived; added 2026-10-29, slice 9) —
+//!     `sigregs rflags <hex>`: a handler writes IOPL 3, IF clear, NT set, DF
+//!     set and the arithmetic flags (a pattern from the nonce) into the
+//!     frame's eflags; after `rt_sigreturn` DF and the arithmetic flags are
+//!     the frame's (FIX_EFLAGS) and IOPL, IF and NT are what they were.
+//!     Since fix round 1 (2026-10-29) the handler also finds its own signal
+//!     and its action's `sa_mask` blocked and its frame 16-aligned as after
+//!     a `call`, and the mask after `rt_sigreturn` is the program's again
+//!     (since fix round 2, a mask the program set empty, so a bit of the
+//!     handler's mask left behind shows).
+//!   8 `sig.sigreturn.ring3` (derived; added 2026-10-29, slice 9) —
+//!     `sigregs ring3 <hex>`: frames forged with rsp, then rip, in the
+//!     kernel half end their program with SIGSEGV, and one with ring 0's cs
+//!     and ss goes on in ring 3 or ends with SIGSEGV. Beside the bytes, the
+//!     vehicle watches the group's faults: a fault taken in ring 3 at a rip
+//!     at or past USER_END is a program `rt_sigreturn` returned to there (the
+//!     program cannot tell that SIGSEGV from the one rt_sigreturn sends). A
+//!     kernel that loads cs from the frame returns to ring 0 and faults in
+//!     the kernel, so this row is last. Fix round 1 (2026-10-29) adds
+//!     children: rsp, then rip, at 0x0000_8000_0000_0000 (the first address
+//!     past the user half), fpstate in the kernel half, an `rt_sigreturn`
+//!     made by hand with a kernel-half rsp, a reserved MXCSR bit, and SIGKILL
+//!     in `uc_sigmask`. Since 2026-10-31 (G1928) the watch is a copy of the
+//!     kernel's IDT, loaded for the group, whose #GP and #PF gates note a
+//!     ring-3 fault at a rip at or past USER_END and go on to the kernel's
+//!     own entries (`watch`, below): which of the two a ring-3 fetch at the
+//!     non-canonical 0x0000_8000_0000_0000 raises depends on the emulator
+//!     (#GP on QEMU 10.2.1 and 11.1.1, #PF on 8.2.2, the QEMU Ubuntu 24.04
+//!     and WSL2 install), and before G1928 the vehicle saw only the #GP,
+//!     through `idt::set_handler`, and a kernel-half #PF through
+//!     `mm::last_kill`, one slot a later fault in the group overwrote. The
+//!     kernel's handlers run as they would; the kernel's IDTR is loaded back
+//!     after the group. Fix round 2 adds
+//!     fpstate at an unmapped user-half address and across the end of the
+//!     user half, a hand-made `rt_sigreturn` with rsp at an unmapped
+//!     user-half address (each SIGSEGV: a start-only check then a plain read
+//!     panics the kernel), and SIGKILL in an action's `sa_mask` and in
+//!     `rt_sigsuspend`'s mask (the parent's SIGKILL must still end it).
 //!
 //! A group that prints no marker within `GROUP_MS` by the PM timer stops the
 //! session: the rows still owed fail with the reason. The plan always
 //! completes.
 //!
-//! Plan 6.
+//! Plan 8.
 
 #![no_std]
 #![no_main]
@@ -64,8 +103,8 @@ use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::arch::asm;
-use core::sync::atomic::Ordering;
+use core::arch::{asm, naked_asm};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use kernel::addr::VirtAddr;
 use kernel::blk::ata::{self, Ata, BlockDevice};
@@ -85,27 +124,199 @@ const HEAP_START: u64 = 0xffff_ffff_d000_0000;
 const HEAP_PAGES: usize = 64;
 const PM_HZ: u64 = 3_579_545;
 
-const PLAN: usize = 6;
+const PLAN: usize = 8;
 const TRAP_ID: &str = "sig.trap.usr1";
 const CHLD_ID: &str = "sig.chld.wakes.wait";
 const INT_ID: &str = "sig.int.ctrl_c";
 const REGS_ID: &str = "sig.regs.restored";
 const RESTART_ID: &str = "sig.restart.wait4";
 const SUSPEND_ID: &str = "sig.sigsuspend.eintr";
-const IDS: [&str; PLAN] = [TRAP_ID, CHLD_ID, INT_ID, REGS_ID, RESTART_ID, SUSPEND_ID];
+const RFLAGS_ID: &str = "sig.sigreturn.rflags";
+const RING3_ID: &str = "sig.sigreturn.ring3";
+const IDS: [&str; PLAN] = [TRAP_ID, CHLD_ID, INT_ID, REGS_ID, RESTART_ID, SUSPEND_ID, RFLAGS_ID, RING3_ID];
+
+// ── Row 8's watch: a ring-3 fault at a rip past the user half ────────────
+// For group 8 the vehicle loads a copy of the kernel's IDT whose #GP (13)
+// and #PF (14) gates are its own entries, `gp_watch` and `pf_watch`, and
+// loads the kernel's IDTR back after the group (as ktest-06's `borrow_idt`
+// does; the kernel's table is only read). Each entry notes a fault taken in
+// ring 3 (the frame's cs RPL 3) at a rip at or past USER_END, then jumps to
+// the kernel's own entry for that vector with the CPU's frame and every
+// register as they came, so the kernel's handler runs exactly as it would:
+// demand paging, copy-on-write and every kill stay the learner's. No ring-3
+// fetch at a rip past the user half is legitimate, and which vector it
+// raises depends on the emulator: a fetch at the non-canonical
+// 0x0000_8000_0000_0000 is a #GP on QEMU 10.2.1 and 11.1.1 but a #PF
+// (`pf-kernel-addr`) on QEMU 8.2.2, Ubuntu 24.04's (G1928); at a kernel-half
+// rip it is a #PF. The note is the vehicle's own: it does not read
+// `mm::last_kill`, which the learner's kernel writes and a later fault in
+// the group overwrites.
+
+/// The first address past the user half (CONTRACT §A.5's USER_END). The
+/// watch's entries test it as `rip >> 47 != 0`.
+const USER_END: u64 = 0x0000_8000_0000_0000;
+const _: () = assert!(USER_END == 1 << 47);
+
+/// The rip of the last ring-3 fault at or past USER_END the watch saw; 0 for
+/// none.
+static PAST_RIP: AtomicU64 = AtomicU64::new(0);
+/// Its vector, 13 or 14.
+static PAST_VEC: AtomicU64 = AtomicU64::new(0);
+/// The kernel's own #GP and #PF entries, from its IDT gates: where the
+/// watch's entries go on to.
+static CHAIN_GP: AtomicU64 = AtomicU64::new(0);
+static CHAIN_PF: AtomicU64 = AtomicU64::new(0);
+
+/// The watch's #GP gate. Both vectors push an error code, so on entry the
+/// stack holds error, rip, cs, rflags, rsp, ss; after `push rax`, rip is at
+/// rsp + 16 and cs at rsp + 24. `test` and `shr` change only the arithmetic
+/// flags, which the frame's RFLAGS does not see.
+#[unsafe(naked)]
+extern "C" fn gp_watch() {
+    naked_asm!(
+        "push rax",
+        "mov rax, [rsp + 24]",
+        "test al, 3",
+        "jz 2f",
+        "mov rax, [rsp + 16]",
+        "shr rax, 47",
+        "jz 2f",
+        "mov rax, [rsp + 16]",
+        "mov [rip + {rip}], rax",
+        "mov qword ptr [rip + {vec}], 13",
+        "2:",
+        "pop rax",
+        "jmp qword ptr [rip + {chain}]",
+        rip = sym PAST_RIP,
+        vec = sym PAST_VEC,
+        chain = sym CHAIN_GP,
+    )
+}
+
+/// The watch's #PF gate: `gp_watch`, for vector 14.
+#[unsafe(naked)]
+extern "C" fn pf_watch() {
+    naked_asm!(
+        "push rax",
+        "mov rax, [rsp + 24]",
+        "test al, 3",
+        "jz 2f",
+        "mov rax, [rsp + 16]",
+        "shr rax, 47",
+        "jz 2f",
+        "mov rax, [rsp + 16]",
+        "mov [rip + {rip}], rax",
+        "mov qword ptr [rip + {vec}], 14",
+        "2:",
+        "pop rax",
+        "jmp qword ptr [rip + {chain}]",
+        rip = sym PAST_RIP,
+        vec = sym PAST_VEC,
+        chain = sym CHAIN_PF,
+    )
+}
+
+#[repr(C, packed)]
+struct Dtr {
+    limit: u16,
+    base: u64,
+}
+
+/// The copy of the kernel's IDT that group 8 runs on.
+static WATCH_IDT: [[AtomicU64; 2]; 256] = [const { [AtomicU64::new(0), AtomicU64::new(0)] }; 256];
+
+/// An interrupt gate's two words for `h`, keeping `lo`'s selector, IST and
+/// type bits (16-47) and replacing the offset.
+fn gate_to(lo: u64, h: u64) -> (u64, u64) {
+    ((h & 0xffff) | (lo & 0x0000_ffff_ffff_0000) | ((h >> 16) & 0xffff) << 48, h >> 32)
+}
+
+/// The offset a gate's two words name.
+fn gate_offset(lo: u64, hi: u64) -> u64 {
+    (lo & 0xffff) | ((lo >> 48) & 0xffff) << 16 | (hi & 0xffff_ffff) << 32
+}
+
+/// With interrupts off: copy every gate of the kernel's loaded IDT into
+/// `WATCH_IDT`, point its #GP and #PF gates at the watch (each chained to
+/// the kernel's entry; a gate the kernel left not present stays as it is),
+/// clear the note, load the copy, and return the kernel's IDTR for
+/// `unwatch`.
+fn watch() -> Dtr {
+    let mut old = Dtr { limit: 0, base: 0 };
+    quiet(|| {
+        // SAFETY: sidt stores 10 bytes into `old`.
+        unsafe { asm!("sidt [{}]", in(reg) &mut old, options(nostack, preserves_flags)) };
+        let (base, limit) = (old.base, old.limit as usize);
+        for (v, g) in WATCH_IDT.iter().enumerate() {
+            let (lo, hi) = if v * 16 + 15 <= limit {
+                // SAFETY: the gate lies inside the loaded IDT's limit; a read.
+                unsafe {
+                    let p = (base as *const u64).add(v * 2);
+                    (core::ptr::read_volatile(p), core::ptr::read_volatile(p.add(1)))
+                }
+            } else {
+                (0, 0)
+            };
+            g[0].store(lo, Ordering::Relaxed);
+            g[1].store(hi, Ordering::Relaxed);
+        }
+        PAST_RIP.store(0, Ordering::Relaxed);
+        PAST_VEC.store(0, Ordering::Relaxed);
+        let gates: [(usize, &AtomicU64, extern "C" fn()); 2] = [(13, &CHAIN_GP, gp_watch), (14, &CHAIN_PF, pf_watch)];
+        for (v, chain, entry) in gates {
+            let (lo, hi) = (WATCH_IDT[v][0].load(Ordering::Relaxed), WATCH_IDT[v][1].load(Ordering::Relaxed));
+            if lo >> 47 & 1 == 0 {
+                continue;
+            }
+            chain.store(gate_offset(lo, hi), Ordering::Relaxed);
+            let (lo, hi) = gate_to(lo, entry as usize as u64);
+            WATCH_IDT[v][0].store(lo, Ordering::Relaxed);
+            WATCH_IDT[v][1].store(hi, Ordering::Relaxed);
+        }
+        let new = Dtr { limit: 256 * 16 - 1, base: WATCH_IDT.as_ptr() as u64 };
+        // SAFETY: the copy holds every gate of the kernel's table, with its
+        // #GP and #PF gates chained to the kernel's own entries; interrupts
+        // are off until `quiet` returns.
+        unsafe { asm!("lidt [{}]", in(reg) &new, options(readonly, nostack, preserves_flags)) };
+    });
+    old
+}
+
+/// Load the kernel's own IDTR back, as `watch` saved it.
+fn unwatch(old: &Dtr) {
+    quiet(|| {
+        // SAFETY: the kernel's own IDTR, as sidt stored it.
+        unsafe { asm!("lidt [{}]", in(reg) old, options(readonly, nostack, preserves_flags)) };
+    });
+}
 
 /// How long a group may run before the session counts as stopped, by the
 /// PM timer.
 const GROUP_MS: u64 = 20_000;
-/// Row 2's own bound: `sleep 2 & wait` returns in about 2 s when SIGCHLD
-/// is delivered, and never when it is not.
-const CHLD_MS: u64 = 10_000;
+/// Row 2's own bound: `sleep 1 & wait` returns after about 1000 ticks of
+/// IRQ 0 when SIGCHLD is delivered, and never when it is not. The bound is
+/// counted in the guest's own ticks, five times the sleep, because the
+/// sleep is: on a host that slows the guest (macOS's background QoS ran
+/// its ticks about 38 times slower than real time, fix round 3,
+/// 2026-10-29) the sleep takes ~38 s by the PM timer and still ~1000
+/// ticks. `CHLD_MS` is the ceiling, by the PM timer, for a kernel whose
+/// timer stops.
+const CHLD_TICKS: u64 = 5_000;
+const CHLD_MS: u64 = 60_000;
 /// Row 3: how long the interactive shell and its `sleep 30` have to appear,
 /// and how long ctrl+c has to end the `sleep`, by the PM timer.
 const INT_MS: u64 = 15_000;
 /// What the practice script and the rubric's `[[script]]` wait for before
 /// they type (CONTRACT §D.7).
 const SIGINT_READY: &str = "# sboot sigint-ready";
+
+/// A capture settles only once its script has finished (the engine's
+/// rule), and the script waits for `SIGINT_READY`, so a session that
+/// stopped before row 3 would leave the capture to the rubric's timeout;
+/// the run ends on a panic report instead, after the eight rows, as
+/// ktest-33's does (the slice's critic, 2026-10-29: an init the session
+/// could not find held the judge's capture 114 s; with this end, 16 s).
+static SCRIPT_CAN_FINISH: AtomicBool = AtomicBool::new(false);
 
 /// The learner's init (lab 28), and how long it has to print its hello line
 /// and fork the shell, by the PM timer.
@@ -285,12 +496,13 @@ fn live_with(argv: &[&str]) -> Option<Pid> {
     out
 }
 
-/// The live child of `init` running `sh` (argv[0]).
+/// The live child of `init` running `sh`: argv[0] `sh`, or a path ending in
+/// `/sh`, as ktest-28 counts it (CONTRACT §B.2-28).
 fn shell_of(init: Pid) -> Option<Pid> {
     let mut out = None;
     quiet(|| {
         proc::each(|p| {
-            if p.ppid == init && p.exit.is_none() && p.argv.first().map(String::as_str) == Some("sh") {
+            if p.ppid == init && p.exit.is_none() && p.argv.first().is_some_and(|a| a == "sh" || a.ends_with("/sh")) {
                 out = Some(p.pid);
             }
         })
@@ -321,6 +533,8 @@ struct Words {
     regs: u64,
     restart: u64,
     suspend: u64,
+    rflags: u64,
+    ring3: u64,
 }
 
 fn words() -> Words {
@@ -332,6 +546,8 @@ fn words() -> Words {
         regs: d("sig.regs"),
         restart: d("sig.restart"),
         suspend: d("sig.suspend"),
+        rflags: d("sig.rflags"),
+        ring3: d("sig.ring3"),
     }
 }
 
@@ -464,15 +680,21 @@ impl Sh {
     /// Write one group's script, then read until its marker, for at most
     /// `ms`; the group's output, or why the session stopped.
     fn group(&mut self, n: usize, script: &str, ms: u64) -> Result<Vec<u8>, String> {
+        self.group_ticks(n, script, ms, None)
+    }
+
+    /// `group`, also stopped after `cap` ticks of IRQ 0 when one is given.
+    fn group_ticks(&mut self, n: usize, script: &str, ms: u64, cap: Option<u64>) -> Result<Vec<u8>, String> {
         let from = self.out.len();
         self.send(&format!("{script}echo ':q{n}:'\n"))?;
-        self.collect(n, from, ms)
+        self.collect(n, from, ms, cap)
     }
 
     /// Read until group `n`'s marker, which the script already holds.
-    fn collect(&mut self, n: usize, from: usize, ms: u64) -> Result<Vec<u8>, String> {
+    fn collect(&mut self, n: usize, from: usize, ms: u64, cap: Option<u64>) -> Result<Vec<u8>, String> {
         let marker = format!(":q{n}:\n");
         let mut c = Clock::new();
+        let t0 = ticks();
         loop {
             let seg = &self.out[from..];
             let at = if seg.starts_with(marker.as_bytes()) {
@@ -499,8 +721,13 @@ impl Sh {
                 }
                 None => {}
             }
-            if c.ms() >= ms {
-                let why = format!("group {n} printed no marker within {ms} ms by the PM timer ({} bytes of it); the session stopped there", self.out.len() - from);
+            let late = cap.filter(|&k| ticks().wrapping_sub(t0) >= k);
+            if late.is_some() || c.ms() >= ms {
+                let within = match late {
+                    Some(k) => format!("{k} ticks of IRQ 0"),
+                    None => format!("{ms} ms by the PM timer"),
+                };
+                let why = format!("group {n} printed no marker within {within} ({} bytes of it); the session stopped there", self.out.len() - from);
                 forward(&self.out[from..]);
                 self.stopped = Some(why.clone());
                 return Err(why);
@@ -527,10 +754,17 @@ impl Sh {
 
 /// The group's output against the bytes expected.
 fn expect(r: &mut Row, n: usize, got: &Result<Vec<u8>, String>, want: &str, what: &str) {
+    expect_from(r, n, got, want, "on Linux the same commands print", what)
+}
+
+/// `expect`, with `from` saying whose output `want` is: row 8's is not
+/// Linux's, because Linux returns to a kernel-half rsp a frame names, and
+/// this kernel ends that program (CONTRACT §A.5).
+fn expect_from(r: &mut Row, n: usize, got: &Result<Vec<u8>, String>, want: &str, from: &str, what: &str) {
     match got {
         Err(why) => r.fail(format_args!("{why}")),
         Ok(g) if g.as_slice() != want.as_bytes() => r.fail(format_args!(
-            "group {n} printed {:?}; on Linux the same commands print {:?} — {what}",
+            "group {n} printed {:?}; {from} {:?} — {what}",
             String::from_utf8_lossy(g),
             want
         )),
@@ -538,7 +772,7 @@ fn expect(r: &mut Row, n: usize, got: &Result<Vec<u8>, String>, want: &str, what
     }
 }
 
-/// Rows 1-6. Returns early, after failing what is left, when the session
+/// Rows 1-8. Returns early, after failing what is left, when the session
 /// cannot go on.
 fn session(w: &Words) {
     let [w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11] = &w.w;
@@ -555,17 +789,17 @@ fn session(w: &Words) {
     r.finish(1);
 
     // Row 2: SIGCHLD wakes `wait`.
-    let g = sh.group(2, &format!("sleep 2 & wait\necho \"{w2}=$?\"\n"), CHLD_MS);
+    let g = sh.group_ticks(2, &format!("sleep 1 & wait\necho \"{w2}=$?\"\n"), CHLD_MS, Some(CHLD_TICKS));
     let mut r = Row::new(CHLD_ID);
-    if g.is_err() && sh.stopped.as_deref().is_some_and(|s| s.contains("printed no marker")) {
-        note(format_args!("SIGCHLD was not delivered: wait did not return"));
+    if g.is_err() && sh.stopped.as_deref().is_some_and(|s| s.starts_with("group 2 printed no marker")) {
+        note(format_args!("wait did not return: no SIGCHLD, or its handler's return left the mask blocked"));
         r.fail(format_args!(
-            "`sleep 2 & wait` did not return within {CHLD_MS} ms: ash's `wait` sleeps in rt_sigsuspend (130) until SIGCHLD, which the kernel sends a parent when its child ends; the run ends here"
+            "`sleep 1 & wait` did not return within {CHLD_TICKS} ticks of IRQ 0: ash's `wait` sleeps in rt_sigsuspend (130) until SIGCHLD, which the kernel sends a parent when its child ends, has run ash's handler, and that handler's rt_sigreturn has put back the mask its frame saved; the run ends here"
         ));
         r.finish(2);
-        return fail_rest(3, "not run: the session ended at row 2 (SIGCHLD was not delivered: wait did not return)");
+        return fail_rest(3, "not run: the session ended at row 2 (`sleep 1 & wait` did not return)");
     }
-    expect(&mut r, 2, &g, &format!("{w2}=0\n"), "`wait` returns 0 once the background `sleep 2` has ended");
+    expect(&mut r, 2, &g, &format!("{w2}=0\n"), "`wait` returns 0 once the background `sleep 1` has ended");
     r.finish(2);
 
     // Row 3: ctrl+c.
@@ -604,6 +838,42 @@ fn session(w: &Words) {
         "rt_sigsuspend (130) sleeps with the mask it is given, returns -EINTR once a handler has run, and the mask it replaced comes back",
     );
     r.finish(6);
+
+    // Row 7: the flags rt_sigreturn takes from the frame, and the ones it keeps.
+    let g = sh.group(7, &format!("sigregs rflags {:016x}\n", w.rflags), GROUP_MS);
+    let mut r = Row::new(RFLAGS_ID);
+    expect(
+        &mut r,
+        7,
+        &g,
+        &format!("sigregs rflags kept {:016x}\n", w.rflags),
+        "a handler runs with its own signal and its action's sa_mask blocked, on a frame 16-aligned as after a call, and rt_sigreturn takes from the frame's eflags only the bits a program may set (FIX_EFLAGS: the arithmetic flags, DF, AC, RF); IF, IOPL and NT stay the kernel's, and the mask the program had comes back",
+    );
+    r.finish(7);
+
+    // Row 8: a frame that points outside ring 3's half. Last: a kernel that
+    // loads cs from the frame faults in ring 0.
+    let old = watch();
+    let g = sh.group(8, &format!("sigregs ring3 {:016x}\n", w.ring3), GROUP_MS);
+    unwatch(&old);
+    let mut r = Row::new(RING3_ID);
+    expect_from(
+        &mut r,
+        8,
+        &g,
+        &format!("sigregs ring3 {:016x}\n", w.ring3),
+        "a kernel that refuses every forged field prints",
+        "rt_sigreturn ends a program whose frame or fpstate it cannot read, or whose rip or rsp is outside the user half, with SIGSEGV, masks the frame's MXCSR, and returns to ring 3 with the user's cs and ss whatever the frame's csgsfs holds; no mask, the frame's, a handler's or rt_sigsuspend's, blocks SIGKILL",
+    );
+    let past = PAST_RIP.load(Ordering::Relaxed);
+    if past != 0 {
+        let fault = if PAST_VEC.load(Ordering::Relaxed) == 13 { "general-protection fault" } else { "page fault" };
+        let half = if past >= 0xffff_8000_0000_0000 { "in the kernel half" } else { "past the user half" };
+        r.fail(format_args!(
+            "a program took a {fault} at rip {past:#x}, {half}, during group 8: rt_sigreturn returned it to the rip its forged frame held; a frame whose rip or rsp is outside the user half ends the program with SIGSEGV in rt_sigreturn"
+        ));
+    }
+    r.finish(8);
     let _ = (w3, w4, w7, w8, w9, w10, w11);
 }
 
@@ -637,6 +907,7 @@ fn int_row(sh: &mut Sh, w: &Words, w5: &str, w6: &str) {
         return r.finish(n);
     }
     let sleeper = live_with(&["sleep", "30"]).unwrap_or(Pid(0));
+    SCRIPT_CAN_FINISH.store(true, Ordering::Relaxed);
     quiet(|| kernel::kprintln!("{SIGINT_READY}"));
     let ended = sh.until(INT_MS, |_| exit_of(sleeper).is_some() || task_of(sleeper).is_none() || live_with(&["sleep", "30"]).is_none());
     if !ended {
@@ -700,7 +971,7 @@ fn int_row(sh: &mut Sh, w: &Words, w5: &str, w6: &str) {
     // The outer shell carries on with the next group once the inner one ended.
     let from = sh.out.len();
     if sh.send("echo ':q3:'\n").is_ok() {
-        let _ = sh.collect(3, from, GROUP_MS);
+        let _ = sh.collect(3, from, GROUP_MS, None);
     }
 }
 
@@ -762,6 +1033,11 @@ unsafe extern "C" fn _start() -> ! {
     match mount_all() {
         Err(why) => fail_rest(1, &format!("not run: the file systems did not mount: {why}")),
         Ok(()) => session(&words()),
+    }
+    if !SCRIPT_CAN_FINISH.load(Ordering::Relaxed) {
+        // The rows are out; the script waits for a marker that will never
+        // come, so end the capture on the panic report.
+        panic!("the typed script cannot finish (the session stopped before row 3's keys); the eight rows above are this run's result");
     }
     irq_off();
     ktap::end();

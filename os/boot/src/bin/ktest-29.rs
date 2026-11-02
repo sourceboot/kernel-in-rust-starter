@@ -23,21 +23,56 @@
 //! with `mark N`; the values marked * are drawn from the nonce:
 //!   1 `ls`, `mark 1`
 //!   2 `hi <nonce> 1`, `ls /proc`, `mark 2`
-//!   3 `cat /n*`, `echo $?`, `x*`, `echo $?`, `mark 3`
-//!   4 `echo a* b* > /tmp/u*`, `cat /tmp/u*`, `echo c* > /tmp/u*`,
-//!     `cat < /tmp/u*`, `cat /proc/sboot/nonce > /dev/null`, `mark 4`
+//!   3 `cat /n*`, `echo $?`, `x*`, `echo $?`, `/tmp`, an empty line,
+//!     `echo $?`, `mark 3`
+//!   4 `echo a*  b* > /tmp/u*` (two spaces between the words), `cat /tmp/u*`,
+//!     `echo c* > /tmp/u*`, `cat < /tmp/u*`, `echo $?`, `cat < /n*`,
+//!     `echo $?`, `cat <`, `echo $?`, `cat /proc/sboot/nonce > /dev/null`,
+//!     `mark 4`
 //!   5 `producer <nonce> 1 chain | consumer <nonce> 1 chain 3 4`, `mark 5`
 //!   6 `cd <dir*>`, `mark 6`
 //! It runs twice in one session. First through the course shell — the
 //! ORACLE — whose answers this file checks against what it knows they must
 //! be (a group the course shell gets wrong is the kernel's fault, and says
 //! so); then `cd /`, `ush` typed at the course shell's prompt, and the same
-//! script through the learner's shell, which ends with `exit` (the course
-//! shell's `echo $?` after it must print 0). Each typed line waits for the
+//! script through the learner's shell, then `x*` (a name no program has)
+//! and `exit` (the course shell's `echo $?` after it must print the last
+//! status: the number the learner's shell showed for `x*` in group 3, 127
+//! on a right shell, so a wrong 127 is `ush.status.shown`'s alone). Each
+//! typed line waits for the
 //! next prompt (`$ `), bounded by the PM timer (`STEP_MS` a line), never by
 //! the learner's clock; a shell that ends, or a line that never comes back
 //! to a prompt, stops the session there, and the rows it did not reach say
 //! what did not happen.
+//!
+//! THE PROMPT IS THE LEARNER'S SHELL'S OWN (amended 2026-10-29, slice 9
+//! fix round 1: a shell that `execve`d the course shell in its own place,
+//! or forked one and waited for it, scored full, because the course shell
+//! answered every line). At its first prompt and after every line of its
+//! run, the process started as `ush` must still be running `/bin/ush` —
+//! the bytes of that file's executable segment, read through the process's
+//! own page tables, are the file's — and no process it started may still be
+//! running (bounded by `STEP_MS`): the shell that prompts is the one that
+//! reads the line. (The comparison needs every page of the segment present,
+//! and the course's loader maps them all at `execve`; a page that is not
+//! mapped is reported as that, apart from bytes that are another program's.) While the learner's shell runs, no process but the
+//! course shell may run `/bin/sh` (the same comparison, made at every poll
+//! of the session's wait, on every live process): a shell that hands its
+//! lines to a course shell of its own, one at a time, is the course shell
+//! answering. And a pipeline's two commands must run at once: the session
+//! counts, at every poll of its wait, the live processes the typing shell
+//! started, and a pipeline line that had two at once in the course shell's
+//! run must have had two in the learner's (the stream is longer than a
+//! pipe holds, so a right shell always has both).
+//!
+//! THE ORACLE IS THE COURSE'S SHELL (amended 2026-10-30, slice 9 fix
+//! round, #47b, G1922: an init that started the learner's `/bin/ush` as
+//! `sh` or `/bin/sh` made the oracle the learner's shell, so the script was
+//! compared against itself and a pipeline run one command after the other
+//! scored 13/13). At the first prompt the process init started as `sh`
+//! must be running `/bin/sh`, by the same comparison of its executable
+//! segment through that process's page tables; otherwise the session stops
+//! there and every row says so.
 //!
 //! The rows, printed after the session in this order. Rows 1–6 compare what
 //! the learner's shell printed on OUT for each line of their group with what
@@ -50,16 +85,22 @@
 //!   2 `ush.args.passed` (derived): `hi` gets the nonce and its index as
 //!     typed; `ls /proc` lists `/proc`.
 //!   3 `ush.status.shown` (derived): `echo $?` prints 1 after a failing
-//!     command and 127 after a name not found.
+//!     command, 127 after a name not found, and 126 after a path that
+//!     names no program (`/tmp`, a directory: run as given, not looked up
+//!     under `/bin`), with an empty line between that keeps it.
 //!   4 `ush.redirect.files` (derived): `>` creates and empties the file it
-//!     names, `<` reads it, `echo` joins its words with one space, and
-//!     `/dev/null` takes output.
+//!     names, `<` reads it on fd 0 (`cat`'s status is 0, so no `<` reached
+//!     it as a word), `echo` joins its words with one space whatever the
+//!     spaces typed, a `<` whose file cannot be opened ends the command
+//!     with 1 and a `<` with no path with 2, and `/dev/null` takes output.
 //!   5 `ush.pipe.two` (derived): a pipeline carries the nonce's stream from
 //!     `producer` to `consumer` whole, ends at its end, and leaves no pipe
-//!     end open in the consumer (consumer's own rows, compared).
+//!     end open in the consumer (consumer's own rows, compared), with the
+//!     two commands running at once (two processes the shell started alive
+//!     together, as in the course shell's run).
 //!   6 `ush.cd.exit` (derived): `cd` moves the shell itself (the next
 //!     command starts in the drawn directory), and `exit` ends the shell with
-//!     status 0.
+//!     the last status (after `x*`: what its own `echo $?` showed for it).
 //!   7 `ush.oracle.kernel` (derived): the course shell's run of the script
 //!     gave every answer it must, and the learner's shell got at least one
 //!     group the same; red names the group when the kernel, not the
@@ -92,7 +133,7 @@ use kernel::exec;
 use kernel::fs::archive::Archive;
 use kernel::fs::ext2::Ext2;
 use kernel::fs::mount;
-use kernel::fs::vfs::InodeRef;
+use kernel::fs::vfs::{self, InodeRef};
 use kernel::ktap;
 use kernel::pipe;
 use kernel::proc::{self, Pid};
@@ -411,6 +452,15 @@ struct Line {
     pids: bool,
 }
 
+/// A typed line as messages name it: in backquotes, or "an empty line".
+fn quoted(text: &str) -> String {
+    if text.is_empty() {
+        String::from("an empty line")
+    } else {
+        format!("`{text}`")
+    }
+}
+
 fn line(text: &str, want: Want) -> Line {
     Line { text: String::from(text), want, pids: false }
 }
@@ -476,13 +526,21 @@ fn script(w: &Words) -> Vec<Vec<Line>> {
             line("echo $?", Want::Is(strs(&["1"]))),
             line(&w.noname, none()),
             line("echo $?", Want::Is(strs(&["127"]))),
+            line("/tmp", none()),
+            line("", none()),
+            line("echo $?", Want::Is(strs(&["126"]))),
             mark(3, "/"),
         ],
         vec![
-            line(&format!("echo {} {} > {}", w.wa, w.wb, w.file), none()),
+            line(&format!("echo {}  {} > {}", w.wa, w.wb, w.file), none()),
             line(&format!("cat {}", w.file), Want::Is(vec![format!("{} {}", w.wa, w.wb)])),
             line(&format!("echo {} > {}", w.wc, w.file), none()),
             line(&format!("cat < {}", w.file), Want::Is(vec![w.wc.clone()])),
+            line("echo $?", Want::Is(strs(&["0"]))),
+            line(&format!("cat < {}", w.nofile), none()),
+            line("echo $?", Want::Is(strs(&["1"]))),
+            line("cat <", none()),
+            line("echo $?", Want::Is(strs(&["2"]))),
             line("cat /proc/sboot/nonce > /dev/null", none()),
             mark(4, "/"),
         ],
@@ -523,7 +581,7 @@ fn check(l: &Line, out: &[u8]) -> Result<(), String> {
             let lines: Vec<&[u8]> = out.split(|&b| b == b'\n').collect();
             match want.iter().find(|w| !lines.contains(&w.as_bytes())) {
                 None => Ok(()),
-                Some(w) => Err(format!("`{}` printed {} on fd 1, with no line `{w}`", l.text, shown(out))),
+                Some(w) => Err(format!("{} printed {} on fd 1, with no line `{w}`", quoted(&l.text), shown(out))),
             }
         }
         Want::Is(want) => {
@@ -531,9 +589,9 @@ fn check(l: &Line, out: &[u8]) -> Result<(), String> {
             if got.len() == want.len() && got.iter().zip(want).all(|(g, w)| *g == w.as_bytes()) {
                 Ok(())
             } else if want.is_empty() {
-                Err(format!("`{}` printed {} on fd 1, where nothing belongs", l.text, shown(out)))
+                Err(format!("{} printed {} on fd 1, where nothing belongs", quoted(&l.text), shown(out)))
             } else {
-                Err(format!("`{}` printed {} on fd 1, not the line(s) {want:?}", l.text, shown(out)))
+                Err(format!("{} printed {} on fd 1, not the line(s) {want:?}", quoted(&l.text), shown(out)))
             }
         }
     }
@@ -546,6 +604,9 @@ fn check(l: &Line, out: &[u8]) -> Result<(), String> {
 struct Seg {
     out: Vec<u8>,
     err: Vec<u8>,
+    /// The most processes the typing shell had started that were alive at
+    /// once while the line ran (sampled at every poll).
+    together: usize,
 }
 
 /// One shell's run of the script: each group's segments, as far as it got,
@@ -564,7 +625,19 @@ struct Seen {
     /// `exit` in the learner's shell: it ended and the course shell's
     /// `echo $?` printed 0, or why not.
     exit: Option<Result<(), String>>,
+    /// Init's `sh` was not /bin/sh, or init ran nothing as `sh`: the whole
+    /// note, init named first, then what was measured. Every row then opens
+    /// with it, not with the kernel (see `rows`).
+    init_sh: Option<String>,
 }
+
+/// Every row's note when init's `sh` is not /bin/sh: the fault is lab 28's
+/// init, and the learner's shell is the one typed as `ush`.
+const INIT_SH: &str = "your init (lab 28's `os/userland/init.rs`) started another program as `sh`; it must start `/bin/sh`, and you start your shell by typing `ush`";
+
+/// Every row's note when init ran nothing as `sh` (its shell under another
+/// argv[0], `ush` or `-sh`): lab 28's init again, not the kernel.
+const INIT_NO_SH: &str = "your init (lab 28's `os/userland/init.rs`) started nothing as `sh`; it must start `/bin/sh` as `sh`, and you start your shell by typing `ush`";
 
 /// A shell being typed at: its process and its task.
 #[derive(Clone, Copy)]
@@ -593,6 +666,15 @@ struct Session {
     out: Tee,
     err: Tee,
     init: Pid,
+    /// During the learner's shell's run: the course shell's pid, the learner's
+    /// shell's, and
+    /// `/bin/sh`'s program; `ran_sh` is the first other process seen
+    /// running it, and the line typed when it was.
+    watch: Option<(Pid, Pid, Image)>,
+    ran_sh: Option<(Pid, String)>,
+    /// While a line runs: the typing shell, and the most live processes it
+    /// had started at one poll.
+    count: Option<(Pid, usize)>,
 }
 
 impl Session {
@@ -605,6 +687,7 @@ impl Session {
         let mut c = Clock::new();
         loop {
             self.pump();
+            self.look();
             if done(self) {
                 return Ok(());
             }
@@ -640,12 +723,13 @@ impl Session {
     /// pushed only once the reader has taken the last one into its line.
     fn type_to(&mut self, reader: Sh, text: &str) -> Result<(), Lost> {
         let codes = codes(text);
+        let q = quoted(text);
         for (i, chunk) in codes.chunks(CHUNK).enumerate() {
             if i > 0 {
                 sched::yield_now();
-                match self.settle(reader, &format!("the console's reader taking `{text}`")) {
+                match self.settle(reader, &format!("the console's reader taking {q}")) {
                     Ok(true) => {}
-                    Ok(false) => return Err(Lost::Ended(format!("the shell (pid {}) ended while `{text}` was being typed", reader.pid.0))),
+                    Ok(false) => return Err(Lost::Ended(format!("the shell (pid {}) ended while {q} was being typed", reader.pid.0))),
                     Err(why) => return Err(Lost::Stuck(why)),
                 }
             }
@@ -658,33 +742,236 @@ impl Session {
     /// returns what came on OUT and ERR in between.
     fn line(&mut self, reader: Sh, after: Sh, text: &str) -> Result<Seg, Lost> {
         let (o, e) = (self.out.all.len(), self.err.all.len());
-        self.type_to(reader, text)?;
-        let bound = format!("a prompt after `{text}`");
-        self.wait(STEP_MS, &bound, |s| s.out.take_prompt()).map_err(Lost::Stuck)?;
-        let alive = self.settle(after, &bound).map_err(Lost::Stuck)?;
-        let seg = Seg { out: self.out.all[o..].to_vec(), err: self.err.all[e..].to_vec() };
+        self.count = Some((reader.pid, 0));
+        let typed = self.type_to(reader, text);
+        if let Err(lost) = typed {
+            self.count = None;
+            return Err(lost);
+        }
+        let q = quoted(text);
+        let bound = format!("a prompt after {q}");
+        let done = self.wait(STEP_MS, &bound, |s| s.out.take_prompt()).and_then(|()| self.settle(after, &bound));
+        let together = self.count.take().map_or(0, |(_, n)| n);
+        let alive = done.map_err(Lost::Stuck)?;
+        let seg = Seg { out: self.out.all[o..].to_vec(), err: self.err.all[e..].to_vec(), together };
         if !alive {
             let said = self.err_since(e).map_or(String::from("nothing on fd 2"), |l| format!("it wrote on fd 2: {l}"));
-            return Err(Lost::Ended(format!("the shell (pid {}) ended while running `{text}`; {said}", after.pid.0)));
+            return Err(Lost::Ended(format!("the shell (pid {}) ended while running {q}; {said}", after.pid.0)));
         }
         Ok(seg)
     }
 }
 
-/// The live process running `name` (argv[0]) whose parent is `parent`.
+impl Session {
+    /// The learner's shell at its prompt after `after` is its own: `sh` still
+    /// runs `/bin/ush` (`img`), and nothing it started is still running
+    /// (waited for up to `STEP_MS`).
+    fn own(&mut self, sh: Sh, img: &Image, after: &str) -> Result<(), Lost> {
+        let mut left = Vec::new();
+        let gone = self.wait(STEP_MS, "", |s| {
+            left = live_below(sh.pid);
+            left.is_empty() || s.ran_sh.is_some()
+        });
+        if let Err(why) = gone {
+            let Some((pid, name)) = left.first().cloned() else {
+                return Err(Lost::Stuck(why));
+            };
+            return Err(Lost::Stuck(format!(
+                "{after}, pid {} (`{name}`), which your shell (pid {}) started, was still running {STEP_MS} ms later: the prompt must be your shell's own, with every command it ran ended",
+                pid.0, sh.pid.0
+            )));
+        }
+        if let Some((pid, name)) = self.ran_sh.take() {
+            return Err(Lost::Stuck(format!(
+                "{after}, pid {} (`{name}`), a process other than the course shell, had run the course shell's program, /bin/sh, while your shell (pid {}) was running: your shell must read and run each line itself, not hand it to another shell",
+                pid.0, sh.pid.0
+            )));
+        }
+        match image_at(sh.pid, img) {
+            Some(true) => {}
+            Some(false) => {
+                return Err(Lost::Stuck(format!(
+                    "{after}, your shell (pid {}) was not running /bin/ush: the bytes at {:#x} are not that file's program, so the process runs another one (an `execve` in its own place)",
+                    sh.pid.0, img.va
+                )))
+            }
+            None => {
+                return Err(Lost::Stuck(format!(
+                    "{after}, your shell (pid {}) was not running /bin/ush: no page is mapped at {:#x}, where that file's program is loaded (the loader maps every page of a program at `execve`), so the process runs another one (an `execve` in its own place)",
+                    sh.pid.0, img.va
+                )))
+            }
+        }
+        Ok(())
+    }
+    /// While `watch` is set: notes the first live process other than the
+    /// course shell and the learner's that runs `/bin/sh`.
+    fn look(&mut self) {
+        if let Some((sh, n)) = self.count {
+            self.count = Some((sh, n.max(live_below(sh).len())));
+        }
+        let Some((course, ush, img)) = &self.watch else { return };
+        if self.ran_sh.is_some() {
+            return;
+        }
+        for r in procs() {
+            if r.pid != *course && r.pid != *ush && r.exit.is_none() && image_at(r.pid, img) == Some(true) {
+                self.ran_sh = Some((r.pid, r.argv.first().cloned().unwrap_or_default()));
+                return;
+            }
+        }
+    }
+}
+
+/// Whether process `pid`'s memory holds `img` at its address: `None` when
+/// a page of that range is not mapped (or the process is gone), else whether
+/// the bytes are the file's. The course's loader maps every page of a
+/// program at `execve` (lab 13) and fork copies the mappings (lab 24), so a
+/// process running the program has every page of it present.
+fn image_at(pid: Pid, img: &Image) -> Option<bool> {
+    quiet(|| root_of(pid).and_then(|r| user_bytes(r, img.va, img.bytes.len()))).map(|b| b == img.bytes)
+}
+
+/// A program's executable segment as its file holds it: where it is
+/// loaded, and its bytes (up to `IMAGE_MAX`).
+struct Image {
+    va: u64,
+    bytes: Vec<u8>,
+}
+
+const IMAGE_MAX: u64 = 16384;
+
+fn le(b: &[u8]) -> u64 {
+    b.iter().rev().fold(0, |a, &x| (a << 8) | x as u64)
+}
+
+/// Reads `path`'s ELF header and program headers: the loadable segment
+/// that holds the entry point, its file bytes (the first `IMAGE_MAX`).
+fn image(path: &str) -> Result<Image, String> {
+    let ino = vfs::root().and_then(|r| vfs::walk(&r, path)).map_err(|e| format!("{path}: the walk returned {}", errno_text(e)))?;
+    let read = |off: u64, n: usize| -> Result<Vec<u8>, String> {
+        let mut b = vec![0u8; n];
+        match ino.read_at(off, &mut b) {
+            Ok(k) if k == n => Ok(b),
+            Ok(k) => Err(format!("{path}: {k} of {n} bytes at {off}")),
+            Err(e) => Err(format!("{path}: read_at({off}) returned {}", errno_text(e))),
+        }
+    };
+    let eh = read(0, 64)?;
+    if &eh[..4] != b"\x7fELF" {
+        return Err(format!("{path} is not an ELF file"));
+    }
+    let (entry, phoff, phsz, phnum) = (le(&eh[24..32]), le(&eh[32..40]), le(&eh[54..56]), le(&eh[56..58]));
+    for i in 0..phnum {
+        let ph = read(phoff + i * phsz, 56)?;
+        let (ty, off, va, filesz) = (le(&ph[0..4]), le(&ph[8..16]), le(&ph[16..24]), le(&ph[32..40]));
+        if ty == 1 && va <= entry && entry < va + filesz {
+            return Ok(Image { va, bytes: read(off, filesz.min(IMAGE_MAX) as usize)? });
+        }
+    }
+    Err(format!("{path}: no loadable segment holds its entry point {entry:#x}"))
+}
+
+/// The page-table root of process `pid`.
+fn root_of(pid: Pid) -> Option<u64> {
+    let mut root = None;
+    proc::each(|p| {
+        if p.pid == pid && p.exit.is_none() {
+            root = Some(p.root.0);
+        }
+    });
+    root
+}
+
+/// `len` bytes at `va` in the address space whose PML4 is at `root`, through
+/// the HHDM; `None` where a page is not present. Interrupts off.
+fn user_bytes(root: u64, va: u64, len: usize) -> Option<Vec<u8>> {
+    const MASK: u64 = 0x000f_ffff_ffff_f000;
+    let off = bootinfo::hhdm_offset();
+    // Only frames in the memory map's usable or bootloader-reclaimable RAM
+    // are read: a process mid-`execve` may hold a table being torn down.
+    let regions = bootinfo::get()?.memmap();
+    let ram = |pa: u64| regions.iter().any(|m| (m.kind == 0 || m.kind == 5) && m.base <= pa && pa + 4096 <= m.base + m.len);
+    let entry = |table: u64, i: u64| -> Option<u64> {
+        if !ram(table) {
+            return None;
+        }
+        // SAFETY: `table` is a present page-table frame, mapped by the HHDM.
+        Some(unsafe { core::ptr::read_volatile((table + off + i * 8) as *const u64) })
+    };
+    let pa = |va: u64| -> Option<u64> {
+        let mut table = root & MASK;
+        for level in (0..4u64).rev() {
+            let e = entry(table, (va >> (12 + 9 * level)) & 0x1ff)?;
+            if e & 1 == 0 {
+                return None;
+            }
+            if (level == 1 || level == 2) && e & 0x80 != 0 {
+                let size = 1u64 << (12 + 9 * level);
+                return Some((e & MASK & !(size - 1)) + (va & (size - 1)));
+            }
+            table = e & MASK;
+        }
+        Some(table + (va & 0xfff))
+    };
+    let mut out = Vec::with_capacity(len);
+    let mut a = va;
+    while out.len() < len {
+        let p = pa(a)?;
+        if !ram(p & !0xfff) {
+            return None;
+        }
+        let n = (len - out.len()).min((4096 - (a & 0xfff)) as usize);
+        // SAFETY: `p .. p + n` lies in one present page, mapped by the HHDM.
+        out.extend_from_slice(unsafe { core::slice::from_raw_parts((p + off) as *const u8, n) });
+        a += n as u64;
+    }
+    Some(out)
+}
+
+/// The processes `pid` started, and theirs, still running: (pid, argv[0]).
+fn live_below(pid: Pid) -> Vec<(Pid, String)> {
+    let all = procs();
+    let mut set = vec![pid];
+    let mut out = Vec::new();
+    loop {
+        let mut grew = false;
+        for r in &all {
+            if set.contains(&r.ppid) && !set.contains(&r.pid) {
+                set.push(r.pid);
+                grew = true;
+                if r.exit.is_none() {
+                    out.push((r.pid, r.argv.first().cloned().unwrap_or_default()));
+                }
+            }
+        }
+        if !grew {
+            return out;
+        }
+    }
+}
+
+/// The live process running `name` (argv[0]) whose parent is `parent`; for
+/// `sh`, argv[0] `sh` or a path ending in `/sh`, as ktest-28 counts init's
+/// shell (CONTRACT §B.2-28).
 fn running(name: &str, parent: Option<Pid>) -> Option<Sh> {
-    let r = procs().into_iter().find(|r| r.exit.is_none() && r.argv.first().map(String::as_str) == Some(name) && parent.is_none_or(|p| r.ppid == p))?;
+    let named = |a: &String| a == name || (name == "sh" && a.ends_with("/sh"));
+    let r = procs().into_iter().find(|r| r.exit.is_none() && r.argv.first().is_some_and(named) && parent.is_none_or(|p| r.ppid == p))?;
     let tid = quiet(|| task_of(r.pid))?;
     Some(Sh { pid: r.pid, tid })
 }
 
 /// One shell's run of the whole script into `pass`; stops at the first line
 /// that does not come back.
-fn run_script(s: &mut Session, sh: Sh, script: &[Vec<Line>], pass: &mut Pass) -> Result<(), ()> {
+fn run_script(s: &mut Session, sh: Sh, script: &[Vec<Line>], pass: &mut Pass, own: Option<&Image>) -> Result<(), ()> {
     for (g, group) in script.iter().enumerate() {
         pass.segs.push(Vec::new());
         for l in group {
-            match s.line(sh, sh, &l.text) {
+            let got = s.line(sh, sh, &l.text).and_then(|seg| match own {
+                Some(img) => s.own(sh, img, &format!("at the prompt after {}", quoted(&l.text))).map(|()| seg),
+                None => Ok(seg),
+            });
+            match got {
                 Ok(seg) => pass.segs[g].push(seg),
                 Err(lost) => {
                     pass.stop = Some((Some(g), lost.why()));
@@ -714,15 +1001,43 @@ fn session(w: &Words, script: &[Vec<Line>], seen: &mut Seen) {
         Ok(p) => p,
         Err(why) => return fail(seen, why),
     };
-    let mut s = Session { out, err, init };
+    let mut s = Session { out, err, init, watch: None, ran_sh: None, count: None };
 
     // The course shell init starts, at its first prompt.
     if let Err(why) = s.wait(STEP_MS, "the course shell's first prompt", |s| s.out.take_prompt()) {
         return fail(seen, why);
     }
     let Some(course) = running("sh", Some(init)) else {
-        return fail(seen, format!("at the first prompt no process with parent {} was running `sh`", init.0));
+        // Init's fault, as below (CONTRACT §B.2-28: init starts `/bin/sh` as
+        // `sh`); the rows name init first, not the kernel.
+        let why = format!("at the first prompt no process with parent {} was running `sh`", init.0);
+        seen.init_sh = Some(format!("{INIT_NO_SH}: {why}"));
+        return fail(seen, why);
     };
+    // The course shell is the course's: the process init started as `sh`
+    // runs /bin/sh (CONTRACT §B.2-28: init starts `/bin/sh`), by the same
+    // comparison as the learner's shell's below. Otherwise the oracle is
+    // whatever init named `sh` — the learner's own shell among them — and
+    // the script is compared against itself (G1922).
+    let sh_img = match image("/bin/sh") {
+        Ok(i) => i,
+        Err(why) => return fail(seen, format!("the course could not read a program: {why}")),
+    };
+    let not_sh = match image_at(course.pid, &sh_img) {
+        Some(true) => None,
+        Some(false) => Some(format!(
+            "at the first prompt, init's shell (pid {}) was not running /bin/sh: the bytes at {:#x} are not that file's program",
+            course.pid.0, sh_img.va
+        )),
+        None => Some(format!(
+            "at the first prompt, init's shell (pid {}) was not running /bin/sh: no page is mapped at {:#x}, where that file's program is loaded",
+            course.pid.0, sh_img.va
+        )),
+    };
+    if let Some(why) = not_sh {
+        seen.init_sh = Some(format!("{INIT_SH}: {why}"));
+        return fail(seen, why);
+    }
     match s.settle(course, "the course shell's first read") {
         Ok(true) => {}
         Ok(false) => return fail(seen, String::from("the course shell ended at its first prompt")),
@@ -730,7 +1045,7 @@ fn session(w: &Words, script: &[Vec<Line>], seen: &mut Seen) {
     }
 
     // The oracle: the script through the course shell, then back to `/`.
-    if run_script(&mut s, course, script, &mut seen.oracle).is_err() {
+    if run_script(&mut s, course, script, &mut seen.oracle, None).is_err() {
         let why = seen.oracle.stop.as_ref().map_or(String::new(), |(_, w)| w.clone());
         seen.ush.stop = Some((None, format!("the course shell's run of the script stopped: {why}")));
         return;
@@ -741,6 +1056,16 @@ fn session(w: &Words, script: &[Vec<Line>], seen: &mut Seen) {
         seen.ush.stop = Some((None, format!("the course shell's `cd /` did not come back: {why}")));
         return;
     }
+
+    // What the learner's shell's process must be running (the course
+    // shell's program, `sh_img`, no other process may run while it does).
+    let img = match image("/bin/ush") {
+        Ok(i) => i,
+        Err(why) => {
+            seen.ush.stop = Some((Some(0), format!("the course could not read a program: {why}")));
+            return;
+        }
+    };
 
     // The learner's shell, by name, at the course shell's prompt.
     let e = s.err.all.len();
@@ -769,23 +1094,41 @@ fn session(w: &Words, script: &[Vec<Line>], seen: &mut Seen) {
             return;
         }
     }
+    s.watch = Some((course.pid, ush.pid, sh_img));
+    if let Err(lost) = s.own(ush, &img, "at your shell's first prompt") {
+        seen.ush.stop = Some((Some(0), lost.why()));
+        return;
+    }
     note(format_args!("{}: pid {} runs {USH}; its parent is the course shell, pid {}", GROUP_IDS[0], ush.pid.0, course.pid.0));
-    if run_script(&mut s, ush, script, &mut seen.ush).is_err() {
+    if run_script(&mut s, ush, script, &mut seen.ush, Some(&img)).is_err() {
         return;
     }
 
-    // `exit`: the learner's shell ends, the course shell's prompt comes back.
+    // `x*`, then `exit`: the learner's shell ends with the last status — the
+    // one it showed after the same name in group 3 (`echo $?`, 127 on a right
+    // shell: that number is `ush.status.shown`'s) — and the course shell's
+    // prompt comes back.
     let last = script.len() - 1;
-    seen.exit = Some(match s.line(ush, course, "exit") {
-        Err(lost) => Err(format!("after `exit`: {}", lost.why())),
-        Ok(_) if !ended(ush.pid) => Err(format!("after `exit` your shell (pid {}) was still running", ush.pid.0)),
-        Ok(_) => match s.line(course, course, "echo $?") {
-            Err(lost) => {
-                seen.ush.stop = Some((Some(last), lost.why()));
-                Err(String::from("the course shell's `echo $?` after `exit` did not come back"))
-            }
-            Ok(seg) if norm(&seg.out, false) == [b"0".as_slice()] => Ok(()),
-            Ok(seg) => Err(format!("after `exit` the course shell's `echo $?` printed {}: your shell's exit status was not 0", shown(&seg.out))),
+    let shown_status = seen.ush.segs.get(2).and_then(|g| g.get(3)).map(|seg| norm(&seg.out, false).concat()).unwrap_or_default();
+    let want = if !shown_status.is_empty() && shown_status.iter().all(u8::is_ascii_digit) { shown_status } else { b"127".to_vec() };
+    let want_text = String::from_utf8_lossy(&want).into_owned();
+    seen.exit = Some(match s.line(ush, ush, &w.noname) {
+        Err(lost) => Err(format!("before `exit`, `{}`: {}", w.noname, lost.why())),
+        Ok(_) => match s.line(ush, course, "exit") {
+            Err(lost) => Err(format!("after `exit`: {}", lost.why())),
+            Ok(_) if !ended(ush.pid) => Err(format!("after `exit` your shell (pid {}) was still running", ush.pid.0)),
+            Ok(_) => match s.line(course, course, "echo $?") {
+                Err(lost) => {
+                    seen.ush.stop = Some((Some(last), lost.why()));
+                    Err(String::from("the course shell's `echo $?` after `exit` did not come back"))
+                }
+                Ok(seg) if norm(&seg.out, false) == [want.as_slice()] => Ok(()),
+                Ok(seg) => Err(format!(
+                    "after `{}` and `exit` the course shell's `echo $?` printed {}: your shell's exit status was not {want_text}, the status of its last line (its own `echo $?` after the same name printed {want_text})",
+                    w.noname,
+                    shown(&seg.out)
+                )),
+            },
         },
     });
 }
@@ -846,6 +1189,11 @@ fn rows(script: &[Vec<Line>], seen: &Seen) {
     let mut any_ok = false;
     for (g, id) in GROUP_IDS.iter().enumerate() {
         let mut r = Row::new(g + 1, id);
+        // Init's fault, said first and once: the "on this kernel" frames
+        // below would blame the kernel for it (a row keeps its first reason).
+        if let Some(why) = &seen.init_sh {
+            r.fail(why.clone());
+        }
         if let Err(why) = oracle_group(script, seen, g) {
             r.fail(format!("the course shell's own run of this group went wrong on this kernel, so the kernel is what is wrong here, not your shell: {why}"));
         }
@@ -859,9 +1207,15 @@ fn rows(script: &[Vec<Line>], seen: &Seen) {
                 let also = match also {
                     None => String::new(),
                     Some((at, p)) if core::ptr::eq(at, l) => format!("; on fd 2: {p}"),
-                    Some((at, p)) => format!("; on fd 2, after `{}`: {p}", at.text),
+                    Some((at, p)) => format!("; on fd 2, after {}: {p}", quoted(&at.text)),
                 };
-                r.fail(format!("`{}` printed {} on fd 1; the course shell printed {} for the same line{also}", l.text, shown(&mine.out), shown(&theirs.out)));
+                r.fail(format!("{} printed {} on fd 1; the course shell printed {} for the same line{also}", quoted(&l.text), shown(&mine.out), shown(&theirs.out)));
+            }
+            if l.text.contains(" | ") && theirs.together >= 2 && mine.together < 2 {
+                r.fail(format!(
+                    "`{}`: at most {} of the processes your shell started was running at any one time, where the course shell's run of the same line had {} at once: the second command must start before the first ends, the two joined by one pipe",
+                    l.text, mine.together, theirs.together
+                ));
             }
         }
         if segs.len() < script[g].len() {
@@ -886,6 +1240,9 @@ fn rows(script: &[Vec<Line>], seen: &Seen) {
         r.finish();
     }
     let mut r = Row::new(PLAN, ORACLE_ID);
+    if let Some(why) = &seen.init_sh {
+        r.fail(why.clone());
+    }
     for g in 0..GROUP_IDS.len() {
         if let Err(why) = oracle_group(script, seen, g) {
             let first = script[g].first().map_or("", |l| l.text.as_str());

@@ -55,7 +55,7 @@ pub fn copy_to_user(dst: VirtAddr, src: &[u8]) -> Result<(), Errno> {
     todo!("lab 09 task 6 — copy_to_user: as copy_from_user, and writable at every level")
 }
 
-/// Lab 31 step 2: the way back from every syscall acts on what is pending
+/// Lab 31 task 2: the way back from every syscall acts on what is pending
 /// (`proc::take_signal`), and a wait a signal ended (`-ERESTARTSYS`) starts
 /// again. Lab 32 step 2 grows it: after a handler that wait restarts or
 /// answers `-EINTR`, and a signal with a handler gets its frame below the
@@ -63,7 +63,7 @@ pub fn copy_to_user(dst: VirtAddr, src: &[u8]) -> Result<(), Errno> {
 /// syscall's number.
 pub fn signal_return(f: &mut crate::syscall::SyscallFrame, nr: u64) {
     let _ = (f, nr);
-    todo!("lab 31 step 2 — signal_return: what is pending acted on, an interrupted wait started again (lab 32: the frame pushed and the handler entered)")
+    todo!("lab 31 task 2 — signal_return: what is pending acted on, an interrupted wait started again (lab 32: the frame pushed and the handler entered)")
 }
 
 /// Lab 32 step 1: the same, on the way back from an interrupt that came
