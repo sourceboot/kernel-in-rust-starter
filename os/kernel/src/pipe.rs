@@ -23,8 +23,8 @@
 //! `with_fds`): the drop of a pipe's last write end wakes its reader, and a
 //! wakeup takes that lock.
 //!
-//! Fill in the bodies; keep the signatures — later labs and the course's
-//! tests use them. Add private fields and helpers as you need them.
+//! Fill in the bodies; keep the signatures — later labs use them.
+//! Add private fields and helpers as you need them.
 
 use crate::console::{File, FileObj, FileRef, OpenFile};
 use crate::proc::Process;
@@ -40,11 +40,11 @@ pub struct Ring {}
 impl Ring {
     /// Bytes waiting.
     pub fn len(&self) -> usize {
-        todo!("lab 15 step 5 — Ring::len: the bytes waiting in the ring")
+        todo!("lab 15 task 3 — Ring::len: the bytes waiting in the ring")
     }
 
     pub fn is_empty(&self) -> bool {
-        todo!("lab 15 step 7 — Ring::is_empty: no bytes waiting")
+        todo!("lab 15 task 3 — Ring::is_empty: no bytes waiting")
     }
 }
 
@@ -66,13 +66,13 @@ pub struct PipeEnd {}
 /// The pipe end `obj` names, while its pipe is alive.
 pub fn end(obj: FileObj) -> Option<PipeEnd> {
     let _ = obj;
-    todo!("lab 15 step 3 — end: the pipe end an open file's FileObj names")
+    todo!("lab 15 task 2 — end: the pipe end an open file's FileObj names")
 }
 
 /// An open file on `obj` is being made (`FileRef::open`): count it.
 pub fn acquire(obj: FileObj) -> Result<(), Errno> {
     let _ = obj;
-    todo!("lab 15 step 2 — acquire: one more open reader or writer")
+    todo!("lab 15 task 2 — acquire: one more open reader or writer")
 }
 
 /// The open file on `obj` is gone: one end fewer. The last write end gone
@@ -80,20 +80,20 @@ pub fn acquire(obj: FileObj) -> Result<(), Errno> {
 /// end of all frees the slot.
 pub fn release(obj: FileObj) {
     let _ = obj;
-    todo!("lab 15 step 8 — release: one end fewer, and wake whoever that changes things for")
+    todo!("lab 15 task 4 — release: one end fewer, and wake whoever that changes things for")
 }
 
 /// How many times a writer has gone to sleep on a full ring since boot.
-/// The course's test prints it, so a run whose ring never filled shows.
+/// `sboot test` prints it, so a run whose ring never filled shows.
 pub fn full_waits() -> u64 {
-    todo!("lab 15 step 9 — full_waits: count every time a writer goes to sleep on a full ring")
+    todo!("lab 15 task 4 — full_waits: count every time a writer goes to sleep on a full ring")
 }
 
 /// A new pipe and its two open files: (read end, write end). `flags` may
 /// carry `O_NONBLOCK`, which both open files get.
 pub fn open(flags: u32) -> Result<(FileRef, FileRef), Errno> {
     let _ = flags;
-    todo!("lab 15 step 1 — open: a new pipe in the table, and an open file on each end")
+    todo!("lab 15 task 2 — open: a new pipe in the table, and an open file on each end")
 }
 
 /// `pipe2` (syscall 293; `pipe`, 22, is `flags` 0): a new pipe, its read
@@ -103,7 +103,7 @@ pub fn open(flags: u32) -> Result<(FileRef, FileRef), Errno> {
 /// `-EINVAL`; `-EMFILE` with fewer than two fds free.
 pub fn pipe2(p: &mut Process, flags: u32) -> Result<(i32, i32), Errno> {
     let _ = (p, flags);
-    todo!("lab 15 step 10 — pipe2: a pipe on the two lowest free fds")
+    todo!("lab 15 task 7 — pipe2: a pipe on the two lowest free fds")
 }
 
 impl File for PipeEnd {
@@ -111,13 +111,13 @@ impl File for PipeEnd {
     /// write end is open, `-EAGAIN` under `O_NONBLOCK`, else sleep.
     fn read(&self, of: &OpenFile, buf: &mut [u8]) -> Result<usize, Errno> {
         let _ = (of, buf);
-        todo!("lab 15 step 6 — PipeEnd::read: take what is waiting, or sleep until a writer puts some in or the last one goes")
+        todo!("lab 15 task 3 — PipeEnd::read: take what is waiting, or sleep until a writer puts some in or the last one goes")
     }
 
     /// All of `buf`, waiting for room while a read end is open; at most
     /// `PIPE_BUF` bytes go in whole. `-EPIPE` with no read end open.
     fn write(&self, of: &OpenFile, buf: &[u8]) -> Result<usize, Errno> {
         let _ = (of, buf);
-        todo!("lab 15 step 4 — PipeEnd::write: put it all in, sleeping while the ring is full")
+        todo!("lab 15 task 3 — PipeEnd::write: put it all in, sleeping while the ring is full")
     }
 }

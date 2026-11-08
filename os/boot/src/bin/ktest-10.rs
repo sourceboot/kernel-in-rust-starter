@@ -224,6 +224,26 @@ const LIVE: usize = 64;
 /// together ask for about 160 MiB, ten times the frame pool (`POOL_BYTES`).
 const CYCLES: u32 = 10_000;
 const HELD: usize = 16;
+/// The merge probe's blocks: PROBE_K of PROBE_S bytes each, then blocks of
+/// three times that. PACK_MAX bounds the blocks taken first, to fill holes;
+/// PIN_MAX the tries for a pin above the four; REQ_MAX the 24 KiB blocks.
+/// PACK_MAX and REQ_MAX cover the whole frame pool (`POOL_BYTES`), so no heap
+/// can serve all of them without taking a frame (G1961 round 3, class B Q22
+/// (b): a no-merge heap growing 4 MiB at a time skipped the 64-block probe).
+const PROBE_S: usize = 8192;
+const PROBE_K: usize = 4;
+const PACK_MAX: usize = POOL_BYTES as usize / PROBE_S;
+const PIN_MAX: usize = 8;
+const REQ_MAX: usize = 1024;
+const _: () = assert!(REQ_MAX * 3 * PROBE_S > POOL_BYTES as usize);
+
+/// The probe's two long block lists, kept off the heap it measures and off
+/// the task's stack.
+struct ProbeSlots<const N: usize>(core::cell::UnsafeCell<[*mut u8; N]>);
+// SAFETY: only `merge_probe` touches these, once per boot, from one task.
+unsafe impl<const N: usize> Sync for ProbeSlots<N> {}
+static PACKED: ProbeSlots<PACK_MAX> = ProbeSlots(core::cell::UnsafeCell::new([core::ptr::null_mut(); PACK_MAX]));
+static BIGS: ProbeSlots<REQ_MAX> = ProbeSlots(core::cell::UnsafeCell::new([core::ptr::null_mut(); REQ_MAX]));
 
 ktest!("heap.box_vec", fn box_vec(t: &mut TestCtx) {
     // Two blocks taken before either is written: an allocator that hands
@@ -465,7 +485,187 @@ ktest!("heap.box_vec", fn box_vec(t: &mut TestCtx) {
             ));
         }
     }
+    merge_probe(t);
 });
+
+/// Freed neighbours come back as one block (G1961, round 2: sprint 5 #60).
+/// The cycles free and retake blocks of the same sizes, which a list that
+/// never joins two freed blocks serves exactly. Here 8 KiB blocks are taken
+/// until the heap takes a frame (at most PACK_MAX), so no free block but what
+/// is left of the one it just grew holds 8 KiB; then PROBE_K more. Before any
+/// of the four is freed, an 8 KiB pin is taken at or above the highest of
+/// them (at most PIN_MAX tries, the misses freed), so a heap that unmaps its
+/// free top keeps the four mapped. They are freed by address rank in the
+/// order 1, 3, 2, 4 (the third has free blocks on both sides of it), and
+/// 24 KiB blocks are taken, each kept live, until one overlaps two of the
+/// four (at most REQ_MAX), the cheap `used()` read between requests and a
+/// drain on each side: only freed neighbours served as one block can hold
+/// such a block, and a heap that cannot make one eats the rest of its free
+/// memory and then takes a frame. Last, one more 8 KiB block must not lie
+/// inside that 24 KiB one. A null 8 KiB block skips the probe with a note,
+/// and so do REQ_MAX blocks with no hit and no frame taken, which no heap
+/// drawing on `POOL_BYTES` can serve.
+fn merge_probe(t: &mut ktap::TestCtx) {
+    let ls = Layout::from_size_align(PROBE_S, 16).expect("8 KiB, 16-aligned");
+    let lb = Layout::from_size_align(3 * PROBE_S, 16).expect("24 KiB, 16-aligned");
+    let s = PROBE_S as u64;
+    // SAFETY: see `ProbeSlots`; this is the only reference to PACKED.
+    let packed: &mut [*mut u8; PACK_MAX] = unsafe { &mut *PACKED.0.get() };
+    let mut np = 0;
+    let start = used();
+    let mut pack_end = "(the most the probe takes) with no frame taken";
+    while np < PACK_MAX {
+        // SAFETY: a valid, non-zero-sized layout; freed once below.
+        let p = core::hint::black_box(unsafe { alloc::alloc::alloc(ls) });
+        if p.is_null() {
+            pack_end = "before a request came back null";
+            break;
+        }
+        packed[np] = p;
+        np += 1;
+        if used() > start {
+            pack_end = "until the heap took a frame";
+            break;
+        }
+    }
+    let mut ks = [0u64; PROBE_K];
+    for k in ks.iter_mut() {
+        // SAFETY: as above.
+        *k = core::hint::black_box(unsafe { alloc::alloc::alloc(ls) }) as u64;
+    }
+    let free_all = |ps: &[*mut u8], l: Layout| {
+        for &p in ps.iter().filter(|p| !p.is_null()) {
+            // SAFETY: each was taken in this probe with `l` and is freed once.
+            unsafe { alloc::alloc::dealloc(p, l) };
+        }
+    };
+    ks.sort_unstable();
+    t.note(format_args!(
+        "heap.box_vec: {np} 8 KiB blocks taken {pack_end}, then {PROBE_K} more at {:#x} {:#x} {:#x} {:#x}",
+        ks[0], ks[1], ks[2], ks[3]
+    ));
+    if ks[0] == 0 {
+        t.note(format_args!("heap.box_vec: one of those {PROBE_K} blocks is null, so the merge probe is skipped"));
+        for &k in ks.iter().filter(|&&k| k != 0) {
+            // SAFETY: taken above with `ls`, freed once.
+            unsafe { alloc::alloc::dealloc(k as *mut u8, ls) };
+        }
+        free_all(&packed[..np], ls);
+        return;
+    }
+    let (lo, hi) = (ks[0], ks[PROBE_K - 1] + s);
+    // The pin, taken while the four are live: the misses are held until it
+    // is found, so a heap that hands the same address back each time still
+    // moves on, and then freed.
+    let mut tries = [core::ptr::null_mut::<u8>(); PIN_MAX];
+    let mut pin = core::ptr::null_mut::<u8>();
+    let mut nt = 0;
+    while nt < PIN_MAX {
+        // SAFETY: as above.
+        let p = core::hint::black_box(unsafe { alloc::alloc::alloc(ls) });
+        if p.is_null() {
+            break;
+        }
+        if p as u64 >= hi {
+            pin = p;
+            break;
+        }
+        tries[nt] = p;
+        nt += 1;
+    }
+    free_all(&tries[..nt], ls);
+    if pin.is_null() {
+        t.note(format_args!(
+            "heap.box_vec: no 8 KiB block came back above the four in {PIN_MAX} tries; a heap that unmaps its free top may be refused below"
+        ));
+    }
+    for i in [0, 2, 1, 3] {
+        // SAFETY: taken above with `ls`, freed once.
+        unsafe { alloc::alloc::dealloc(ks[i] as *mut u8, ls) };
+    }
+    let mut bad = None;
+    let before = used_checked(&mut bad);
+    // SAFETY: see `ProbeSlots`; this is the only reference to BIGS.
+    let bigs: &mut [*mut u8; REQ_MAX] = unsafe { &mut *BIGS.0.get() };
+    let mut nb = 0;
+    let (mut hit, mut null) = (false, false);
+    let (mut took, mut returned, mut last) = (0u64, 0u64, before);
+    while nb < REQ_MAX {
+        // SAFETY: a valid, non-zero-sized layout; freed once below.
+        let p = core::hint::black_box(unsafe { alloc::alloc::alloc(lb) });
+        let now = used();
+        took += now.saturating_sub(last);
+        returned += last.saturating_sub(now);
+        last = now;
+        if p.is_null() {
+            null = true;
+            break;
+        }
+        bigs[nb] = p;
+        nb += 1;
+        let a = p as u64;
+        if ks.iter().filter(|&&k| a < k + s && k < a + 3 * s).count() >= 2 {
+            hit = true;
+            break;
+        }
+        if took > 0 {
+            break;
+        }
+    }
+    let after = used_checked(&mut bad);
+    took += after.saturating_sub(last);
+    returned += last.saturating_sub(after);
+    fail_mismatch(t, bad);
+    let (first, lastp) = (bigs[0] as u64, if nb > 0 { bigs[nb - 1] as u64 } else { 0 });
+    let blocks = if nb == 1 { "block" } else { "blocks" };
+    t.note(format_args!(
+        "heap.box_vec: pin at {:#x} after {nt} misses; the four freed in the order 1, 3, 2, 4 by address; {nb} 24 KiB {blocks} came back at {first:#x}..{lastp:#x}, the last {}overlapping two of the four; {took} frames taken, {returned} returned",
+        pin as u64,
+        if hit { "" } else { "not " }
+    ));
+    if null && nb == 0 {
+        let frames = if took == 1 { "frame" } else { "frames" };
+        t.fail(format_args!(
+            "four 8 KiB blocks were freed at {lo:#x}..{hi:#x}; then the first 24 KiB request came back null (no block came back before it, and the heap took {took} {frames}): freed neighbours must come back as one 32 KiB block that holds a 24 KiB request"
+        ));
+    } else if null {
+        t.fail(format_args!(
+            "four 8 KiB blocks were freed at {lo:#x}..{hi:#x}; then a 24 KiB request came back null ({nb} came back before it, at {first:#x}..{lastp:#x}, and the heap took {took} frames for them): freed neighbours must come back as one 32 KiB block that holds a 24 KiB request"
+        ));
+    } else if hit && took > 0 {
+        let frames = if took == 1 { "frame" } else { "frames" };
+        t.fail(format_args!(
+            "four 8 KiB blocks were freed at {lo:#x}..{hi:#x}; the 24 KiB block at {lastp:#x} came back overlapping two of them, but the heap took {took} {frames} for that request ({returned} returned): a request the freed neighbours hold must be served from them without a frame from frame::alloc"
+        ));
+    } else if took > 0 {
+        t.fail(format_args!(
+            "four 8 KiB blocks were freed at {lo:#x}..{hi:#x}; then {nb} 24 KiB {blocks} came back at {first:#x}..{lastp:#x} and the heap took {took} frames for them ({returned} returned): freed neighbours must come back as one 32 KiB block that holds a 24 KiB request"
+        ));
+    } else if !hit {
+        t.note(format_args!(
+            "heap.box_vec: {nb} 24 KiB {blocks} came back with no frame taken and none overlapping two of the freed blocks (first {first:#x}, last {lastp:#x}): the heap holds more than {} KiB free above them, so this probe cannot tell; skipped",
+            nb * 24
+        ));
+    } else {
+        // SAFETY: as above.
+        let p = core::hint::black_box(unsafe { alloc::alloc::alloc(ls) });
+        let (a, q) = (p as u64, lastp);
+        t.note(format_args!("heap.box_vec: one more 8 KiB block came back at {a:#x}"));
+        if !p.is_null() && a < q + 3 * s && q < a + s {
+            t.fail(format_args!(
+                "an 8 KiB block came back at {a:#x}, inside the live 24 KiB block at {q:#x}: a block handed out must leave the free list"
+            ));
+        } else if !p.is_null() {
+            // SAFETY: taken just above with `ls`, freed once. A block that
+            // overlaps a live one is never freed: its free would corrupt the
+            // heap's records.
+            unsafe { alloc::alloc::dealloc(p, ls) };
+        }
+    }
+    free_all(&bigs[..nb], lb);
+    free_all(&[pin], ls);
+    free_all(&packed[..np], ls);
+}
 
 // ── heap.grows ───────────────────────────────────────────────────────────
 

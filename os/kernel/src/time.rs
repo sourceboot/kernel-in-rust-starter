@@ -3,8 +3,8 @@
 //! IRQ 0 counts `TICKS`; `now_ns` turns the count into nanoseconds since
 //! `irq::init`, at tick resolution.
 //!
-//! Fill in the body; keep the signature and the static — later labs and the
-//! course's tests use them.
+//! Fill in the body; keep the signature and the static — later labs use
+//! them.
 
 use core::sync::atomic::AtomicU64;
 

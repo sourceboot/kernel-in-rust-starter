@@ -9,8 +9,7 @@
 //! bare name is not in scope here) formats onto the wire through your
 //! `serial::write_str`.
 //!
-//! Fill in the bodies; keep the signatures — later labs and the course's
-//! tests call them.
+//! Fill in the bodies; keep the signatures — later labs call them.
 
 use core::fmt;
 

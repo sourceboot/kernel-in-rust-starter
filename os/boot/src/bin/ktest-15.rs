@@ -38,20 +38,43 @@
 //! own yields until the writer runs again: within `WAKE_BOUND`, so the read
 //! that made room woke it, not a sweep at the next tick (fix round 2); the
 //! writer then refills a ring that still holds bytes, so a copy that ignores
-//! them shows as a wrong byte. A read in which the writer ran meanwhile (the
-//! tick preempted the vehicle) is counted apart and not timed. Then three
-//! reader tasks, one pipe each, asleep on an empty pipe: each must run again
-//! within `WAKE_BOUND` of the vehicle writing it a byte, and again of the
-//! vehicle dropping its only write end, and then read end of file. The
+//! them shows as a wrong byte. A read in which the writer ran meanwhile is
+//! counted apart and not timed. Then reader tasks asleep on an empty pipe, a
+//! fresh pipe and reader each round: each must run again within `WAKE_BOUND`
+//! of the vehicle writing it a byte, and again of the vehicle dropping its
+//! only write end, and then read end of file. Every one of those calls is
+//! bracketed by channel 0 of the PIT, latched by the vehicle itself with
+//! interrupts off (G1983, probe 2, 2026-11-04): a call the count shows a
+//! reload inside, that lasted a reload interval by the PM timer, or that
+//! began with IRQ 0 pending or in service at the PIC or within
+//! `RELOAD_SLACK` counts of a reload, is not judged and is retried, and the
+//! row needs `MIN_CLEAN_READS`, `MIN_CLEAN_BYTES` and `MIN_CLEAN_DROPS` calls
+//! no tick touched (at most `READER_MAX` reader rounds). So a call that waits
+//! for the tick to wake its sleeper (`hlt` inside the read) never counts,
+//! and a sleeper that ran during a clean call is credited to the call.
+//! Channel 0 not as lab 06 leaves it (mode 2 or 3, low byte then high,
+//! peaking in 1100..=1193), before the rounds or after them, or any latch
+//! above 1193, fails the row: it cannot tell then. Last, on a pipe of its
+//! own with no task asleep on it, the vehicle has helper tasks fill it —
+//! 4096 bytes, then 512 at a time, as many as a first pipe of its own took
+//! before a write waited, whatever the ring's length (G2058, 2026-11-06) —
+//! reads 512, and has another write 512: lab 15's ring takes that write at
+//! once (G1972, 2026-11-04), and one that reuses its room only once it is
+//! empty puts the writer to sleep (asleep: still unreturned after
+//! `ASLEEP_MS` and out of the run queue). The
 //! bound counts the vehicle's own yields, so it is paired with quiet windows
 //! (fix round 3): whenever a sleeper has nothing to wake it — the writer on a
 //! full ring the vehicle is not reading, a reader on an empty pipe no one
 //! writes — the vehicle yields `QUIET` times, and the sleeper may be given at
 //! most one slice plus one per PIT tick the window spans by the PM timer
-//! (never more than `QUIET_CAP`). A sweep that puts sleepers back on yields
-//! often enough to meet `WAKE_BOUND` runs the sleeper at least eight times
-//! in a window; a sweep on the tick, beside real wakeups, runs it at most once
-//! per tick and is accepted (B15). Then, on `#` lines only, `-EPIPE`
+//! (G1166: no cap). A sweep that puts sleepers back on yields often enough
+//! to meet `WAKE_BOUND` runs the sleeper at least eight times in a window; a
+//! sweep on the tick, beside real wakeups, runs it at most once per tick and
+//! is accepted (B15). And right after each of those wake events (the read, the
+//! byte, the drop) the vehicle looks once, interrupts off, at the sleeper: one
+//! that has not run yet must already be in the run queue (`tt.ready`), since
+//! lab 14's `wakeup` puts it there at once (G1166, B19 (i')); in a clean call a
+//! sleeper that ran during it is credited to the call. Then, on `#` lines only, `-EPIPE`
 //! with no reader and `-EBADF` on a closed fd. The row prints before init
 //! runs, so it stands when a later step deadlocks the run.
 //!
@@ -160,6 +183,17 @@ const PARKER: &str = "/ktest/parker";
 const PROBE_FAILED: i32 = 100;
 /// How long the whole run may take before the vehicle stops waiting.
 const RUN_MS: u64 = 20_000;
+/// Row 7's probe reads until the write's every byte and then the 0 are back,
+/// and stops waiting when `PROBE_IDLE_MS` pass with no byte read, or after
+/// `PROBE_CAP_MS` in all (PM timer; Part 2 of sprint 7 #82, 2026-11-06,
+/// class B (d), the blind pick agreeing). The bound only ends the wait:
+/// every round is judged by the wake tally, so a longer wait cannot turn a
+/// refusal into a pass. Until then the budget was a flat 2 s, and an honest
+/// kernel whose yield is slow (tick-wakes-all-slow-yield-200us: 264 quiet
+/// yields of 200 µs each a round) read 17 of its 26 rounds in it on a loaded
+/// host and was refused (8 of 15 boots at load 21-31 on the mini).
+const PROBE_IDLE_MS: u64 = 2000;
+const PROBE_CAP_MS: u64 = 5000;
 const INIT: &str = "/init";
 /// The probe's one write: three rings and a bit.
 const PROBE_BYTES: usize = 3 * 4096 + 1000;
@@ -170,17 +204,31 @@ const O_NONBLOCK: u32 = 0x800;
 /// reader's wakeup puts it in the run queue, so it runs on the next turn; a
 /// sweep that only the tick makes waits for that tick, hundreds of yields.
 const WAKE_BOUND: u64 = 32;
-/// How many pipes the probe's sleeping-reader half uses, one reader each.
-const READER_ROUNDS: u32 = 3;
+/// The fewest reads making room that row 7 must judge with no PIT tick
+/// inside the call (clean; G1983, probe 2, 2026-11-04): a round the tick
+/// touched is retried, never judged, since the tick's sweep may be what ran
+/// the writer, so a read that wakes no one and waits for the tick inside the
+/// call has no clean round at all. A clean round in which the writer ran
+/// during the call is credited to the call (a kernel whose read gives the CPU
+/// up right after its wakeup, G1981): no tick can have woken it.
+const MIN_CLEAN_READS: u32 = 6;
+/// The same floors for the reader half: one-byte writes and last-end drops.
+const MIN_CLEAN_BYTES: u32 = 3;
+const MIN_CLEAN_DROPS: u32 = 3;
+/// The most pipes the reader half uses (one reader task each) to meet them.
+const READER_MAX: u32 = 12;
+/// A round must start with channel 0's count more than this many counts
+/// below its reload value of 1193 (about 250 µs in mode 2, where the count
+/// drops 1 per 1.193 MHz input clock; about 125 µs in mode 3, where it drops
+/// 2): QEMU raises IRQ 0 from a
+/// host timer callback that may run after the count has already reloaded,
+/// so a call that starts just after a reload may still have the tick's
+/// handler land inside it.
+const RELOAD_SLACK: u16 = 300;
 /// The vehicle's yields in a quiet window (fix round 3): eight times
 /// `WAKE_BOUND + 1`, so a sweep that meets the bound runs a sleeper at least 8
 /// times in it, whatever its phase.
 const QUIET: u64 = 8 * (WAKE_BOUND + 1);
-/// The most slices a sleeper may be given in one quiet window, whatever the
-/// window's length: one, plus one per PIT tick it spans, never more than this
-/// (one fewer than the 8 a bound-meeting sweep needs; an honest tick is
-/// accepted while the window spans at most 6 ticks).
-const QUIET_CAP: u64 = 7;
 /// The course's PIT rate (lab 06: 1,193,182 Hz input, reload 1193), the
 /// vehicle's own copy: a window's ticks come from its PM-timer length.
 const PIT_INPUT_HZ: u64 = 1_193_182;
@@ -219,6 +267,140 @@ impl Clock {
 
 fn ticks() -> u64 {
     time::TICKS.load(Ordering::Relaxed)
+}
+
+// ── The PIT's channel 0, read by the test itself (G1983, probe 2) ────────
+//
+// A round of row 7 is one pipe call that must wake a sleeper (a read making
+// room, a one-byte write, the last write end's drop) and the test's look at
+// the sleeper right after it. The tick's sweep (B15's, accepted beside the
+// calls' own wakeups) may run the sleeper too, so a round is judged only if
+// no PIT tick touched it: channel 0's count, latched before the call and
+// again before the look, did not reload in between, the call lasted less
+// than one reload interval by the PM timer, IRQ 0 was neither pending nor in
+// service at the start, and the count was more than RELOAD_SLACK below its
+// reload value at the start (QEMU raises IRQ 0 from a host timer callback
+// that may run after the count has reloaded). Never the learner's TICKS.
+
+fn outb(port: u16, v: u8) {
+    // SAFETY: an 8-bit write to an I/O port; no memory is touched.
+    unsafe { asm!("out dx, al", in("dx") port, in("al") v, options(nomem, nostack, preserves_flags)) };
+}
+
+fn inb(port: u16) -> u8 {
+    let v: u8;
+    // SAFETY: an 8-bit read of an I/O port; no memory is touched.
+    unsafe { asm!("in al, dx", out("al") v, in("dx") port, options(nomem, nostack, preserves_flags)) };
+    v
+}
+
+/// Channel 0's count, latched (command 0x00 at 0x43, low byte then high
+/// from 0x40). Called with interrupts off, so nothing else on the CPU
+/// touches the PIT between the latch and its two reads.
+fn pit_latch() -> u16 {
+    outb(0x43, 0x00);
+    let lo = inb(0x40) as u16;
+    let hi = inb(0x40) as u16;
+    hi << 8 | lo
+}
+
+/// IRQ 0 in service (ISR, OCW3 0x0b) or pending (IRR, OCW3 0x0a) at the
+/// master PIC, read with interrupts off. IRR is read last, so the PIC is
+/// left reading IRR, as it starts.
+fn irq0_waiting() -> bool {
+    outb(0x20, 0x0b);
+    let isr = inb(0x20) & 1;
+    outb(0x20, 0x0a);
+    let irr = inb(0x20) & 1;
+    isr | irr != 0
+}
+
+/// One PIT period (1193 input clocks) in PM-timer counts.
+const PIT_PM: u32 = (PM_HZ * PIT_RELOAD / PIT_INPUT_HZ) as u32;
+
+/// Channel 0 as lab 06 leaves it, or what it reads instead: mode 2 or 3 by
+/// the read-back (command 0xe2), low byte then high, and a latched count
+/// that moves and peaks in 1100..=1193: sampled for at least 2 ms, and on
+/// until a sample lands in that top band or 50 ms have passed (a loaded
+/// host deschedules the guest between latches, so 2 ms can hold only a
+/// handful of samples; a reload below 1100 never reaches the band and
+/// fails at 50 ms, one above 1193 reads above it). Returns how long one
+/// reload interval lasts in PM counts: a period in mode 2, half of one in
+/// mode 3 (whose count reloads twice a period).
+fn pit_check() -> Result<u32, String> {
+    let status = quiet(|| {
+        outb(0x43, 0xe2);
+        inb(0x40)
+    });
+    let mode = (status >> 1) & 7;
+    let access = (status >> 4) & 3;
+    let (mut low, mut peak, mut above) = (u16::MAX, 0u16, false);
+    let p0 = pm();
+    loop {
+        let el = pm().wrapping_sub(p0) & 0xff_ffff;
+        if el >= 50 * PIT_PM || (el >= 2 * PIT_PM && peak >= 1100) {
+            break;
+        }
+        let c = quiet(pit_latch);
+        low = low.min(c);
+        peak = peak.max(c);
+        above |= c > 1193;
+    }
+    let ms = (pm().wrapping_sub(p0) & 0xff_ffff) / PIT_PM;
+    if !(mode & 3 == 2 || mode & 3 == 3) || access != 3 || above || peak < 1100 || low == peak {
+        Err(format!("mode {mode}, access {access}, its latched count {low}..{peak} over {ms} ms"))
+    } else if mode & 3 == 3 {
+        Ok(PIT_PM / 2)
+    } else {
+        Ok(PIT_PM)
+    }
+}
+
+/// Set when a latch reads above 1193: channel 0 was reprogrammed mid-probe.
+static PIT_ABOVE: AtomicBool = AtomicBool::new(false);
+
+/// What the test reads right before a round's call, interrupts off.
+struct Before {
+    waiting: bool,
+    count: u16,
+    pm: u32,
+}
+
+fn before() -> Before {
+    quiet(|| Before { waiting: irq0_waiting(), count: pit_latch(), pm: pm() })
+}
+
+/// Why a round is not judged: a PIT tick may have touched it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Taint {
+    /// The count reloaded between the two latches, or the call lasted a
+    /// reload interval or more by the PM timer (or read above 1193).
+    Reload,
+    /// IRQ 0 was pending or in service at the start, or the count was
+    /// within RELOAD_SLACK of its reload: a late tick may land in the call.
+    Near,
+}
+
+/// Right after a round's call: the count latched again and the sleeper
+/// looked at (`after_wake`), in one stretch with interrupts off, so no tick
+/// falls between the latch and the look.
+fn after(t: Tid, s: u64, b: &Before, span: u32) -> (Woke, Option<Taint>) {
+    quiet(|| {
+        let count = pit_latch();
+        let el = pm().wrapping_sub(b.pm) & 0xff_ffff;
+        let woke = after_wake(t, s);
+        if count > 1193 || b.count > 1193 {
+            PIT_ABOVE.store(true, Ordering::SeqCst);
+        }
+        let taint = if count > b.count || el >= span || count > 1193 {
+            Some(Taint::Reload)
+        } else if b.waiting || b.count > 1193 - RELOAD_SLACK {
+            Some(Taint::Near)
+        } else {
+            None
+        };
+        (woke, taint)
+    })
 }
 
 // ── Interrupts off around what must not be cut ───────────────────────────
@@ -407,10 +589,78 @@ fn yields_until_ran(t: Tid, s: u64) -> u64 {
     if sched::slices(t) == s { u64::MAX } else { k }
 }
 
+/// What the vehicle saw right after an event that must wake task `t`
+/// (G1166, B19 (i')): one look with interrupts off, so no tick falls
+/// between its two reads.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Woke {
+    /// `t` ran since slice count `s`, inside the call: credited to the call
+    /// when no PIT tick touched the round (G1983), else not judged.
+    Raced,
+    /// `t` had not run and was in the run queue.
+    Queued,
+    /// `t` had not run and was not in the run queue.
+    Unqueued,
+}
+
+/// Right after a wake event: whether `t` ran past slice count `s`, and if
+/// not, whether it is in the run queue (`tt.ready`, the queue lab 11's
+/// `TaskTable` names). Its two reads are made with interrupts off, one after
+/// the other (never one inside the other: a learner's `slices` may take the
+/// task table's lock itself).
+fn after_wake(t: Tid, s: u64) -> Woke {
+    quiet(|| {
+        let now = sched::slices(t);
+        let q = task::with_table(|tt| tt.ready.contains(&t));
+        if now != s {
+            Woke::Raced
+        } else if q {
+            Woke::Queued
+        } else {
+            Woke::Unqueued
+        }
+    })
+}
+
+/// One kind of wake event's rounds: judged (queued or not) and raced, on
+/// the clean rounds; and the rounds a PIT tick may have touched, by cause.
+#[derive(Clone, Copy, Default)]
+struct Tally {
+    judged: u32,
+    queued: u32,
+    raced: u32,
+    reload: u32,
+    near: u32,
+}
+
+impl Tally {
+    fn add(&mut self, w: Woke, taint: Option<Taint>) {
+        match (taint, w) {
+            (Some(Taint::Reload), _) => self.reload += 1,
+            (Some(Taint::Near), _) => self.near += 1,
+            (None, Woke::Raced) => self.raced += 1,
+            (None, Woke::Queued) => {
+                self.judged += 1;
+                self.queued += 1;
+            }
+            (None, Woke::Unqueued) => self.judged += 1,
+        }
+    }
+    fn missed(&self) -> u32 {
+        self.judged - self.queued
+    }
+    /// Rounds no PIT tick touched.
+    fn clean(&self) -> u32 {
+        self.judged + self.raced
+    }
+    fn tainted(&self) -> u32 {
+        self.reload + self.near
+    }
+}
+
 /// A quiet window: `QUIET` of the vehicle's yields while `t` sleeps with
 /// nothing to wake it. Returns the slices `t` was given and the most it may
-/// be given: 1 plus the PIT ticks the window spans by the PM timer, capped
-/// at `QUIET_CAP`.
+/// be given: 1 plus the PIT ticks the window spans by the PM timer.
 fn quiet_window(t: Tid) -> (u64, u64) {
     let s0 = sched::slices(t);
     let mut c = Clock::new();
@@ -419,7 +669,7 @@ fn quiet_window(t: Tid) -> (u64, u64) {
     }
     let n = sched::slices(t).saturating_sub(s0);
     let spans = c.us() * PIT_INPUT_HZ / PIT_RELOAD / 1_000_000;
-    (n, (1 + spans).min(QUIET_CAP))
+    (n, 1 + spans)
 }
 
 fn yield_until(ms: u64, mut done: impl FnMut() -> bool) -> bool {
@@ -444,6 +694,19 @@ fn probe_pipe() {
             return;
         }
     };
+    // Channel 0 as lab 06 left it, before any round is read by it (fail
+    // closed: a count this row cannot read judges nothing).
+    let span = match pit_check() {
+        Ok(s) => Some(s),
+        Err(why) => {
+            note(format_args!(
+                "{SLEEP_ID}: channel 0 of the PIT reads {why} (lab 06 leaves it in mode 2, low byte then high, reloading from 1193): this row tells a pipe call's own wakeup from the tick's by that count, and cannot"
+            ));
+            None
+        }
+    };
+    let pit_sane = span.is_some();
+    let span = span.unwrap_or(PIT_PM);
     // The read end non-blocking, so this vehicle never sleeps on it.
     r.flags.store(r.flags.load(Ordering::SeqCst) | O_NONBLOCK, Ordering::SeqCst);
     quiet(|| *PROBE_W.lock() = Some(w));
@@ -469,17 +732,31 @@ fn probe_pipe() {
     let mut again = 0u32;
     let mut end = None;
     let mut buf = [0u8; 512];
-    // Yields from each timed read until the writer ran (u64::MAX: not
-    // within ASLEEP_MS), and reads during which it ran anyway.
+    // Yields from each clean read the writer had not run during until it ran
+    // (u64::MAX: not within ASLEEP_MS).
     let mut waits: Vec<u64> = Vec::new();
-    let mut raced = 0u32;
+    let mut on_read = Tally::default();
     let mut sleeping = asleep;
     let mut c = Clock::new();
-    'probe: while c.ms() < 2000 {
+    // The PM time of the last byte read (or of the start).
+    let mut last = 0u64;
+    let mut capped = false;
+    'probe: loop {
+        let now = c.ms();
+        if now.saturating_sub(last) >= PROBE_IDLE_MS {
+            break 'probe;
+        }
+        if now >= PROBE_CAP_MS {
+            capped = true;
+            break 'probe;
+        }
         // One read: with the writer asleep on the full ring, it makes room.
         let s_d = sched::slices(t);
+        let b = before();
+        let res = r.read(&mut buf);
+        let (woke, taint) = after(t, s_d, &b, span);
         let mut freed = false;
-        match r.read(&mut buf) {
+        match res {
             Ok(0) => {
                 end = Some(0);
                 break 'probe;
@@ -487,6 +764,7 @@ fn probe_pipe() {
             Ok(n) => {
                 reads += 1;
                 freed = true;
+                last = c.ms();
                 for (k, &b) in buf[..n].iter().enumerate() {
                     if bad.is_none() && b != probe_byte(got + k) {
                         bad = Some(got + k);
@@ -502,28 +780,27 @@ fn probe_pipe() {
                 }
             }
         }
-        let s_r = sched::slices(t);
         let late = waits.last().is_some_and(|&k| k > WAKE_BOUND);
         if sleeping && freed && !late && WROTE.load(Ordering::SeqCst) == u64::MAX {
-            if s_r != s_d {
-                raced += 1;
-            } else {
-                waits.push(yields_until_ran(t, s_r));
+            on_read.add(woke, taint);
+            if taint.is_none() && woke != Woke::Raced {
+                waits.push(yields_until_ran(t, s_d));
             }
         } else if !freed {
             sched::yield_now();
         }
-        // The next read is timed only if the writer is asleep again first.
+        // The next read is judged only if the writer is asleep again first.
         sleeping = yield_until(ASLEEP_MS, || WROTE.load(Ordering::SeqCst) != u64::MAX || off_cpu(t))
             && WROTE.load(Ordering::SeqCst) == u64::MAX;
         if sleeping {
             wq.push(quiet_window(t));
         }
     }
+    let probe_ms = c.ms();
     let wrote = WROTE.load(Ordering::SeqCst);
-    let prompt = !waits.is_empty() && waits.iter().all(|&k| k <= WAKE_BOUND);
+    let prompt = on_read.clean() >= MIN_CLEAN_READS && waits.iter().all(|&k| k <= WAKE_BOUND);
     note(format_args!(
-        "pipe probe: a kernel task wrote {PROBE_BYTES} bytes in one call; {}; it {} asleep within {ASLEEP_MS} ms; the test read {got} bytes in {reads} reads ({again} -EAGAIN){}; then read returned {}; the write returned {}",
+        "pipe probe: a kernel task wrote {PROBE_BYTES} bytes in one call; {}; it {} asleep within {ASLEEP_MS} ms; the test read {got} bytes in {reads} reads ({again} -EAGAIN) in {probe_ms} ms{}; then read returned {}; the write returned {}",
         if early == u64::MAX { "was still inside the write after the test had yielded" } else { "had already returned before the test read" },
         if asleep { "was seen" } else { "was never seen" },
         match bad {
@@ -532,36 +809,44 @@ fn probe_pipe() {
         },
         match end {
             Some(v) => format!("{v}"),
-            None => String::from("nothing within 2 s"),
+            None if capped => format!(
+                "nothing more: the test had read {got} of {PROBE_BYTES} bytes in {reads} reads after {} s, about {} ms per read",
+                PROBE_CAP_MS / 1000,
+                PROBE_CAP_MS / u64::from(reads.max(1))
+            ),
+            None => format!("nothing within {} s of the last byte read", PROBE_IDLE_MS / 1000),
         },
         if wrote == u64::MAX { String::from("nothing yet") } else { format!("{}", wrote as i64) },
     ));
     note(format_args!(
-        "pipe probe: each time the test read once from the full ring with the writer asleep, the writer ran again after {} of the test's yields (at most {WAKE_BOUND}; -1: not within {ASLEEP_MS} ms){}",
+        "pipe probe: each time the test read once from the full ring with the writer asleep, in a read no PIT tick touched and the writer did not run during, the writer ran again after {} of the test's yields (at most {WAKE_BOUND}; -1: not within {ASLEEP_MS} ms)",
         if waits.is_empty() {
-            String::from("[none timed]")
+            String::from("[none]")
         } else {
             format!("{:?}", waits.iter().map(|&k| if k == u64::MAX { -1 } else { k as i64 }).collect::<Vec<_>>())
         },
-        if raced > 0 { format!("; {raced} more read(s) it ran during, not timed") } else { String::new() },
     ));
-    if !prompt && !waits.is_empty() {
+    if !prompt && !waits.iter().all(|&k| k <= WAKE_BOUND) {
         note(format_args!(
             "{SLEEP_ID}: a writer asleep on a full pipe did not run within {WAKE_BOUND} yields of a read making room: a read that frees space wakes the writers asleep on the pipe, so the writer runs on the next turn"
         ));
     }
     // The other side: a reader asleep on an empty pipe runs again within
     // WAKE_BOUND of the vehicle's yields once the vehicle writes a byte, and
-    // again once the vehicle drops the only write end (end of file). Three
-    // pipes, one reader task each, so a sweep that happens to land inside
-    // the bound once does not pass.
+    // again once the vehicle drops the only write end (end of file). One
+    // pipe and one reader task per round, until both floors of clean rounds
+    // are met (at most READER_MAX pipes), so a tick that happens to land
+    // inside a call is retried, not judged.
     let fmt_k = |k: u64| if k == u64::MAX { -1 } else { k as i64 };
     let mut on_write: Vec<i64> = Vec::new();
     let mut on_close: Vec<i64> = Vec::new();
     let mut woke_reader = true;
     let mut seen = 0u32;
+    let mut rounds = 0u32;
     let mut ends: Vec<String> = Vec::new();
-    for _ in 0..READER_ROUNDS {
+    let mut on_byte = Tally::default();
+    let mut on_drop = Tally::default();
+    while rounds < READER_MAX && (on_byte.clean() < MIN_CLEAN_BYTES || on_drop.clean() < MIN_CLEAN_DROPS) {
         let (r3, w3) = match pipe::open(0) {
             Ok(p) => p,
             Err(e) => {
@@ -570,6 +855,7 @@ fn probe_pipe() {
                 break;
             }
         };
+        rounds += 1;
         RDR_GOT.store(0, Ordering::SeqCst);
         RDR_END.store(u64::MAX, Ordering::SeqCst);
         quiet(|| *PROBE_R.lock() = Some(r3));
@@ -579,14 +865,24 @@ fn probe_pipe() {
             rq.push(quiet_window(rt));
         }
         let s1 = sched::slices(rt);
+        let b1 = before();
         let wr = w3.write(b"x");
+        let (woke_w, taint_w) = after(rt, s1, &b1, span);
+        if a1 {
+            on_byte.add(woke_w, taint_w);
+        }
         let k1 = if a1 { yields_until_ran(rt, s1) } else { u64::MAX };
         let a2 = yield_until(ASLEEP_MS, || RDR_GOT.load(Ordering::SeqCst) == 1 && off_cpu(rt));
         if a2 {
             rq.push(quiet_window(rt));
         }
         let s2 = sched::slices(rt);
+        let b2 = before();
         drop(w3);
+        let (woke_d, taint_d) = after(rt, s2, &b2, span);
+        if a2 {
+            on_drop.add(woke_d, taint_d);
+        }
         let k2 = if a2 { yields_until_ran(rt, s2) } else { u64::MAX };
         let _ = yield_until(100, || RDR_END.load(Ordering::SeqCst) != u64::MAX);
         let _ = yield_until(100, || task::state(rt).is_none_or(|s| s == task::State::Dead));
@@ -598,30 +894,119 @@ fn probe_pipe() {
         on_close.push(fmt_k(k2));
         ends.push(if e == u64::MAX { String::from("none") } else if e == 0 { String::from("0") } else { format!("-{e}") });
         woke_reader &= a1 && a2 && wr == Ok(1) && k1 <= WAKE_BOUND && k2 <= WAKE_BOUND && RDR_GOT.load(Ordering::SeqCst) == 1 && e == 0;
+        if !woke_reader {
+            break;
+        }
     }
     note(format_args!(
-        "pipe probe: {seen} of {READER_ROUNDS} reader tasks were seen asleep on an empty pipe before and after the test wrote it one byte; each ran again after {on_write:?} of the test's yields once the byte was written, and after {on_close:?} once the test dropped the only write end (at most {WAKE_BOUND}; -1: not within {ASLEEP_MS} ms, or never seen asleep); their last reads returned {ends:?}"
+        "pipe probe: {seen} of {rounds} reader tasks were seen asleep on an empty pipe before and after the test wrote it one byte; each ran again after {on_write:?} of the test's yields once the byte was written, and after {on_close:?} once the test dropped the only write end (at most {WAKE_BOUND}; -1: not within {ASLEEP_MS} ms, or never seen asleep); their last reads returned {ends:?}"
     ));
-    if !woke_reader && seen == READER_ROUNDS {
+    if !woke_reader && seen == rounds {
         note(format_args!(
             "{SLEEP_ID}: a reader asleep on an empty pipe did not run within {WAKE_BOUND} yields of a byte being written or of the last write end being dropped: a write wakes the readers asleep on the pipe, and so does the last write end going away"
+        ));
+    }
+    // The queue check (G1166), on the clean rounds only (G1983): right after
+    // each event, a sleeper that had not run yet must already be in the run
+    // queue, and one that ran during a call no tick touched was run by it.
+    let fmt_t = |t: &Tally| {
+        format!(
+            "{} of {} ({} more it ran during; not judged: {} a reload fell inside, {} began with IRQ 0 waiting or within {RELOAD_SLACK} counts of a reload)",
+            t.queued, t.judged, t.raced, t.reload, t.near
+        )
+    };
+    note(format_args!(
+        "pipe probe: right after each event that must wake a sleeper, the test looked at the run queue with interrupts off, judging only the calls no PIT tick touched by channel 0's latched count: after a read making room, the writer was in it {}; after a one-byte write, the reader {}; after the last write end was dropped, the reader {}",
+        fmt_t(&on_read),
+        fmt_t(&on_byte),
+        fmt_t(&on_drop),
+    ));
+    let woke_line = |what: &str, who: &str, t: &Tally| {
+        if t.missed() > 0 {
+            note(format_args!(
+                "{SLEEP_ID}: right after {what}, the {who} asleep on the pipe had not run and was not in the run queue ({} of {} times): the {who} must be back in the run queue by the time the call returns. The pipe calls `wakeup` on the channel the {who} sleeps on, and lab 14's `wakeup` puts every task asleep there back in the run queue at once, not at a later yield or tick",
+                t.missed(),
+                t.judged,
+            ));
+        }
+    };
+    woke_line("a read made room on the full pipe", "writer", &on_read);
+    woke_line("a one-byte write to the empty pipe", "reader", &on_byte);
+    woke_line("the pipe's last write end was dropped", "reader", &on_drop);
+    let queued_ok = on_read.missed() == 0 && on_byte.missed() == 0 && on_drop.missed() == 0;
+    // The floors (G1983): enough calls no tick touched, on each side. A call
+    // that wakes no one and waits for the tick inside it has none.
+    let floor_line = |what: &str, who: &str, t: &Tally, min: u32| {
+        if t.clean() < min {
+            note(format_args!(
+                "{SLEEP_ID}: of {} {what} with the {who} asleep, only {} had no PIT tick inside the call ({} spanned a reload of channel 0, {} began with IRQ 0 waiting or just after a reload); the row needs {min}: {}",
+                t.clean() + t.tainted(),
+                t.clean(),
+                t.reload,
+                t.near,
+                // What was seen (sprint 7 #82, 2026-11-06): calls that a
+                // reload fell inside waited for a tick; calls that began with
+                // IRQ 0 already waiting were never judged at all, which is
+                // the machine's late ticks, not the pipe (G2145). Only when
+                // enough calls were made to meet the floor had they been clean.
+                if t.near > t.reload && t.clean() + t.tainted() >= min {
+                    format!(
+                        "{} of them began with IRQ 0 already waiting or just after a reload: the machine's ticks arrived late, so too few calls could be judged",
+                        t.near
+                    )
+                } else {
+                    format!("the call that makes room or ends the wait wakes the {who} itself and returns in microseconds, with no tick inside it")
+                },
+            ));
+        }
+    };
+    floor_line("reads making room on the full pipe", "writer", &on_read, MIN_CLEAN_READS);
+    floor_line("one-byte writes to an empty pipe", "reader", &on_byte, MIN_CLEAN_BYTES);
+    floor_line("drops of a pipe's last write end", "reader", &on_drop, MIN_CLEAN_DROPS);
+    let floors_ok = on_read.clean() >= MIN_CLEAN_READS && on_byte.clean() >= MIN_CLEAN_BYTES && on_drop.clean() >= MIN_CLEAN_DROPS;
+    // Channel 0 again, after every round: still counting as at the start,
+    // so a round whose count stood still (a call shorter than one PIT input
+    // clock) was clean, not a stopped channel.
+    let pit_after = pit_check();
+    if let (true, Err(why)) = (pit_sane, &pit_after) {
+        note(format_args!(
+            "{SLEEP_ID}: after the probe's rounds, channel 0 of the PIT reads {why}; it read as lab 06 leaves it before them: it was reprogrammed while the pipe calls ran, and this row cannot tell a call's own wakeup from the tick's"
+        ));
+    }
+    let pit_ok = pit_sane && pit_after.is_ok() && !PIT_ABOVE.load(Ordering::SeqCst);
+    if PIT_ABOVE.load(Ordering::SeqCst) {
+        note(format_args!(
+            "{SLEEP_ID}: channel 0 of the PIT read above 1193 while the pipe calls ran: it was reprogrammed, and this row cannot tell a call's own wakeup from the tick's"
         ));
     }
     // Every window held: the writer's (at least the first) and two per reader.
     let fmt_q = |v: &[(u64, u64)]| format!("{:?}", v.iter().map(|&(n, a)| format!("{n}/{a}")).collect::<Vec<_>>());
     let held = |v: &[(u64, u64)]| v.iter().all(|&(n, a)| n <= a);
-    let quiet_ok = !wq.is_empty() && rq.len() == 2 * READER_ROUNDS as usize && held(&wq) && held(&rq);
+    let quiet_ok = !wq.is_empty() && rq.len() == 2 * rounds as usize && held(&wq) && held(&rq);
     note(format_args!(
-        "pipe probe: with nothing to wake it, over {QUIET} of the test's yields each time, the writer asleep on the full ring was given {} slices, and the readers asleep on empty pipes {} (given/most: 1 plus one per PIT tick the window spanned by the PM timer, at most {QUIET_CAP})",
+        "pipe probe: with nothing to wake it, over {QUIET} of the test's yields each time, the writer asleep on the full ring was given {} slices, and the readers asleep on empty pipes {} (given/most: 1 plus one per PIT tick the window spanned by the PM timer)",
         fmt_q(&wq),
         fmt_q(&rq),
     ));
     if !(held(&wq) && held(&rq)) {
         note(format_args!(
-            "{SLEEP_ID}: in one of the test's quiet windows ({QUIET} of its yields, with nothing to wake the sleeper) a sleeper was given more slices than the window allows: 1 plus one per PIT tick the window spanned, at most {QUIET_CAP} (given/most above). A sleeper runs again when the read, write or release it waits for happens; a kernel that puts sleepers back in the run queue on its own gives them slices here: on every few yields, or on every tick once its yields are slow enough that a window spans many more than {QUIET_CAP} ticks"
+            "{SLEEP_ID}: in one of the test's quiet windows ({QUIET} of its yields, with nothing to wake the sleeper) a sleeper was given more slices than the window allows: 1 plus one per PIT tick the window spanned (given/most above). A sleeper runs again when the read, write or release it waits for happens; a kernel that puts sleepers back in the run queue on its own, more often than the tick, gives them slices here"
         ));
     }
-    let ok = asleep && early == u64::MAX && prompt && woke_reader && quiet_ok && got == PROBE_BYTES && bad.is_none() && end == Some(0) && wrote == PROBE_BYTES as u64;
+    // The ring reuses the room a read frees before it empties (G1972).
+    let reuse = ring_reuse();
+    note(format_args!(
+        "pipe probe: on a pipe of the test's own, filled until a write waited, a read took 512, and a 512-byte write then {}",
+        match &reuse {
+            Ok(cap) => format!("went in whole at once (the ring took {cap} bytes before a write waited)"),
+            Err(_) => String::from("did not (below)"),
+        }
+    ));
+    if let Err(why) = &reuse {
+        note(format_args!("{SLEEP_ID}: {why}"));
+    }
+    let reuse_ok = reuse.is_ok();
+    let ok = asleep && early == u64::MAX && prompt && woke_reader && queued_ok && floors_ok && pit_ok && quiet_ok && reuse_ok && got == PROBE_BYTES && bad.is_none() && end == Some(0) && wrote == PROBE_BYTES as u64;
     row(ok, SLEEP_ROW, SLEEP_ID);
     drop(r);
     // -EPIPE: a write with every read end gone. -EBADF: a closed fd.
@@ -640,6 +1025,208 @@ fn probe_pipe() {
         console::NFD - 1
     ));
     let _ = yield_until(100, || task::state(t).is_none_or(|s| s == task::State::Dead));
+}
+
+// ── G1972: the ring reuses the room a read frees (Q2 (b), 2026-11-04) ───
+
+/// A write job for `ring_writer`: an end and a length; the end comes back
+/// in `RING_BACK` before `RING_WROTE` is set.
+static RING_W: SpinLock<Option<(FileRef, usize)>> = SpinLock::new(None);
+static RING_BACK: SpinLock<Option<FileRef>> = SpinLock::new(None);
+static RING_WROTE: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// One blocking write of the job's length, then the end is handed back.
+fn ring_writer() {
+    let job = quiet(|| RING_W.lock().take());
+    let Some((w, n)) = job else { return };
+    let buf: Vec<u8> = (0..n).map(probe_byte).collect();
+    let r = match w.write(&buf) {
+        Ok(k) => k as u64,
+        Err(e) => (-e) as u64,
+    };
+    quiet(|| *RING_BACK.lock() = Some(w));
+    RING_WROTE.store(r, Ordering::SeqCst);
+}
+
+/// How one helper write ended: returned (+n or -errno), asleep, or neither
+/// within `ASLEEP_MS`.
+enum Wrote {
+    Returned(u64),
+    Asleep,
+    Neither,
+}
+
+/// Asleep is decided only once the write has had all of `ASLEEP_MS` to
+/// return and the writer is then off the CPU and out of the run queue: a
+/// writer the tick preempted, or one that yields inside its write, is in the
+/// run queue, and a short off-CPU stretch that ends in time is not a sleep.
+fn ring_write(w: FileRef, n: usize) -> Wrote {
+    RING_WROTE.store(u64::MAX, Ordering::SeqCst);
+    quiet(|| *RING_W.lock() = Some((w, n)));
+    let t = task::spawn(ring_writer);
+    let _ = yield_until(ASLEEP_MS, || RING_WROTE.load(Ordering::SeqCst) != u64::MAX);
+    match RING_WROTE.load(Ordering::SeqCst) {
+        u64::MAX if off_cpu(t) => Wrote::Asleep,
+        u64::MAX => Wrote::Neither,
+        v => Wrote::Returned(v),
+    }
+}
+
+/// The most bytes row 7's fill puts into a pipe no one reads before it fails
+/// the row (G2058, 2026-11-06): the probe's own write above, `PROBE_BYTES`,
+/// which must already have slept on the full ring, so a ring that holds this
+/// much without a write waiting was refused there too, and the fill is
+/// bounded whatever the learner's ring does.
+const FILL_MAX: usize = PROBE_BYTES;
+/// The fill's step after its first `PIPE_BUF` (4096) bytes, and the size of
+/// the read and the write the reuse check makes.
+const FILL_STEP: usize = 512;
+
+/// One step of a fill: the write returned all its bytes and the end came
+/// back, or it waited (no room: still unreturned after `ASLEEP_MS`, asleep
+/// or not; the end stays with the writer task until `ring_drain` lets it
+/// finish).
+enum Step {
+    Took(FileRef),
+    Waited,
+}
+
+fn ring_step(w: FileRef, n: usize, at: usize) -> Result<Step, String> {
+    match ring_write(w, n) {
+        Wrote::Returned(v) if v == n as u64 => quiet(|| RING_BACK.lock().take())
+            .map(Step::Took)
+            .ok_or_else(|| String::from("the write end did not come back from the writer task")),
+        Wrote::Returned(v) => Err(format!("with {at} bytes in a pipe no one read, a {n}-byte write returned {}", v as i64)),
+        Wrote::Asleep | Wrote::Neither => Ok(Step::Waited),
+    }
+}
+
+/// The first write into an empty pipe: 4096 bytes (PIPE_BUF), which lab 15's
+/// ring takes whole at once.
+fn ring_first(w: FileRef) -> Result<FileRef, String> {
+    let full = ring_write(w, 4096);
+    let Wrote::Returned(4096) = full else {
+        return Err(match full {
+            Wrote::Returned(v) => format!("a write of 4096 bytes (PIPE_BUF) to an empty pipe returned {}", v as i64),
+            Wrote::Asleep => String::from("a write of 4096 bytes (PIPE_BUF) to an empty pipe slept: lab 15's ring takes a write of at most PIPE_BUF bytes as soon as that much room is free"),
+            Wrote::Neither => format!("a write of 4096 bytes (PIPE_BUF) to an empty pipe neither returned nor slept within {ASLEEP_MS} ms"),
+        });
+    };
+    quiet(|| RING_BACK.lock().take()).ok_or_else(|| String::from("the write end did not come back from the writer task"))
+}
+
+/// Read the pipe empty until the helper writer's last write has returned
+/// (bounded, and never sleeping: the read end is non-blocking), then drop
+/// the end it hands back.
+fn ring_drain(r: &FileRef) {
+    let mut buf = [0u8; FILL_STEP];
+    let _ = yield_until(ASLEEP_MS, || {
+        while let Ok(n) = r.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+        }
+        RING_WROTE.load(Ordering::SeqCst) != u64::MAX
+    });
+    drop(quiet(|| RING_BACK.lock().take()));
+}
+
+/// A pipe of the test's own, open for reading (non-blocking) and writing.
+fn ring_pipe() -> Result<(FileRef, FileRef), String> {
+    let (r, w) = pipe::open(0).map_err(|e| format!("pipe::open(0) returned {}", errno_text(e)))?;
+    r.flags.store(r.flags.load(Ordering::SeqCst) | O_NONBLOCK, Ordering::SeqCst);
+    Ok((r, w))
+}
+
+/// How many bytes a pipe no one reads takes before a write waits, whatever
+/// the ring's length (G2058): 4096 at once, then `FILL_STEP` at a time
+/// until a write is still unreturned after `ASLEEP_MS`; more than `FILL_MAX`
+/// with no write waiting fails the row by itself. The pipe is then read
+/// empty, so the waiting writer finishes, and dropped.
+fn ring_capacity() -> Result<usize, String> {
+    let (r, w) = ring_pipe()?;
+    let res = match ring_first(w) {
+        Err(e) => Err(e),
+        Ok(mut w) => {
+            let mut cap = 4096;
+            loop {
+                if cap >= FILL_MAX {
+                    drop(w);
+                    break Err(format!(
+                        "a pipe no one read took {cap} bytes and no write waited: a write with no room in the ring waits for a read, and the probe's writer above must already have slept on a full ring of fewer bytes than that"
+                    ));
+                }
+                match ring_step(w, FILL_STEP, cap) {
+                    Ok(Step::Took(next)) => {
+                        w = next;
+                        cap += FILL_STEP;
+                    }
+                    Ok(Step::Waited) => break Ok(cap),
+                    Err(e) => break Err(e),
+                }
+            }
+        }
+    };
+    ring_drain(&r);
+    drop(r);
+    res
+}
+
+/// Row 7's reuse check (G1972, 2026-11-04; filled to the ring's own length
+/// since G2058, 2026-11-06): a first pipe of the test's own measures how many
+/// bytes the ring takes before a write waits (`ring_capacity`); a second,
+/// with no task asleep on it while the test reads, takes that many again (so
+/// it is full), gives 512 to a read, and must then take a 512-byte write with
+/// 512 bytes of room free at the ring's front. Lab 15's ring takes a write of
+/// at most PIPE_BUF bytes as soon as that much room is free (this course's
+/// rule, CONTRACT §B.2-15; POSIX does not ask it), so it returns; a ring that
+/// uses its bytes front to back and reuses them only once it is empty
+/// (G1972's never-wraps) has no room after its end, however long the ring,
+/// and puts the writer to sleep. Before G2058 the check filled exactly 4096
+/// bytes, so a never-wrapping ring 512 or more bytes longer than PIPE_BUF
+/// still had room at its tail and scored 11/11. Within `ASLEEP_MS` the
+/// verdict is the ring's state, not a time: no tick and no yield inside a
+/// call can move it, and the read wakes no one, so a read that yields after
+/// a wakeup has nothing to yield to. A write still unreturned at `ASLEEP_MS`
+/// with its writer runnable is `Wrote::Neither`, which fails the row too.
+/// Ok is the ring's measured capacity.
+fn ring_reuse() -> Result<usize, String> {
+    let cap = ring_capacity()?;
+    let (r, w) = ring_pipe()?;
+    let verdict = (|| {
+        let mut w = ring_first(w)?;
+        let mut put = 4096;
+        while put < cap {
+            match ring_step(w, FILL_STEP, put)? {
+                Step::Took(next) => {
+                    w = next;
+                    put += FILL_STEP;
+                }
+                Step::Waited => {
+                    return Err(format!(
+                        "a pipe no one read took {cap} bytes before a write waited, and a second one only {put}"
+                    ))
+                }
+            }
+        }
+        let mut buf = [0u8; FILL_STEP];
+        match r.read(&mut buf) {
+            Ok(FILL_STEP) => {}
+            other => return Err(format!("then a 512-byte read from the full pipe ({cap} bytes) returned {other:?}")),
+        }
+        match ring_write(w, FILL_STEP) {
+            Wrote::Returned(512) => Ok(cap),
+            Wrote::Returned(v) => Err(format!("then a 512-byte write with 512 bytes of room free returned {}", v as i64)),
+            Wrote::Asleep => Err(format!(
+                "{cap} bytes went into an empty pipe, filling it (on a pipe of the test's own, a further write waited), and a read took 512 of them; then a 512-byte write slept with 512 bytes of room free: the ring does not reuse the room a read frees at its front until it is empty. Lab 15's ring takes a write of at most PIPE_BUF bytes as soon as that much room is free, wherever in the ring it lies"
+            )),
+            Wrote::Neither => Err(format!("then a 512-byte write with 512 bytes of room free neither returned nor slept within {ASLEEP_MS} ms")),
+        }
+    })();
+    // Drain, so a sleeping writer goes in and returns.
+    ring_drain(&r);
+    drop(r);
+    verdict
 }
 
 // ── Row 6: a last write end dropped by exec and by dup2 ──────────────────

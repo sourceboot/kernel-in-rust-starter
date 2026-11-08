@@ -106,17 +106,23 @@
 //!     read that is never woken holds `evtest` until `RUN_MS`.
 //!  10 `input.poll` (plain) — `POLLIN` and `POLLOUT` on a console holding
 //!     a typed line (this file types `zq` and enter into the ring first),
-//!     0 once it is read; then `evtest` writes `# sboot poll-ready` to
-//!     /dev/console and polls, and the rubric's `[[script]]` types F12
+//!     0 once it is read; then `ROUNDS` rounds of F12 (2026-11-06,
+//!     G1834). In round k `evtest` writes `# sboot poll-ready k/ROUNDS`
+//!     to /dev/console, asks `poll(0)` between two reads of
+//!     `CLOCK_MONOTONIC`, and polls; the rubric's `[[script]]` types F12
 //!     once that line is on the serial port (the engine reads it there:
 //!     `evtest`'s stdout is this file's pipe, read only when this file
-//!     runs, so it cannot carry the cue). Its `poll(3000)` must wake for
-//!     the press within 2 s with `POLLIN`, and `POLLIN` must come before
-//!     each of the four events, 0 after them (`poll ok`). The key comes
-//!     through the real interrupt, as the script's five do, so the wake is
-//!     graded whether or not this file gets the CPU while `evtest` polls
-//!     (G1820). If `evtest` never prints its `poll` line this file prints
-//!     `# sboot poll-ready` itself, last, so the script runs out.
+//!     runs, so it cannot carry the cue). A round in which F12 was already
+//!     in at `poll(0)`, or the clock moved more than evtest's `GAP_MAX_NS`
+//!     across it, is not judged: the key may have come before the poll
+//!     looked. In a judged round `poll(3000)` must wake for the press
+//!     within 2 s with `POLLIN`, and `POLLIN` must come before each of the
+//!     four events, 0 after them. `poll ok` needs at least one judged round
+//!     and every judged round passed. The key comes through the real
+//!     interrupt, as the script's five do, so the wake is graded whether
+//!     or not this file gets the CPU while `evtest` polls (G1820). Every
+//!     round's line `evtest` did not report having written, this file
+//!     prints itself, last, so the script runs out.
 //!
 //! Plan 10. A program still running after `RUN_MS` by the PM timer fails
 //! the rows whose lines it had not printed; the vehicle then goes on.
@@ -212,8 +218,11 @@ const LOOK_MS: u64 = 50;
 /// z, q, enter, each pressed and released.
 const LINE_KEYS: [u8; 6] = [0x2c, 0xac, 0x10, 0x90, 0x1c, 0x9c];
 /// F12's make code: the key that wakes a read that slept (the script types
-/// the poll's F12 itself).
+/// the poll's F12s itself).
 const F12_MAKE: u8 = 0x58;
+/// The F12 rounds `evtest` runs (its `ROUNDS`), one cue line and one F12
+/// of the rubric's `[[script]]` each (2026-11-06, G1834).
+const ROUNDS: usize = 3;
 
 // ── Time that does not depend on the learner's tick ──────────────────────
 
@@ -308,21 +317,50 @@ fn errno_text(e: Errno) -> String {
 
 // ── One row's recorder (ktap's shapes, printed in this file's order) ─────
 
+/// One row. Its `#` notes are held and printed by `finish`, just before its
+/// own result line, so they come after the previous row's result line (the
+/// grader shows a failed row the `#` lines between the two, G2097): rows
+/// judged together off one program's run print each other's notes in no
+/// one else's window. The `live` row (row 1, whose checks call the learner's
+/// code between its notes) prints each note at once instead; nothing but
+/// the plan comes before it. `info` notes print before the failures, so a
+/// failed row's last `#` line is its own failure.
 struct Row {
     id: &'static str,
     failed: bool,
+    live: bool,
+    info: Vec<String>,
+    why: Vec<String>,
 }
 
 impl Row {
     fn new(id: &'static str) -> Row {
-        Row { id, failed: false }
+        Row { id, failed: false, live: false, info: Vec::new(), why: Vec::new() }
+    }
+    fn live(id: &'static str) -> Row {
+        Row { live: true, ..Row::new(id) }
     }
     fn fail(&mut self, why: core::fmt::Arguments) {
         self.failed = true;
-        note(why);
+        if self.live {
+            note(why);
+        } else {
+            self.why.push(format!("{why}"));
+        }
+    }
+    /// A note that fails nothing: what was seen, shown when the row fails.
+    fn info(&mut self, what: core::fmt::Arguments) {
+        if self.live {
+            note(what);
+        } else {
+            self.info.push(format!("{what}"));
+        }
     }
     fn finish(self, n: usize) {
         quiet(|| {
+            for l in self.info.iter().chain(self.why.iter()) {
+                ktap::note(format_args!("{l}"));
+            }
             if self.failed {
                 kernel::kprintln!("not ok {n} - {}", self.id);
             } else {
@@ -544,19 +582,23 @@ fn keycode_of(sc: u8) -> Option<u16> {
 
 /// Row 1, printed at once: every scancode, 0 to 0xff.
 fn keycode_row() {
-    let mut row = Row::new(KEYCODE_ID);
+    let mut row = Row::live(KEYCODE_ID);
     let mut wrong = 0;
+    let mut first: Option<(u8, Option<u16>, Option<u16>)> = None;
     for sc in 0..=0xffu8 {
         let (got, want) = (kbd::to_keycode(sc), keycode_of(sc));
         if got != want {
             wrong += 1;
+            first = first.or(Some((sc, got, want)));
             if wrong <= 4 {
                 row.fail(format_args!("{KEYCODE_ID}: kbd::to_keycode({sc:#04x}) returned {got:?}; expected {want:?}"));
             }
         }
     }
-    if wrong > 4 {
-        row.fail(format_args!("{KEYCODE_ID}: {wrong} of the 256 scancodes answered wrong in all"));
+    if let (Some((sc, got, want)), true) = (first, wrong > 1) {
+        row.fail(format_args!(
+            "{KEYCODE_ID}: first wrong: kbd::to_keycode({sc:#04x}) returned {got:?}, expected {want:?}; {wrong} of the 256 scancodes answered wrong in all"
+        ));
     }
     row.finish(1);
 }
@@ -828,6 +870,14 @@ fn fb_rows() {
                 geometry = true;
             }
             let after = screen_at(&fb, x, y);
+            if let (Some(Ok(_)), None) = (live, &gone) {
+                fill.info(format_args!("{FILL_ID}: the fill was on the screen while `/bin/fbtest fill` held its mapping"));
+            }
+            if after != FILL_PX {
+                fill.fail(format_args!(
+                    "{FILL_ID}: after `/bin/fbtest fill` the screen at ({x}, {y}) holds {after:#010x}, not the {FILL_PX:#010x} it stored through its shared mapping of /dev/fb0"
+                ));
+            }
             if let Some(why) = expect_line(&run, "fill", FILL_LINE) {
                 fill.fail(format_args!("{FILL_ID}: {why}"));
             } else if let Some(why) = shown_wrong("`/bin/fbtest fill` held its shared mapping of /dev/fb0", (x, y), live, FILL_PX, after) {
@@ -840,14 +890,6 @@ fn fb_rows() {
                 fill.fail(format_args!("{FILL_ID}: {why}"));
             } else if let Some(e) = ended(&run) {
                 fill.fail(format_args!("{FILL_ID}: {e}"));
-            }
-            if after != FILL_PX {
-                fill.fail(format_args!(
-                    "{FILL_ID}: after `/bin/fbtest fill` the screen at ({x}, {y}) holds {after:#010x}, not the {FILL_PX:#010x} it stored through its shared mapping of /dev/fb0"
-                ));
-            }
-            if let (Some(Ok(_)), None) = (live, &gone) {
-                note(format_args!("{FILL_ID}: the fill was on the screen while `/bin/fbtest fill` held its mapping"));
             }
         }
     }
@@ -888,7 +930,7 @@ fn fb_rows() {
             } else if let Some(e) = ended(&run) {
                 fork.fail(format_args!("{FORK_ID}: {e}"));
             }
-            note(format_args!(
+            fork.info(format_args!(
                 "fb0.mmap.frame: the screen at ({x}, {y}) holds {after:#010x} (the fb row wants 0x00e8702c); fbtest: {:?}; {}; frames in use {f0} before fbtest, {f1} after{}",
                 line.unwrap_or("no `private` line"),
                 ended(&run).unwrap_or_else(|| String::from("fbtest exited 0")),
@@ -909,11 +951,12 @@ fn fb_rows() {
 /// `poll` printed and `evtest` still there after `UNBLOCK_MS` → one more
 /// key, to wake a read that slept. If `evtest` ends before `ready`, the
 /// keys-ready line is printed anyway so the script runs out.
-/// Returns (ms, whether this file had to wake it).
-fn drive(run: &mut Run) -> (u64, bool) {
+/// Returns (ms, whether this file had to wake it, whether `evtest` had
+/// printed its `eagain` line by then).
+fn drive(run: &mut Run) -> (u64, bool, bool) {
     let mut buf = alloc::vec![0u8; 4096];
     let mut c = Clock::new();
-    let (mut ready, mut woke) = (false, false);
+    let (mut ready, mut woke, mut woke_late) = (false, false, false);
     let mut poll_at: Option<u64> = None;
     loop {
         match run.r.read(&mut buf) {
@@ -935,6 +978,7 @@ fn drive(run: &mut Run) -> (u64, bool) {
         }
         if !woke && run.open && poll_at.is_some_and(|t| c.ms() >= t + UNBLOCK_MS) {
             woke = true;
+            woke_late = has("eagain");
             quiet(|| kbd::push(F12_MAKE));
         }
         if !run.open || c.ms() >= RUN_MS {
@@ -944,7 +988,57 @@ fn drive(run: &mut Run) -> (u64, bool) {
     }
     let ms = c.ms();
     let _ = yield_until(500, || exit_of(run.pid).is_some());
-    (ms, woke)
+    (ms, woke, woke_late)
+}
+
+/// Round `k`'s cue, the line the script waits on before its `k`th F12.
+fn cue(k: usize) {
+    quiet(|| kernel::kprintln!("# sboot poll-ready {k}/{ROUNDS}"));
+}
+
+/// `evtest`'s `round <k> <verdict> gap <us>` lines, as (k, verdict, us).
+fn rounds_of(out: &str) -> Vec<(usize, &str, u64)> {
+    out.lines()
+        .filter_map(|l| {
+            let w: Vec<&str> = l.split(' ').collect();
+            match w.as_slice() {
+                ["round", k, v, "gap", us] => Some((k.parse().ok()?, *v, us.parse().ok()?)),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// Every round's cue `evtest` did not say it wrote: a round it never
+/// reached, or whose line it could not write (`nocue`). Printed last, so the
+/// script runs out (the F12s it brings land in a ring nothing reads).
+fn missing_cues(out: &str) {
+    let rounds = rounds_of(out);
+    for k in 1..=ROUNDS {
+        if !rounds.iter().any(|&(n, v, _)| n == k && v != "nocue") {
+            cue(k);
+        }
+    }
+}
+
+/// What the F12 rounds came to, for `input.poll`'s last line: how many were
+/// judged and passed, and why each other one was not judged.
+fn rounds_fact(out: &str) -> String {
+    let rounds = rounds_of(out);
+    if rounds.is_empty() {
+        return format!("none of the {ROUNDS} F12 rounds ran");
+    }
+    let n = |v: &str| rounds.iter().filter(|r| r.1 == v).count();
+    let (ok, fail, early, gap) = (n("ok"), n("fail"), n("early"), n("gap"));
+    let mut s = format!("F12 rounds: {} of {ROUNDS} judged, {ok} passed", ok + fail);
+    if early > 0 {
+        s += &format!("; {early} not judged as poll(0) on event0 did not return 0");
+    }
+    if gap > 0 {
+        let most = rounds.iter().filter(|r| r.1 == "gap").map(|r| r.2).max().unwrap_or(0);
+        s += &format!("; {gap} not judged as CLOCK_MONOTONIC moved up to {} us across poll(0)", most);
+    }
+    s
 }
 
 /// Rows 6 and 7: `evtest probe`, before any key is pushed.
@@ -956,7 +1050,7 @@ fn probe_rows() {
             files.fail(format_args!("{FILES_ID}: /bin/evtest did not start: {why}"));
         }
         Ok((run, _)) => {
-            for (word, want) in [("caps", CAPS_LINE), ("end", END_LINE)] {
+            for (word, want) in [("end", END_LINE), ("caps", CAPS_LINE)] {
                 if let Some(why) = expect_line(&run, word, want) {
                     caps.fail(format_args!("{CAPS_ID}: {why}"));
                 }
@@ -979,13 +1073,13 @@ fn input_rows() {
     match launch("/bin/evtest", &["evtest"], false) {
         Err(why) => {
             quiet(|| kernel::kprintln!("# sboot keys-ready"));
-            quiet(|| kernel::kprintln!("# sboot poll-ready"));
+            (1..=ROUNDS).for_each(cue);
             for (row, id) in [(&mut keys, KEYS_ID), (&mut eagain, EAGAIN_ID), (&mut poll, POLL_ID)] {
                 row.fail(format_args!("{id}: /bin/evtest did not start: {why}"));
             }
         }
         Ok(mut run) => {
-            let (_, woke) = drive(&mut run);
+            let (_, woke, woke_late) = drive(&mut run);
             if let Some(why) = expect_line(&run, "keys", KEYS_LINE) {
                 keys.fail(format_args!("{KEYS_ID}: {why}"));
             }
@@ -1030,9 +1124,16 @@ fn input_rows() {
             }
             let out = String::from_utf8_lossy(&run.out);
             if line_of(&out, "ready").is_some() && line_of(&out, "block").is_none() && line_of(&out, "block:").is_none() {
-                eagain.fail(format_args!(
-                    "{EAGAIN_ID}: /bin/evtest printed `ready` and then read event0 without O_NONBLOCK, before any key was typed; that read was still asleep when its run was over, though the keys were typed after `# sboot keys-ready`"
-                ));
+                if exit_of(run.pid).is_some() {
+                    eagain.fail(format_args!(
+                        "{EAGAIN_ID}: /bin/evtest printed `ready` and then read event0 without O_NONBLOCK, before any key was typed, and ended with no `block` line: {}",
+                        ended(&run).unwrap_or_else(|| String::from("/bin/evtest exited 0"))
+                    ));
+                } else {
+                    eagain.fail(format_args!(
+                        "{EAGAIN_ID}: /bin/evtest printed `ready` and then read event0 without O_NONBLOCK, before any key was typed; that read was still asleep when its run was over, though the keys were typed after `# sboot keys-ready`"
+                    ));
+                }
             } else if let Some(why) = expect_line(&run, "block", "block ok") {
                 let printed = line_of(&out, "block:").unwrap_or("");
                 if printed.is_empty() {
@@ -1044,22 +1145,24 @@ fn input_rows() {
             if let Some(why) = expect_line(&run, "eagain", "eagain ok") {
                 eagain.fail(format_args!("{EAGAIN_ID}: {why}"));
             }
-            if woke {
+            if woke && woke_late {
+                eagain.fail(format_args!(
+                    "{EAGAIN_ID}: /bin/evtest had printed its `eagain` line, and its output was still open {UNBLOCK_MS} ms after its poll line, so a key was pushed; at the end of its run /bin/evtest {}",
+                    status_text(exit_of(run.pid))
+                ));
+            } else if woke {
                 eagain.fail(format_args!(
                     "{EAGAIN_ID}: /bin/evtest was still in its last read after its poll line, until a key was pushed to wake it; a read of an empty O_NONBLOCK device must return -EAGAIN at once"
                 ));
             }
             if let Some(why) = expect_line(&run, "poll", "poll ok") {
-                poll.fail(format_args!("{POLL_ID}: {why}"));
+                poll.fail(format_args!("{POLL_ID}: {}; {why}", rounds_fact(&out)));
             }
-            note(format_args!("{KEYS_ID}: {}", ended(&run).unwrap_or_else(|| String::from("/bin/evtest exited 0"))));
-            // evtest writes the script's cue itself, just before its poll; one
-            // that never got there leaves the script waiting, so the line is
-            // printed here, after the last look at the keys (the F12 it brings
-            // lands in a ring nothing reads any more).
-            if line_of(&out, "poll").is_none() {
-                quiet(|| kernel::kprintln!("# sboot poll-ready"));
-            }
+            keys.info(format_args!("{KEYS_ID}: {}", ended(&run).unwrap_or_else(|| String::from("/bin/evtest exited 0"))));
+            // evtest writes each round's cue itself, just before its poll; a
+            // round it never reached leaves the script waiting, so those lines
+            // are printed here, after the last look at the keys.
+            missing_cues(&out);
         }
     }
     keys.finish(8);
@@ -1120,7 +1223,7 @@ fn prelude() {
 /// Rows 2 to 10 when the file systems did not mount.
 fn not_run(why: &str) {
     quiet(|| kernel::kprintln!("# sboot keys-ready"));
-    quiet(|| kernel::kprintln!("# sboot poll-ready"));
+    (1..=ROUNDS).for_each(cue);
     for (n, id) in [VAR_ID, FIX_ID, FILL_ID, FORK_ID, CAPS_ID, FILES_ID, KEYS_ID, EAGAIN_ID, POLL_ID].into_iter().enumerate() {
         let mut r = Row::new(id);
         r.fail(format_args!("{id}: not run: {why}"));

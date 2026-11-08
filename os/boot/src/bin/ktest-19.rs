@@ -45,8 +45,13 @@
 //!     row 1's file with a trailing `/` (`-ENOTDIR`), `/boot/hi`
 //!     (`-EROFS`). On the disk: both bitmaps, the five counts and `/tmp`'s
 //!     links byte for byte as before the row, both records gone, the freed
-//!     inode's links and `i_blocks` 0 and its `i_dtime` set. A third file
-//!     made and kept for row 3.
+//!     inode's links and `i_blocks` 0 and its `i_dtime` set. Then a stale
+//!     fd (#74 Q9, K-1, 2026-11-04): `/tmp/u19o` opened twice and unlinked
+//!     with both fds open, `/tmp/u19n0`..`7` made, a read and a write
+//!     through the old fds; red only when they reach a new file's bytes
+//!     (`stale_fd`). A third file made and kept for row 3. When the row
+//!     fails, its last `#` line is its summary (#74 Q3 (b)): `first wrong:
+//!     <its first wrong check>; N checks wrong in all`.
 //!   3 `ext2.remount.persists` (plain) — `Ext2::sync`, every reference to
 //!     the mount dropped (the first `Ext2` must be gone), `Ext2::mount`
 //!     again over the same drive inside this boot: row 2's kept file reads
@@ -315,14 +320,32 @@ struct Row {
     id: &'static str,
     failed: bool,
     used_nonce: bool,
+    /// The W3 window rule (#74 Q3 (b)): a row whose failure lines outrun
+    /// the 8 the grader shows ends, only when it fails, on one line that
+    /// names its first wrong check and how many were wrong.
+    summed: bool,
+    wrong: usize,
+    first: Option<String>,
 }
+
+/// How much of the first wrong check's line the summary carries: the
+/// grader cuts a `#` line at 400 characters.
+const SUMMARY_CHARS: usize = 300;
 
 impl Row {
     fn new(id: &'static str) -> Row {
-        Row { id, failed: false, used_nonce: false }
+        Row { id, failed: false, used_nonce: false, summed: false, wrong: 0, first: None }
+    }
+    /// A row that ends on its summary line when it fails.
+    fn summed(id: &'static str) -> Row {
+        Row { summed: true, ..Row::new(id) }
     }
     fn fail(&mut self, why: core::fmt::Arguments) {
         self.failed = true;
+        self.wrong += 1;
+        if self.summed && self.first.is_none() {
+            self.first = Some(format!("{why}"));
+        }
         note(why);
     }
     fn expect(&mut self, cond: bool, what: &str) {
@@ -361,8 +384,19 @@ impl Row {
     }
     fn finish(mut self, n: usize) {
         if self.used_nonce && ktap::nonce().is_none() {
-            self.failed = true;
-            note(format_args!("{}: derived from the run's nonce, and this run has none", self.id));
+            let id = self.id;
+            self.fail(format_args!("{id}: derived from the run's nonce, and this run has none"));
+        }
+        if self.summed && self.failed {
+            let id = self.id;
+            let first = self.first.take().unwrap_or_default();
+            let line = first.strip_prefix(id).and_then(|l| l.strip_prefix(": ")).unwrap_or(&first);
+            let cut = match line.char_indices().nth(SUMMARY_CHARS) {
+                Some((at, _)) => format!("{}…", &line[..at]),
+                None => String::from(line),
+            };
+            let (k, s) = (self.wrong, if self.wrong == 1 { "" } else { "s" });
+            note(format_args!("{id}: first wrong: {cut}; {k} check{s} wrong in all"));
         }
         quiet(|| {
             if self.failed {
@@ -1874,7 +1908,7 @@ fn dind_case(r: &mut Row, raw: &Raw, path: &str, d: u64) {
 // ── Row 2: ext2.unlink.frees ─────────────────────────────────────────────
 
 fn unlink_row(raw: &Raw, trunc: &str, left: &mut Left) {
-    let mut r = Row::new(UNLINK_ID);
+    let mut r = Row::summed(UNLINK_ID);
     let Some(before) = got(&mut r, alloc_state(raw)) else { return r.finish(2) };
     let data = mix(0x5B00_0019_0002, 60_000);
     let i = A::I;
@@ -1939,9 +1973,10 @@ fn unlink_row(raw: &Raw, trunc: &str, left: &mut Left) {
         }
     }
     if let Some(to) = clock_stuck {
-        note(format_args!("{UNLINK_ID}: the guest clock (EPOCH + whole seconds of time::now_ns) did not reach the middle of second {to} with time::TICKS moved forward"));
+        r.fail(format_args!("{UNLINK_ID}: the guest clock (EPOCH + whole seconds of time::now_ns) did not reach the middle of second {to} with time::TICKS moved forward"));
     }
     first_in_block(&mut r, raw);
+    stale_fd(&mut r);
     // One file that stays, for row 3.
     let keep = mix(0x5B00_0019_0003, 3 * 4096 + 77);
     let mut pl = Plan::new();
@@ -2003,6 +2038,134 @@ fn first_in_block(r: &mut Row, raw: &Raw) {
         if let Err(e) = tmp.unlink(name) {
             return r.fail(format_args!("{UNLINK_ID}: unlink of a 242-byte name in /tmp returned {}", errno_text(e)));
         }
+    }
+}
+
+/// Row 2's stale-fd step (#74 Q9, K-1). One program opens `/tmp/u19o`
+/// twice (one fd to write, one to read), writes 16 bytes, unlinks it with
+/// both fds open, then makes `/tmp/u19n0`..`/tmp/u19n7` (16 bytes of their
+/// own each), reads through the old read fd and writes 4 bytes through the
+/// old write fd. The step fails only when the old fds reach a file made
+/// after the unlink: the read returns one of the new files' bytes, or a
+/// write through the old fd that answered a count changed one of them.
+/// An unlink refused while the file is open, or an orphan that keeps its
+/// own bytes, passes; so does a kernel that frees the inode and answers
+/// nothing through the old fds. The new files are unlinked after, through
+/// the learner's `unlink` method; `/tmp/u19o` too when its name is still
+/// there.
+fn stale_fd(r: &mut Row) {
+    const READ: u64 = 0;
+    const FSTAT: u64 = 5;
+    const NEW: usize = 8;
+    let i = A::I;
+    let own = mix(0x5B00_0019_0010, 16);
+    let news: Vec<(String, Vec<u8>)> = (0..NEW as u64).map(|k| (format!("u19n{k}"), mix(0x5B00_0019_0020 + k, 16))).collect();
+    let mut p = Probe::new();
+    let old = p.str("/tmp/u19o");
+    let own_at = p.bytes(&own);
+    let z = p.bytes(b"zzzz");
+    let (st_old, st_old_at) = p.buf(144);
+    let (rbuf, rbuf_at) = p.buf(64);
+    let fw = p.call(SYS_OPEN, &[old, i(O_WRONLY | O_CREAT | O_EXCL), i(0o644)]);
+    let w_own = p.call(SYS_WRITE, &[A::R(fw), A::D(own_at), i(16)]);
+    let fr = p.call(SYS_OPEN, &[old, i(O_RDONLY)]);
+    let s_old = p.call(FSTAT, &[A::R(fr), st_old]);
+    let un = p.call(SYS_UNLINK, &[old]);
+    let mut made = Vec::new();
+    for (name, bytes) in &news {
+        let path = p.str(&format!("/tmp/{name}"));
+        let at = p.bytes(bytes);
+        let (st, st_at) = p.buf(144);
+        let f = p.call(SYS_OPEN, &[path, i(O_WRONLY | O_CREAT | O_EXCL), i(0o644)]);
+        let s = p.call(FSTAT, &[A::R(f), st]);
+        let w = p.call(SYS_WRITE, &[A::R(f), A::D(at), i(16)]);
+        made.push((f, s, st_at, w));
+    }
+    let rd = p.call(READ, &[A::R(fr), rbuf, i(64)]);
+    let wz = p.call(SYS_WRITE, &[A::R(fw), A::D(z), i(4)]);
+    p.call(SYS_CLOSE, &[A::R(fw)]);
+    p.call(SYS_CLOSE, &[A::R(fr)]);
+    for &(f, ..) in &made {
+        p.call(SYS_CLOSE, &[A::R(f)]);
+    }
+    let out = match run_probe("u19s", p) {
+        Ok(o) => o,
+        Err(why) => return r.fail(format_args!("{UNLINK_ID}: {why}")),
+    };
+    let ino = |s: usize, at: usize| {
+        let v = res(&out, s);
+        if v == 0 { format!("inode {}", le64(&out, at + 8)) } else { format!("fstat returned {}", answer(v)) }
+    };
+    let mut setup = true;
+    let mut is = |r: &mut Row, what: &str, k: usize, want: Option<i64>| {
+        let v = res(&out, k);
+        let bad = match want {
+            Some(w) => v != w,
+            None => v < 0,
+        };
+        if bad {
+            setup = false;
+            let exp = want.map_or(String::from("an fd"), answer);
+            r.fail(format_args!("{UNLINK_ID}: {what} returned {}, expected {exp}", answer(v)));
+        }
+    };
+    is(r, "open(/tmp/u19o, O_WRONLY|O_CREAT|O_EXCL)", fw, None);
+    is(r, "write of 16 bytes to /tmp/u19o", w_own, Some(16));
+    is(r, "open(/tmp/u19o, O_RDONLY)", fr, None);
+    for (k, &(f, _, _, w)) in made.iter().enumerate() {
+        is(r, &format!("open(/tmp/{}, O_WRONLY|O_CREAT|O_EXCL) after /tmp/u19o's unlink", news[k].0), f, None);
+        is(r, &format!("write of 16 bytes to /tmp/{}", news[k].0), w, Some(16));
+    }
+    let tmp = match at("/tmp") {
+        Ok(t) => t,
+        Err(why) => return r.fail(format_args!("{UNLINK_ID}: {why}")),
+    };
+    if setup {
+        let old_ino = ino(s_old, st_old_at);
+        let n = res(&out, rd);
+        if n > 0 {
+            let got = &out[rbuf_at..rbuf_at + (n as usize).min(64)];
+            let m = got.len().min(16);
+            if got[..m] != own[..m] {
+                if let Some(k) = news.iter().position(|(_, b)| got[..m] == b[..m]) {
+                    r.fail(format_args!(
+                        "{UNLINK_ID}: an fd open on /tmp/u19o ({old_ino}) across its unlink (answered {}) read {n} bytes, and they are /tmp/{}'s, a file made after the unlink ({})",
+                        answer(res(&out, un)),
+                        news[k].0,
+                        ino(made[k].1, made[k].2)
+                    ));
+                }
+            }
+        }
+        let wn = res(&out, wz);
+        if wn > 0 {
+            for (k, (name, bytes)) in news.iter().enumerate() {
+                let now = tmp.lookup(name).and_then(|f| read_whole(&f));
+                match now {
+                    Ok(b) if b == *bytes => {}
+                    Ok(b) => {
+                        r.fail(format_args!(
+                            "{UNLINK_ID}: a write of 4 bytes through an fd open on /tmp/u19o ({old_ino}) across its unlink answered {wn}, and /tmp/{name} ({}), made after the unlink with 16 bytes, now holds {} bytes{}",
+                            ino(made[k].1, made[k].2),
+                            b.len(),
+                            if b.len() == 16 { ", not the 16 written to it" } else { "" }
+                        ));
+                        break;
+                    }
+                    Err(e) => r.fail(format_args!("{UNLINK_ID}: /tmp/{name} through the learner's lookup and read_at: {}", errno_text(e))),
+                }
+            }
+        }
+    }
+    for (name, _) in &news {
+        if let Err(e) = tmp.unlink(name) {
+            r.fail(format_args!("{UNLINK_ID}: unlink of /tmp/{name} returned {}", errno_text(e)));
+        }
+    }
+    match tmp.unlink("u19o") {
+        Ok(()) => {}
+        Err(e) if e == ENOENT => {}
+        Err(e) => r.fail(format_args!("{UNLINK_ID}: unlink of /tmp/u19o, both its fds closed, returned {}", errno_text(e))),
     }
 }
 

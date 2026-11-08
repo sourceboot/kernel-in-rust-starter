@@ -13,8 +13,8 @@
 //! rather than wait for an interrupt, and leave interrupts on while you
 //! poll; set nIEN in the control register so the drive never raises IRQ 14
 //! (nothing handles it). IDENTIFY DEVICE tells you the model string (words
-//! 27–46, two characters per word, the first in the HIGH byte) and the
-//! sectors 28-bit LBA reaches (words 60–61, low word first).
+//! 27–46, two characters per word, the first in the HIGH byte) and how
+//! many sectors a 28-bit LBA can address (words 60–61, low word first).
 //!
 //! Every block device carries a write-fault hook: after `arm_fail_after(k)`
 //! the first `k` writes succeed and every later one returns `-EIO`, reaches
@@ -28,8 +28,8 @@
 //! course's file system. Find it by reading the GPT through the device —
 //! never by a fixed LBA.
 //!
-//! Fill in the bodies; keep the signatures — later labs and the course's
-//! tests use them. Add private fields and helpers as you need them.
+//! Fill in the bodies; keep the signatures — later labs use them.
+//! Add private fields and helpers as you need them.
 
 extern crate alloc;
 
@@ -66,53 +66,53 @@ pub trait BlockDevice: Send + Sync {
 }
 
 /// The primary bus's master, as IDENTIFY described it (add what you keep,
-/// and a lock so two tasks' commands never interleave).
+/// and a lock so two kernel tasks' commands never interleave).
 pub struct Ata {}
 
 impl Ata {
     /// IDENTIFY DEVICE on the primary master. `-ENODEV` when nothing answers
     /// or the device is not ATA; `-EIO` when it errs.
     pub fn probe() -> Result<Ata, Errno> {
-        todo!("lab 16 step 1 — Ata::probe: IDENTIFY DEVICE on the primary master, and keep what it answers")
+        todo!("lab 16 task 1 — Ata::probe: IDENTIFY DEVICE on the primary master, and keep what it answers")
     }
 
     /// The model string IDENTIFY reported, trailing spaces dropped.
     pub fn model(&self) -> &str {
-        todo!("lab 16 step 2 — Ata::model: the model string from IDENTIFY words 27-46")
+        todo!("lab 16 task 1 — Ata::model: the model string from IDENTIFY words 27-46")
     }
 
     /// Sectors on the disk (IDENTIFY words 60–61).
     pub fn sectors(&self) -> u64 {
-        todo!("lab 16 step 3 — Ata::sectors: the sector count from IDENTIFY words 60-61")
+        todo!("lab 16 task 1 — Ata::sectors: the sector count from IDENTIFY words 60-61")
     }
 }
 
 impl BlockDevice for Ata {
     fn read_block(&self, n: u64, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), Errno> {
         let _ = (n, buf);
-        todo!("lab 16 step 6 — Ata::read_block: READ SECTORS for the block's eight sectors, polling for each")
+        todo!("lab 16 task 2 — Ata::read_block: READ SECTORS for the block's eight sectors, polling for each")
     }
 
     fn write_block(&self, n: u64, buf: &[u8; BLOCK_SIZE]) -> Result<(), Errno> {
         let _ = (n, buf);
-        todo!("lab 16 step 17 — Ata::write_block: the fault hook first, then WRITE SECTORS and a cache flush")
+        todo!("lab 16 task 4 — Ata::write_block: the fault hook first, then WRITE SECTORS and a cache flush")
     }
 
     fn blocks(&self) -> u64 {
-        todo!("lab 16 step 4 — Ata::blocks: the disk's size in 4 KiB blocks")
+        todo!("lab 16 task 1 — Ata::blocks: the disk's size in 4 KiB blocks")
     }
 
     fn arm_fail_after(&self, k: u32) {
         let _ = k;
-        todo!("lab 16 step 19 — Ata::arm_fail_after: let k writes land, refuse every one after")
+        todo!("lab 16 task 5 — Ata::arm_fail_after: let k writes land, refuse every one after")
     }
 
     fn disarm(&self) {
-        todo!("lab 16 step 20 — Ata::disarm: stop refusing writes, keep the count")
+        todo!("lab 16 task 5 — Ata::disarm: stop refusing writes, keep the count")
     }
 
     fn refused_writes(&self) -> u32 {
-        todo!("lab 16 step 18 — Ata::refused_writes: the writes the hook refused since boot")
+        todo!("lab 16 task 5 — Ata::refused_writes: the writes the hook refused since boot")
     }
 }
 
@@ -136,12 +136,12 @@ impl Partition {
 impl BlockDevice for Partition {
     fn read_block(&self, n: u64, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), Errno> {
         let _ = (n, buf, &self.dev);
-        todo!("lab 16 step 7 — Partition::read_block: the partition's block n is which block of the device?")
+        todo!("lab 16 task 2 — Partition::read_block: the partition's block n is which block of the device?")
     }
 
     fn write_block(&self, n: u64, buf: &[u8; BLOCK_SIZE]) -> Result<(), Errno> {
         let _ = (n, buf);
-        todo!("lab 16 step 16 — Partition::write_block: as read_block, the other way")
+        todo!("lab 16 task 4 — Partition::write_block: as read_block, the other way")
     }
 
     fn blocks(&self) -> u64 {
@@ -168,5 +168,5 @@ impl BlockDevice for Partition {
 /// entry 1 is unused (its type GUID all zero).
 pub fn partition2(dev: Arc<dyn BlockDevice>) -> Result<Partition, Errno> {
     let _ = dev;
-    todo!("lab 16 step 5 — partition2: read the GPT through the device and find entry 1")
+    todo!("lab 16 task 2 — partition2: read the GPT through the device and find entry 1")
 }

@@ -5,8 +5,7 @@
 //! one consumer (the kernel) share the ring, and neither side may take a
 //! lock an interrupt could be waiting on.
 //!
-//! Fill in the bodies; keep the signatures — later labs and the course's
-//! tests call them.
+//! Fill in the bodies; keep the signatures — later labs call them.
 
 /// Producer side (IRQ 1). Lab 23: after storing, wake whoever sleeps on
 /// `chan()`. Lab 26: hand the scancode to `devfs::feed` first; when that
@@ -45,12 +44,10 @@ pub fn translate(sc: u8) -> Option<u8> {
 
 /// Lab 26: the `KEY_*` number (Linux's input-event-codes.h) of a set-1
 /// scancode, make or break alike; `None` for a scancode that names no key
-/// and for the 0xe0 prefix. Lab 26 also grows `push`: every scancode goes to
-/// `devfs::feed` first, and a key the input device keeps (a program holds
-/// it grabbed) goes no further.
+/// and for the 0xe0 prefix.
 pub fn to_keycode(sc: u8) -> Option<u16> {
     let _ = sc;
-    todo!("lab 26 step 1 — to_keycode: a set-1 scancode to Linux's KEY_* number")
+    todo!("lab 26 task 1 — to_keycode: a set-1 scancode to Linux's KEY_* number")
 }
 
 /// Lab 33 task 4: the bytes one scancode sends to a raw-mode reader, as the

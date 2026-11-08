@@ -151,7 +151,8 @@ const PROBE: &str = "/ktest/exec-probe";
 const REFUSE_PROBE: &str = "/ktest/refuse-probe";
 const FREES_ID: &str = "exec.refuse.frees";
 const FREES_ROW: usize = 9;
-/// Refusals of each kind row 9 counts (after one of each to warm up).
+/// Refusals of each kind row 9 counts, each kind in its own window (after
+/// one of each to warm up); each window must grow by fewer frames than this.
 const FREES_EACH: usize = 8;
 const EXECVE_ID: &str = "exec.execve.refuses";
 const EXECVE_ROW: usize = 11;
@@ -826,7 +827,7 @@ fn reject(n: usize, id: &str, name: &str, what: &str, mounted: bool) {
     idt::set_handler(6, on_ud, 0);
     let probed = probe_with(REFUSE_PROBE, id, &path, &[name], &[]);
     REFUSE_MODE.store(false, Ordering::Relaxed);
-    // Back to the learner's routing of ring-3 #UD and #GP.
+    // Back to the learner's routing of ring-3 exceptions.
     proc::init();
     let Some((pid, ended, st)) = probed else {
         return row(false, n, id);
@@ -884,6 +885,26 @@ fn refuse_once(path: &str, argv: &[&str]) -> Result<Errno, Pid> {
     }
 }
 
+/// One of row 9's windows: `FREES_EACH` calls of `refuse_once(path, argv)`.
+/// How many were refused and the distinct errors; a call that started a
+/// process is pushed to `accepted` and not counted.
+fn refuse_window(path: &'static str, argv: &[&str], accepted: &mut Vec<(&'static str, Pid)>) -> (usize, Vec<String>) {
+    let (mut refused, mut errs) = (0usize, Vec::new());
+    for _ in 0..FREES_EACH {
+        match refuse_once(path, argv) {
+            Ok(e) => {
+                refused += 1;
+                if !errs.contains(&e) {
+                    errs.push(e);
+                }
+            }
+            Err(pid) => accepted.push((path, pid)),
+        }
+    }
+    sched::yield_now();
+    (refused, errs.into_iter().map(errno_text).collect())
+}
+
 fn refuse_frees(mounted: bool, big: &[&str]) {
     if !mounted {
         note(format_args!("{FREES_ID}: /ktest is not mounted"));
@@ -897,43 +918,47 @@ fn refuse_frees(mounted: bool, big: &[&str]) {
     let _ = refuse_once(MACHINE, &machine_argv);
     let _ = refuse_once(PROBE, &big_argv);
     sched::yield_now();
+    // Two windows, each counted on its own: the EM_386 copy, then the
+    // oversized argv. Each window must grow by fewer frames than the
+    // refusals it made (8 when none is accepted), so a refusal of either
+    // kind that keeps even the new space's PML4 fails it (G1968: the argv
+    // window's bound was 16 until the E2BIG precheck that kept one PML4 each
+    // read +8 and passed; no honest kernel has read above +0 there).
+    let mut accepted = Vec::new();
     let f0 = frames_used();
-    let (mut refused, mut accepted) = (0usize, Vec::new());
-    let mut errs: Vec<Errno> = Vec::new();
-    for _ in 0..FREES_EACH {
-        for (path, argv) in [(MACHINE, &machine_argv[..]), (PROBE, &big_argv[..])] {
-            match refuse_once(path, argv) {
-                Ok(e) => {
-                    refused += 1;
-                    if !errs.contains(&e) {
-                        errs.push(e);
-                    }
-                }
-                Err(pid) => accepted.push((path, pid)),
-            }
-        }
-    }
-    sched::yield_now();
+    let (m_refused, m_errs) = refuse_window(MACHINE, &machine_argv, &mut accepted);
     let f1 = frames_used();
-    let grown = f1 as i64 - f0 as i64;
-    let errs: Vec<String> = errs.into_iter().map(errno_text).collect();
+    let (a_refused, a_errs) = refuse_window(PROBE, &big_argv, &mut accepted);
+    let f2 = frames_used();
+    let (m_grown, a_grown) = (f1 as i64 - f0 as i64, f2 as i64 - f1 as i64);
     note(format_args!(
-        "{FREES_ID}: {refused} refused exec::spawn calls ({FREES_EACH} of {MACHINE}, e_machine EM_386; {FREES_EACH} of {PROBE} with an argv of {} bytes, more than the whole stack; errors {errs:?}): frames in use {f0} before, {f1} after ({grown:+})",
+        "{FREES_ID}: {m_refused} of {FREES_EACH} exec::spawn calls of {MACHINE} (e_machine EM_386) refused; errors {m_errs:?}: frames in use {f0} before, {f1} after ({m_grown:+})"
+    ));
+    note(format_args!(
+        "{FREES_ID}: {a_refused} of {FREES_EACH} exec::spawn calls of {PROBE} with an argv of {} bytes, more than the whole stack, refused; errors {a_errs:?}: frames in use {f1} before, {f2} after ({a_grown:+})",
         BIG_STRS * (BIG_LEN + 1)
     ));
     for (path, pid) in &accepted {
         note(format_args!("{FREES_ID}: exec::spawn(\"{path}\") was not refused: it started pid {}, so that call is not counted", pid.0));
     }
     let honest = frames_honest(FREES_ID);
-    let ok = refused > 0 && grown < refused as i64 && honest;
-    if refused == 0 {
-        note(format_args!("{FREES_ID}: no exec::spawn was refused, so nothing was counted"));
-    } else if grown >= refused as i64 {
+    let m_ok = m_refused > 0 && m_grown < m_refused as i64;
+    let a_ok = a_refused > 0 && a_grown < a_refused as i64;
+    if m_refused == 0 {
+        note(format_args!("{FREES_ID}: no exec::spawn of {MACHINE} was refused, so nothing was counted"));
+    } else if !m_ok {
         note(format_args!(
-            "{FREES_ID}: the frames in use grew by {grown} over {refused} refusals: a refused exec must give back every frame it took — the new address space's tables and PML4, the segments' pages, the stack pages — before it returns the error"
+            "{FREES_ID}: {m_refused} refused execs of a wrong-machine ELF kept {m_grown} frames: a refusal must give back every frame it took, the new address space's PML4 too, before it returns the error"
         ));
     }
-    row(ok, FREES_ROW, FREES_ID);
+    if a_refused == 0 {
+        note(format_args!("{FREES_ID}: no exec::spawn of {PROBE} with an oversized argv was refused, so nothing was counted"));
+    } else if !a_ok {
+        note(format_args!(
+            "{FREES_ID}: the frames in use grew by {a_grown} over {a_refused} refusals of an argv too large for the stack: a refused exec must give back every frame it took — the new address space's tables and PML4, the segments' pages, the stack pages — before it returns the error"
+        ));
+    }
+    row(m_ok && a_ok && honest, FREES_ROW, FREES_ID);
 }
 
 // ── Row 10: a successful exec gives back the space it replaced ────────────
@@ -1182,7 +1207,7 @@ fn execve_refuses(mounted: bool, big: &[&str]) {
             (None, false, None)
         }
     };
-    // Back to the learner's routing of ring-3 #UD and #GP.
+    // Back to the learner's routing of ring-3 exceptions.
     proc::init();
     let Some(pid) = pid else { return row(false, EXECVE_ROW, EXECVE_ID) };
     let seen = UD_SEEN.lock().take();
@@ -1262,7 +1287,7 @@ fn execve_replaces(mounted: bool) {
         }
     };
     REPLACE_MODE.store(false, Ordering::Relaxed);
-    // Back to the learner's routing of ring-3 #UD and #GP.
+    // Back to the learner's routing of ring-3 exceptions.
     proc::init();
     let Some(pid) = pid else { return row(false, REPLACES_ROW, REPLACES_ID) };
     let what = "execve(p, \"/ktest/landed\", [\"landed\"], [])";

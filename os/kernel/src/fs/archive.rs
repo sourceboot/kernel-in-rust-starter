@@ -21,8 +21,7 @@
 //! `read_at`, `getdents`, `stat` — and every write is the trait's default
 //! refusal (`-EROFS`).
 //!
-//! Fill in the bodies; keep the signatures — later labs and the course's
-//! tests use them.
+//! Fill in the bodies; keep the signatures.
 
 use crate::fs::vfs::{DirEntry, Inode, InodeRef, Stat};
 use crate::syscall::errno::EISDIR;
@@ -44,13 +43,13 @@ impl Archive {
     /// serve it. `-EINVAL` for anything else.
     pub fn new(bytes: &'static [u8]) -> Result<Archive, Errno> {
         let _ = bytes;
-        todo!("lab 13 step 1 — Archive::new: the magic, the count, every table entry checked")
+        todo!("lab 13 task 1 — Archive::new: the magic, the count, every table entry checked")
     }
 
     /// How many files the archive holds.
     pub fn len(&self) -> usize {
         let _ = self.bytes;
-        todo!("lab 13 step 13 — len: the count from the header")
+        todo!("lab 13 task 1 — len: the count from the header")
     }
 
     pub fn is_empty(&self) -> bool {
@@ -62,7 +61,7 @@ impl Inode for Archive {
     /// One inode per file, reading straight out of the archive's bytes.
     fn lookup(&self, name: &str) -> Result<InodeRef, Errno> {
         let _ = name;
-        todo!("lab 13 step 4 — lookup: the entry named `name`, as an inode of its own (-ENOENT when none is)")
+        todo!("lab 13 task 1 — lookup: the entry named `name`, as an inode of its own (-ENOENT when none is)")
     }
 
     fn read_at(&self, _off: u64, _buf: &mut [u8]) -> Result<usize, Errno> {
@@ -71,10 +70,10 @@ impl Inode for Archive {
 
     fn getdents(&self, index: u64) -> Result<Option<DirEntry>, Errno> {
         let _ = index;
-        todo!("lab 13 step 3 — getdents: entry `index` of the table, Ok(None) past the last")
+        todo!("lab 13 task 1 — getdents: entry `index` of the table, Ok(None) past the last")
     }
 
     fn stat(&self) -> Stat {
-        todo!("lab 13 step 11 — stat: a directory (S_IFDIR), read-only")
+        todo!("lab 13 task 1 — stat: a directory (S_IFDIR), read-only")
     }
 }

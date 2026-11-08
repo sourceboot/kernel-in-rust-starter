@@ -15,6 +15,16 @@
 //! through a small cache is refused (sk07-forger-6, 2026-10-18). A cache of
 //! half the pool or more is the catalogued residual: at that size it is a
 //! working free list for everything this course asks of it.
+//!
+//! An alloc writes only inside the frame it hands out (G1763, 2026-11-02).
+//! With every frame of the pool held after the re-drain, the survey fills
+//! both neighbours of `NEIGH` frames spread over the pool with a pattern
+//! drawn from the nonce, gives back only those frames, so they are all the
+//! pool has free, and drains them again: every neighbour must still hold
+//! its pattern, so an alloc that zeroes past its frame's end, or before its
+//! start, into a frame someone holds is refused, whichever way the pool
+//! hands frames out. `frames.alloc.count` also fills each frame it takes
+//! and checks the earlier ones after every later alloc. Both are that row's.
 
 #![no_std]
 #![no_main]
@@ -31,6 +41,8 @@ use kernel::sync::SpinLock;
 const ONE_MIB: u64 = 0x10_0000;
 /// Frames the survey can track: physical memory below 256 MiB.
 const TRACK: usize = 1 << 16;
+/// Frames the survey gives back between two held neighbours (G1763).
+const NEIGH: usize = 64;
 
 fn bi() -> &'static BootInfo {
     bootinfo::get().expect("the shim published the BootInfo")
@@ -57,10 +69,98 @@ struct Survey {
     total: u64,
     redrain: u64,
     half: u64,
+    /// G1763: frames given back between two held, patterned neighbours,
+    /// frames the drain after it got, neighbours whose bytes changed, and
+    /// the first such neighbour and the frame it sits beside.
+    nb_ran: bool,
+    nb_freed: u64,
+    nb_got: u64,
+    nb_clobbered: u64,
+    nb_first: u64,
+    nb_beside: u64,
+}
+
+/// The word a held frame at `pa` keeps at index `w` while the pool hands
+/// out the frame beside it: never 0, never what an alloc's zeroing leaves.
+fn pattern(seed: u64, pa: u64, w: usize) -> u64 {
+    kernel::ktap::splitmix64(seed ^ pa ^ (w as u64).rotate_left(48)) | 1
+}
+
+fn seen_bit(seen: &[u64; TRACK / 64], i: usize) -> bool {
+    i < TRACK && seen[i / 64] & 1 << (i % 64) != 0
 }
 
 static SEEN: SpinLock<[u64; TRACK / 64]> = SpinLock::new([0; TRACK / 64]);
 static SURVEY: SpinLock<Option<Survey>> = SpinLock::new(None);
+
+/// G1763: with the pool held (`seen`), pick `NEIGH` frames whose two
+/// neighbours are held too, spread over the pool, none beside another;
+/// fill each neighbour with `pattern`, give back the picked frames, drain
+/// the pool again (only they are free) and read every neighbour back.
+fn neighbours(s: &mut Survey, seen: &mut [u64; TRACK / 64]) {
+    let seed = kernel::ktap::nonce().map_or(0x5b00_7b00_0e16_4b0e, |n| kernel::ktap::derive(&n, "frames.alloc.count/neighbours"));
+    let held = |seen: &[u64; TRACK / 64], i: usize| -> bool { i > 0 && seen_bit(seen, i - 1) && seen_bit(seen, i) && seen_bit(seen, i + 1) };
+    let (mut lo, mut hi) = (TRACK, 0);
+    for i in 1..TRACK - 1 {
+        if held(seen, i) {
+            lo = lo.min(i);
+            hi = i;
+        }
+    }
+    if lo > hi {
+        return;
+    }
+    let gap = ((hi - lo) / NEIGH).max(3);
+    let mut picks = [0usize; NEIGH];
+    let mut k = 0;
+    let mut next = lo + (seed as usize) % gap;
+    let mut i = next;
+    while i <= hi && k < NEIGH {
+        if i >= next && held(seen, i) {
+            picks[k] = i;
+            k += 1;
+            next = i + gap;
+            i = next;
+        } else {
+            i += 1;
+        }
+    }
+    let pa = |i: usize| i as u64 * PAGE_SIZE;
+    let p = |pa: u64| (pa + bootinfo::hhdm_offset()) as *mut u64;
+    for &i in &picks[..k] {
+        for n in [i - 1, i + 1] {
+            for w in 0..512 {
+                // SAFETY: a frame the survey holds (its bit is set in `seen`),
+                // below 256 MiB, reached through the HHDM: ours until freed.
+                unsafe { p(pa(n)).add(w).write_volatile(pattern(seed, pa(n), w)) };
+            }
+        }
+    }
+    for &i in &picks[..k] {
+        seen[i / 64] &= !(1u64 << (i % 64));
+        frame::free(Frame(PhysAddr(pa(i))));
+    }
+    s.nb_freed = k as u64;
+    while let Some(f) = frame::alloc() {
+        s.nb_got += 1;
+        let i = (f.0 .0 / PAGE_SIZE) as usize;
+        if i < TRACK {
+            seen[i / 64] |= 1 << (i % 64);
+        }
+    }
+    for &i in &picks[..k] {
+        for n in [i - 1, i + 1] {
+            // SAFETY: as above; the neighbour is still held.
+            if (0..512).any(|w| unsafe { p(pa(n)).add(w).read_volatile() } != pattern(seed, pa(n), w)) {
+                if s.nb_clobbered == 0 {
+                    s.nb_first = pa(n);
+                    s.nb_beside = pa(i);
+                }
+                s.nb_clobbered += 1;
+            }
+        }
+    }
+}
 
 fn survey() -> Survey {
     let mut g = SURVEY.lock();
@@ -73,7 +173,7 @@ fn survey() -> Survey {
     // freed while another is held goes back to the pool.
     let held = frame::alloc();
     if let Some(a) = frame::alloc() { frame::free(a); }
-    let mut s = Survey { got: 0, below_1m: 0, in_kernel: 0, not_usable: 0, untracked: 0, dups: 0, free_before: frame::stats().free as u64, free_after: 0, redrain: 0, half: 0, total: frame::stats().total as u64 };
+    let mut s = Survey { got: 0, below_1m: 0, in_kernel: 0, not_usable: 0, untracked: 0, dups: 0, free_before: frame::stats().free as u64, free_after: 0, redrain: 0, half: 0, total: frame::stats().total as u64, nb_ran: false, nb_freed: 0, nb_got: 0, nb_clobbered: 0, nb_first: 0, nb_beside: 0 };
     while let Some(f) = frame::alloc() {
         let pa = f.0 .0;
         s.got += 1;
@@ -128,6 +228,14 @@ fn survey() -> Survey {
         if i < TRACK {
             seen[i / 64] |= 1 << (i % 64);
         }
+    }
+    // Only on a pool that has handed out nothing it may not: the dirtying
+    // above's rule (nothing below 1 MiB, inside the kernel image or outside
+    // usable memory) and, stricter, no frame handed out twice and none above
+    // the tracked 256 MiB. The probe writes whole frames.
+    if s.below_1m + s.in_kernel + s.not_usable + s.dups + s.untracked == 0 {
+        s.nb_ran = true;
+        neighbours(&mut s, &mut seen);
     }
     for (w, word) in seen.iter_mut().enumerate() {
         let mut bits = *word;
@@ -195,15 +303,24 @@ ktest!("frames.kernel_image", fn frames_kernel_image(t: &mut TestCtx) {
 });
 
 ktest!("frames.alloc.count", fn frames_alloc_count(t: &mut TestCtx) {
-    survey();
+    let s = survey();
     let n = 8 + t.pick("frames.alloc.count", 56) as usize;
     let before = frame::stats();
     let mut got = [Frame(PhysAddr(0)); 64];
     let mut k = 0;
     let mut dirty = 0;
     let mut not_one = 0;
+    let seed = kernel::ktap::splitmix64(t.derived("frames.alloc.count"));
+    // G1763: earlier frames of this loop whose words a later alloc changed.
+    let mut overwritten = 0u64;
     while k < n {
         let Some(f) = frame::alloc() else { break };
+        // SAFETY (both loops): frames this test holds, reached through the HHDM.
+        for e in &got[..k] {
+            if unsafe { ptr(*e).read_volatile() != pattern(seed, e.0 .0, 0) || ptr(*e).add(511).read_volatile() != pattern(seed, e.0 .0, 511) } {
+                overwritten += 1;
+            }
+        }
         got[k] = f;
         k += 1;
         if frame::refs(f) != 1 {
@@ -212,6 +329,16 @@ ktest!("frames.alloc.count", fn frames_alloc_count(t: &mut TestCtx) {
         // SAFETY: a frame just handed to us, reached through the HHDM.
         if (0..512).any(|w| unsafe { ptr(f).add(w).read_volatile() } != 0) {
             dirty += 1;
+        }
+        for w in 0..512 {
+            // SAFETY: as above: ours until the frees below.
+            unsafe { ptr(f).add(w).write_volatile(pattern(seed, f.0 .0, w)) };
+        }
+    }
+    for e in &got[..k] {
+        // SAFETY: as above.
+        if (0..512).any(|w| unsafe { ptr(*e).add(w).read_volatile() } != pattern(seed, e.0 .0, w)) {
+            overwritten += 1;
         }
     }
     let mut dups = 0;
@@ -232,6 +359,20 @@ ktest!("frames.alloc.count", fn frames_alloc_count(t: &mut TestCtx) {
     t.expect_eq("frames whose count is not 1 after alloc", not_one, 0);
     t.expect_eq("the same frame handed out twice", dups, 0);
     t.expect_eq("used after the allocations", mid.used as u64, (before.used + n) as u64);
+    t.note(format_args!(
+        "frames.alloc.count: {} frames given back between two held frames filled with a pattern, {} handed out again with only them free",
+        s.nb_freed, s.nb_got
+    ));
+    if s.nb_clobbered != 0 {
+        t.fail(format_args!(
+            "{} held frames lost the pattern written into them while the frame beside them was handed out again (first: {:#x}, beside {:#x}): alloc wrote outside the frame it returned, into one a caller holds",
+            s.nb_clobbered, s.nb_first, s.nb_beside
+        ));
+    }
+    if s.nb_ran {
+        t.expect(s.nb_freed > 0, "the survey found frames with both neighbours held to give back");
+    }
+    t.expect_eq("frames this test held whose words changed while it took more", overwritten, 0);
 });
 
 ktest!("frames.free.drop", fn frames_free_drop(t: &mut TestCtx) {

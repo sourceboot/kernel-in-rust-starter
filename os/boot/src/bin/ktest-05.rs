@@ -27,6 +27,11 @@
 //! one it raises, and `int3.resume`'s second `int3` comes after one: a
 //! dispatch that routes by the last `set_handler` instead of the frame's
 //! vector runs `decoy`, which these rows count.
+//! The second `int3`'s report is read on the serial line, not here
+//! (2026-11-06, G2078): this file prints `[int3>` before it and `<int3]`
+//! after it through the learner's `serial::write_str`, and the rubric's
+//! serial row `int3.reported` needs both marks and lacks them side by side.
+//! This file never reads COM1.
 
 #![no_std]
 #![no_main]
@@ -62,19 +67,46 @@ const DECOY_VEC: u8 = 4;
 static WIN_LO: AtomicU64 = AtomicU64::new(0);
 static WIN_HI: AtomicU64 = AtomicU64::new(0);
 
-// Port I/O of the vehicle's own: the UART checks read COM1 without going
-// through the learner's serial.rs.
+// Port I/O of the vehicle's own: `idt.vector` masks and restores the 8259s
+// without going through the learner's code.
 fn inb(port: u16) -> u8 {
     let v: u8;
-    // SAFETY: reading a 16550 register has no effect beyond the UART.
+    // SAFETY: reading an 8259 mask register has no effect.
     unsafe { asm!("in al, dx", out("al") v, in("dx") port, options(nomem, nostack, preserves_flags)) };
     v
 }
 fn outb(port: u16, v: u8) {
-    // SAFETY: the callers write only COM1's MCR and the 8259s' mask registers.
+    // SAFETY: the callers write only the 8259s' mask registers.
     unsafe { asm!("out dx, al", in("dx") port, in("al") v, options(nomem, nostack, preserves_flags)) };
 }
-const COM1: u16 = 0x3f8;
+/// The marks `int3.resume` prints around its second `int3`, through the
+/// learner's `serial::write_str` (G2078, 2026-11-06). Neither is in a
+/// breakpoint report any kernel of this course prints, and the serial row
+/// `int3.reported` lacks the two side by side: a default that sent nothing.
+const INT3_OPEN: &str = "[int3>";
+const INT3_CLOSE: &str = "<int3]";
+/// How long after the second `int3` returns the closing mark waits, by the PM
+/// timer (CONTRACT §B.2-05, "Built 2026-11-06": the measured study).
+const MARK_MS: u64 = 50;
+const PM_HZ: u64 = 3_579_545;
+
+fn pm() -> u32 {
+    let v: u32;
+    // SAFETY: a 32-bit read of the ACPI PM timer port; no memory is touched.
+    unsafe { asm!("in eax, dx", out("eax") v, in("dx") 0x608u16, options(nomem, nostack, preserves_flags)) };
+    v & 0xff_ffff
+}
+
+/// Spin `ms` milliseconds by the 24-bit PM timer.
+fn pm_wait_ms(ms: u64) {
+    let (mut last, mut acc) = (pm(), 0u64);
+    while acc * 1000 < ms * PM_HZ {
+        let now = pm();
+        acc += (now.wrapping_sub(last) & 0xff_ffff) as u64;
+        last = now;
+        core::hint::spin_loop();
+    }
+}
 
 /// A page of the vehicle's own whose mapping `idt.vector` points at the local
 /// APIC for the length of the row: the loader's direct map leaves MMIO out.
@@ -201,41 +233,26 @@ ktest!("int3.resume", fn int3_resume(t: &mut TestCtx) {
     }
     t.expect_eq("rsp after int3", s1, s0);
     // The default for #BP reports a line. A second `int3`, once the first has
-    // come back whole, runs with COM1 in loopback (MCR bit 4): what the kernel
-    // sends comes back into the UART's receive buffer instead of onto the
-    // wire, where this row counts it. (The first runs with the line on the
-    // wire, so a run that dies in it still shows its report.) First, let what
-    // was already sent leave (LSR TEMT).
+    // come back whole, runs between two marks this file prints through the
+    // learner's own `serial::write_str`, `[int3>` before it and `<int3]` after
+    // it (G2078, 2026-11-06, CONTRACT §B.2-05): what the default sends during
+    // it goes out on the serial line between them, and the serial row
+    // `int3.reported` reads the line. Nothing here reads COM1 (until
+    // 2026-11-06 the second `int3` ran with COM1 in loopback and this row
+    // counted the report in the UART's receive FIFO, which a kernel that
+    // drains its own receive took first). The closing mark waits `MARK_MS`
+    // by the PM timer after the `int3` returns.
     // Before the second `int3`, a handler goes on another vector (2026-10-28,
     // G1612): vector 3 still has none, so the default must still answer it.
     idt::set_handler(DECOY_VEC, decoy, 0);
     let decoys = DECOY_HITS.load(Ordering::SeqCst);
-    let mut spins = 0u32;
-    while inb(COM1 + 5) & 0x40 == 0 && spins < 10_000_000 {
-        spins += 1;
-    }
-    let mcr = inb(COM1 + 4);
-    outb(COM1 + 4, mcr | 0x10);
-    while inb(COM1 + 5) & 1 != 0 {
-        inb(COM1);
-    }
+    kernel::serial::write_str(INT3_OPEN);
     // SAFETY: as above; the first `int3` came back with every marked register.
     unsafe { asm!("int3", clobber_abi("C")) };
-    let (mut n, mut head) = (0usize, [b'.'; 16]);
-    while inb(COM1 + 5) & 1 != 0 && n < 4096 {
-        let b = inb(COM1);
-        if n < 16 {
-            head[n] = if (0x20..0x7f).contains(&b) { b } else { b'.' };
-        }
-        n += 1;
-    }
-    outb(COM1 + 4, mcr);
+    pm_wait_ms(MARK_MS);
+    kernel::serial::write_str(INT3_CLOSE);
+    kernel::serial::write_str("\n");
     no_decoy(t, decoys, format_args!("the second int3, raised after set_handler({DECOY_VEC}, ...),"));
-    if n == 0 {
-        t.fail(format_args!("the default for vector 3 sent nothing to the serial line during the int3: no breakpoint line"));
-    } else {
-        t.note(format_args!("int3.resume: during the int3 the kernel sent \"{}\"... to the serial line", core::str::from_utf8(&head[..n.min(16)]).unwrap_or("?")));
-    }
 });
 
 ktest!("pf.cr2", fn pf_cr2(t: &mut TestCtx) {

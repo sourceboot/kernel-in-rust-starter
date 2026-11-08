@@ -2,7 +2,7 @@
 //! file is yours.
 //!
 //! Every file here is text the kernel writes at the moment it is read, from
-//! the kernel's own tables (interface 17: `proc::each`, `frame::stats`), so
+//! the kernel's own tables (lab 12's `proc::each`, lab 07's `frame::stats`), so
 //! two reads with something in between see different text. The tree:
 //!
 //! ```text
@@ -32,7 +32,7 @@ pub struct ProcFs {}
 impl ProcFs {
     /// A new `/proc`, with a device number of its own (`mount::anon_dev`).
     pub fn new() -> ProcFs {
-        todo!("lab 22 step 1 — ProcFs::new: a /proc with a device number of its own")
+        todo!("lab 22 task 1 — ProcFs::new: a /proc with a device number of its own")
     }
 }
 
@@ -45,16 +45,16 @@ impl Default for ProcFs {
 impl Inode for ProcFs {
     fn lookup(&self, name: &str) -> Result<InodeRef, Errno> {
         let _ = name;
-        todo!("lab 22 step 7 — ProcFs::lookup: meminfo, mounts, uptime, sboot, self, or a live pid")
+        todo!("lab 22 task 5 — ProcFs::lookup: meminfo, mounts, uptime, sboot, self, or a live pid")
     }
     fn read_at(&self, _off: u64, _buf: &mut [u8]) -> Result<usize, Errno> {
         Err(EISDIR)
     }
     fn getdents(&self, index: u64) -> Result<Option<DirEntry>, Errno> {
         let _ = index;
-        todo!("lab 22 step 10 — ProcFs::getdents: the four names, then one directory per pid")
+        todo!("lab 22 task 8 — ProcFs::getdents: the four names, then one directory per pid")
     }
     fn stat(&self) -> Stat {
-        todo!("lab 22 step 4 — ProcFs::stat: a directory, 0555, on this /proc's device")
+        todo!("lab 22 task 3 — ProcFs::stat: a directory, 0555, on this /proc's device")
     }
 }

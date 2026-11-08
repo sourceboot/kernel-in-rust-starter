@@ -8,8 +8,7 @@
 //! ends returns to whoever started it: `run` saves the caller's context and
 //! enters the program, and returns when something calls `leave`.
 //!
-//! Fill in the bodies; keep the signatures — later labs and the course's
-//! tests call them.
+//! Fill in the bodies; keep the signatures — later labs call them.
 
 use crate::addr::VirtAddr;
 use crate::paging::AddressSpace;

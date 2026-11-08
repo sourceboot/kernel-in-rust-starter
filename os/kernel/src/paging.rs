@@ -5,8 +5,8 @@
 //! and the HHDM stay mapped; the lower half — the user half — starts empty,
 //! and `map` builds it from frames.
 //!
-//! Fill in the bodies; keep the signatures and the types — later labs and
-//! the course's tests use them.
+//! Fill in the bodies; keep the signatures and the types — later labs
+//! use them.
 
 use crate::addr::{PhysAddr, VirtAddr};
 use crate::frame::Frame;

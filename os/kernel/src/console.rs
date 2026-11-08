@@ -9,8 +9,11 @@
 //! starts.
 //!
 //! Fill in the bodies; keep the signatures, the types and the constants —
-//! later labs and the course's tests use them.
+//! later labs use them.
 
+extern crate alloc;
+
+use alloc::vec::Vec;
 use core::ops::Deref;
 use core::sync::atomic::{AtomicU32, AtomicU64};
 
@@ -246,5 +249,48 @@ impl OpenFile {
     pub fn truncate(&self, len: u64) -> Result<(), Errno> {
         let _ = len;
         todo!("lab 33 task 6 — OpenFile::truncate: a regular file open for writing is len bytes now; anything else EINVAL")
+    }
+}
+
+impl OpenFile {
+    /// Lab 15 task 1: the status flags, as `F_GETFL` reports them.
+    pub fn status(&self) -> u32 {
+        todo!("lab 15 task 1 — OpenFile::status: the access mode and O_* bits, as F_GETFL reports them")
+    }
+}
+
+impl FdTable {
+    /// Lab 15 task 8: the table a forked child starts with, every fd and close-on-exec bit the same.
+    pub fn fork_copy(&self) -> FdTable {
+        todo!("lab 15 task 8 — FdTable::fork_copy: every fd the same open file at the same number")
+    }
+    /// Lab 15 task 6: the lowest free fd at or above `min` names `fd`'s open file; `dup` and `F_DUPFD` share it.
+    pub fn dup_from(&mut self, fd: u64, min: u64) -> Result<usize, Errno> {
+        let _ = (fd, min);
+        todo!("lab 15 task 6 — FdTable::dup_from: the lowest free fd at or above min, close-on-exec clear")
+    }
+    /// Lab 15 task 6: `dup(fd)`.
+    pub fn dup(&mut self, fd: u64) -> Result<usize, Errno> {
+        let _ = fd;
+        todo!("lab 15 task 6 — FdTable::dup: dup_from with min 0")
+    }
+    /// Lab 15 task 6: `dup2(old, new)`; the `Fd` it displaces comes back, for the caller to drop.
+    pub fn dup2(&mut self, old: u64, new: u64) -> Result<(usize, Option<Fd>), Errno> {
+        let _ = (old, new);
+        todo!("lab 15 task 6 — FdTable::dup2: new names old's open file; what was at new comes back")
+    }
+    /// Lab 15 task 6: `dup3(old, new, flags)`: `dup2` that refuses `old == new` and takes `O_CLOEXEC`.
+    pub fn dup3(&mut self, old: u64, new: u64, flags: u32) -> Result<(usize, Option<Fd>), Errno> {
+        let _ = (old, new, flags);
+        todo!("lab 15 task 6 — FdTable::dup3: dup2, EINVAL for old == new or a flag but O_CLOEXEC")
+    }
+    /// Lab 15 task 6: `fcntl(fd, cmd, arg)` for the six commands of `mod fcntl`.
+    pub fn fcntl(&mut self, fd: u64, cmd: u32, arg: u64) -> Result<i64, Errno> {
+        let _ = (fd, cmd, arg);
+        todo!("lab 15 task 6 — FdTable::fcntl: F_DUPFD, F_DUPFD_CLOEXEC, F_GETFD, F_SETFD, F_GETFL, F_SETFL; anything else EINVAL")
+    }
+    /// Lab 15 task 8: for `execve`, every fd marked close-on-exec taken out, for the caller to drop.
+    pub fn close_on_exec(&mut self) -> Vec<Fd> {
+        todo!("lab 15 task 8 — FdTable::close_on_exec: take out every fd marked close-on-exec")
     }
 }

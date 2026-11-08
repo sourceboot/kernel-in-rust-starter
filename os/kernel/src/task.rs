@@ -11,13 +11,13 @@
 //! have had, with a return address that starts the task's function; a
 //! function that returns ends its task.
 //!
-//! The boot flow — `kernel_main`, or a vehicle's `_start` — is task 0, and
+//! The boot flow — `kernel_main`, or a vehicle's `_start` — is `Tid(0)`, and
 //! it exists from the first time anyone asks for the table. The table is
 //! only ever touched with interrupts off (`with_table`): a tick that found
 //! its lock held would spin on it forever.
 //!
 //! Fill in the bodies; keep the signatures, the types and the static — later
-//! labs and the course's tests use them.
+//! labs use them.
 
 extern crate alloc;
 
@@ -34,7 +34,7 @@ use crate::sync::SpinLock;
 /// Each spawned task's kernel stack.
 pub const KSTACK_BYTES: usize = 16 * 1024;
 
-/// A task's id. Task 0 is the boot flow; ids are never reused.
+/// A task's id. `Tid(0)` is the boot flow; ids are never reused.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Tid(pub u64);
 
@@ -148,26 +148,26 @@ impl TaskTable {
         TaskTable { tasks: Vec::new(), ready: VecDeque::new(), current: Tid(0), next_id: 1 }
     }
 
-    /// Task 0, the boot flow, the first time anyone needs the table.
+    /// `Tid(0)`, the boot flow, the first time anyone needs the table.
     pub fn ensure_boot(&mut self) {
         let _ = self.next_id;
-        todo!("lab 11 step 1 — ensure_boot: an empty table gets task 0, the boot flow, Running")
+        todo!("lab 11 task 1 — ensure_boot: an empty table gets Tid(0), the boot flow, Running")
     }
 
     pub fn get(&self, id: Tid) -> Option<&Task> {
         let _ = id;
-        todo!("lab 11 step 1 — get: the task with this id")
+        todo!("lab 11 task 1 — get: the task with this id")
     }
 
     pub fn get_mut(&mut self, id: Tid) -> Option<&mut Task> {
         let _ = id;
-        todo!("lab 11 step 1 — get_mut: the task with this id")
+        todo!("lab 11 task 1 — get_mut: the task with this id")
     }
 
     /// Take out every dead task except the running one (a task that just
     /// died may still be on its own stack). The caller drops them.
     pub fn take_dead(&mut self) -> Vec<Box<Task>> {
-        todo!("lab 11 step 2 — take_dead: remove the dead tasks no one is running on")
+        todo!("lab 11 task 2 — take_dead: remove the dead tasks no one is running on")
     }
 }
 
@@ -204,23 +204,23 @@ pub fn with_table<R>(f: impl FnOnce(&mut TaskTable) -> R) -> R {
     r
 }
 
-/// Run `f` on the running task (task 0 if nothing was ever spawned).
+/// Run `f` on the running task (the boot flow if nothing was ever spawned).
 pub fn with_current<R>(f: impl FnOnce(&mut Task) -> R) -> R {
     let _ = f;
-    todo!("lab 11 step 1 — with_current: the running task, task 0 if the table is new")
+    todo!("lab 11 task 1 — with_current: the running task, the boot flow if the table is new")
 }
 
 /// Where task `id` is in its life; `None` once it is gone from the table.
 pub fn state(id: Tid) -> Option<State> {
     let _ = id;
-    todo!("lab 11 step 8 — state: the task's State, None once it is gone")
+    todo!("lab 11 task 6 — state: the task's State, None once it is gone")
 }
 
 /// Start `f` as a new task, ready to run; returns its id. A task whose
 /// function returns ends.
 pub fn spawn(f: fn()) -> Tid {
     let _ = f;
-    todo!("lab 11 step 4 — spawn: a kernel stack laid out as `switch` would have left it, a Task, the back of the queue")
+    todo!("lab 11 task 4 — spawn: a kernel stack laid out as `switch` would have left it, a Task, the back of the queue")
 }
 
 /// End the running task. Never returns.
@@ -238,5 +238,5 @@ pub fn exit() -> ! {
 /// (or `spawn` built), whose stack is still allocated.
 pub unsafe extern "C" fn switch(from: *mut Context, to: *const Context) {
     let _ = (from, to);
-    todo!("lab 11 step 5 — switch: push the six callee-saved registers, swap stack pointers, pop, ret")
+    todo!("lab 11 task 5 — switch: push the six callee-saved registers, swap stack pointers, pop, ret")
 }

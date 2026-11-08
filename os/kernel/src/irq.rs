@@ -5,8 +5,7 @@
 //! channel 0 runs at 1000 Hz. A handler acknowledges its IRQ with an EOI
 //! before it returns, or the PIC never delivers that line again.
 //!
-//! Fill in the bodies; keep the signatures — later labs and the course's
-//! tests call them.
+//! Fill in the bodies; keep the signatures.
 
 /// The vector IRQ 0 arrives on; IRQ n arrives on `IRQ_BASE + n`.
 pub const IRQ_BASE: u8 = 32;

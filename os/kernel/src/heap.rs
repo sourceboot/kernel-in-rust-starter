@@ -5,17 +5,16 @@
 //! linked list of free blocks in address order, kept inside the free memory
 //! itself; when nothing fits, take frames from `frame::alloc` and map them
 //! at the heap's top through `paging`. The heap lives in the top 512 GiB
-//! (PML4 entry 511), the slot every address space shares. An allocation
-//! that arrives before `init` places the heap at `START`: from this lab the
-//! console opens a file through `Arc::new`, and lab 09's tests never call
-//! `init`.
+//! (PML4 entry 511), the slot every address space shares. From this lab,
+//! opening a console file is an `Arc::new`, and nothing makes `init` come
+//! first, so an allocation before `init` places the heap at `START` with no
+//! pages.
 //!
 //! One CPU, one lock: interrupts stay off while the heap's lock is held,
 //! and a lock found held on entry is a deadlock — refuse the allocation
 //! (return null) and name it, never wait.
 //!
-//! Fill in the bodies; keep the signatures, the types and the static — later
-//! labs and the course's tests use them.
+//! Fill in the bodies; keep the signatures, the types and the static.
 
 use core::alloc::{GlobalAlloc, Layout};
 
@@ -33,9 +32,16 @@ pub struct LockedHeap {
     heap: SpinLock<Heap>,
 }
 
-/// The heap's lock, held: interrupts stay off until it drops.
+/// The heap's lock, held: interrupts stay off until it drops. Its fields are
+/// yours: the lock's guard and whether interrupts were on.
 pub struct HeapGuard<'a> {
     _heap: &'a LockedHeap,
+}
+
+impl Drop for HeapGuard<'_> {
+    fn drop(&mut self) {
+        todo!("lab 10 task 4 — HeapGuard::drop: release the lock, then IF back to what lock found")
+    }
 }
 
 impl LockedHeap {

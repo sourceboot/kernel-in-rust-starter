@@ -56,7 +56,7 @@
 //!     them) and `/tmp`'s links byte for byte as before the row.
 //!   3 `ext2.rename` (derived) — two directories and three files of
 //!     splitmix64 of the nonce, each opening with an unpublished word (fix
-//!     round 2, §A.1-5); twenty-four renames, twenty-seven by fix round 6 (fix round 1 added a
+//!     round 2, §A.1-5); thirty-four renames by fix round 7, twenty-four before fix round 1 (fix round 1 added a
 //!     directory over an empty directory, freed whole; fix round 2 made the
 //!     rename into its own subtree 3–8 levels deep, chosen from the nonce,
 //!     and added the same rename spelled through `..`, both `-EINVAL`; fix
@@ -309,14 +309,38 @@ struct Row {
     id: &'static str,
     failed: bool,
     used_nonce: bool,
+    /// Rows 1–3 (#74 Q3 (b), 2026-11-04): a failed row ends with one `#`
+    /// line naming its first failure, because the CLI shows a row's last 8.
+    summed: bool,
+    first: Option<String>,
+    wrong: usize,
 }
+
+/// The longest first failure a summary line quotes, in characters (the
+/// engine cuts a `#` line at 400; ledger G1700).
+const SUMMARY_FACT: usize = 280;
 
 impl Row {
     fn new(id: &'static str) -> Row {
-        Row { id, failed: false, used_nonce: false }
+        Row { id, failed: false, used_nonce: false, summed: false, first: None, wrong: 0 }
+    }
+    /// A row that ends, when it fails, with `# <id>: first wrong of N: …`.
+    fn summed(id: &'static str) -> Row {
+        Row { summed: true, ..Row::new(id) }
     }
     fn fail(&mut self, why: core::fmt::Arguments) {
         self.failed = true;
+        self.wrong += 1;
+        if self.summed && self.first.is_none() {
+            let s = format!("{why}");
+            let pre = format!("{}: ", self.id);
+            let fact = s.strip_prefix(pre.as_str()).unwrap_or(&s);
+            let mut cut: String = fact.chars().take(SUMMARY_FACT).collect();
+            if fact.chars().count() > SUMMARY_FACT {
+                cut.push('…');
+            }
+            self.first = Some(cut);
+        }
         note(why);
     }
     fn expect(&mut self, cond: bool, what: &str) {
@@ -357,6 +381,9 @@ impl Row {
         if self.used_nonce && ktap::nonce().is_none() {
             self.failed = true;
             note(format_args!("{}: derived from the run's nonce, and this run has none", self.id));
+        }
+        if let Some(fact) = &self.first {
+            note(format_args!("{}: first wrong of {}: {fact}", self.id, self.wrong));
         }
         quiet(|| {
             if self.failed {
@@ -1495,7 +1522,7 @@ fn compare_dir(r: &mut Row, what: &str, mut got: Vec<Rec>, mut want: Vec<Rec>) {
 }
 
 fn dents_row(raw: &Raw, root: &InodeRef, seeded: Result<Vec<String>, String>) {
-    let mut r = Row::new(DENTS_ID);
+    let mut r = Row::summed(DENTS_ID);
     let want = (dir(raw, 2), raw.walk("/t").and_then(|t| t.ok_or(String::from("no /t on the disk"))).and_then(|t| dir(raw, t)));
     let (root_want, t_want) = match want {
         (Ok(a), Ok(b)) => (a, b),
@@ -1716,7 +1743,7 @@ fn alloc_state(raw: &Raw) -> Result<(Box<[u8; BLOCK_SIZE]>, Box<[u8; BLOCK_SIZE]
 }
 
 fn mkdir_row(raw: &Raw) {
-    let mut r = Row::new(MKDIR_ID);
+    let mut r = Row::summed(MKDIR_ID);
     let Some(before) = got(&mut r, alloc_state(raw)) else { return r.finish(2) };
     let data = mix(0x5B00_0020_0002, 60_000);
     let i = A::I;
@@ -1840,7 +1867,7 @@ fn refused_direct(r: &mut Row, raw: &Raw, pdir: &str, old: &str, ndir: &str, hel
 }
 
 fn rename_row(raw: &Raw, control: Result<Vec<String>, String>) {
-    let mut r = Row::new(RENAME_ID);
+    let mut r = Row::summed(RENAME_ID);
     // The three files' bytes: splitmix64 of the nonce, the first word of
     // each replaced by a word no one knows before this boot (CONTRACT
     // §A.1-5: the read-back is bytes the learner's code only carries; s20

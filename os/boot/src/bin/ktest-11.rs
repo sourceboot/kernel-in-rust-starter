@@ -109,6 +109,14 @@ fn irq_off() -> bool {
     rflags & (1 << 9) != 0
 }
 
+/// RFLAGS.IF as it is now, leaving it as it is.
+fn if_on() -> bool {
+    let rflags: u64;
+    // SAFETY: reads RFLAGS through the stack; changes nothing.
+    unsafe { asm!("pushfq", "pop {}", out(reg) rflags) };
+    rflags & (1 << 9) != 0
+}
+
 fn irq_restore(on: bool) {
     if on {
         // SAFETY: setting IF touches no memory.
@@ -350,6 +358,10 @@ static BRUNS: AtomicU64 = AtomicU64::new(0);
 /// Set once the pair window is read: from the tick window on, the partner
 /// runs with interrupts off (`bounce`).
 static BQUIET: AtomicBool = AtomicBool::new(false);
+/// The partner's runs whose `yield_now`, called with interrupts off, returned
+/// with them on (G1908, ruled 2026-11-01: `yield_now` gives IF back as it
+/// found it).
+static BIFON: AtomicU64 = AtomicU64::new(0);
 
 /// Pass the token back and forth through `yield_now`: a handoff is counted
 /// only by the task holding the token, and the other must run to hand it
@@ -388,14 +400,20 @@ fn pong() {
 /// Once BQUIET is set it turns interrupts off at the top of each run, and a
 /// `yield_now` that gives them back as it found them keeps them off, so from
 /// then on the tick can take the CPU only from the boot task, never from the
-/// partner (one that ends in `sti` turns them back on: G1908).
+/// partner. One that ends in `sti` turns them back on: the partner reads IF
+/// as the first thing after `yield_now` returns, before any code of this
+/// vehicle's could set it, and counts the run in BIFON (G1908, 2026-11-01).
 fn bounce() {
     while !BSTOP.load(Ordering::SeqCst) {
-        if BQUIET.load(Ordering::SeqCst) {
+        let off = BQUIET.load(Ordering::SeqCst);
+        if off {
             irq_off();
         }
         BRUNS.fetch_add(1, Ordering::SeqCst);
         sched::yield_now();
+        if off && if_on() {
+            BIFON.fetch_add(1, Ordering::SeqCst);
+        }
     }
     task::exit()
 }
@@ -447,12 +465,16 @@ const LONE_TICKS: u64 = 20;
 /// where an exit handed on through another task (a reaper) reads 3 and a
 /// late tick lands 55 ms from the next. It holds for a `yield_now` that gives
 /// IF back as it found it: one that ends in `sti` turns interrupts on inside
-/// every partner run, a tick cuts each run in two, and the tick window reads
-/// about 2r + 60 (G1908). On this vehicle (#42q, 2026-10-30, lab-linux01
+/// every partner run, a tick cuts each run in two, and the tick window would
+/// read about 2r + 60, so the partner's read of IF names that first (G1908). On this vehicle (#42q, 2026-10-30, lab-linux01
 /// under 10 busy loops) 255 loaded honest boots read the tick window at
 /// 2r + 2 in 7, 2r + 4 in 3 and 2r + 6 in 1 (G1907), and no exit window over
 /// the cap. 4 since 2026-10-29 (#42i, class B, sized on the vehicle before
-/// this one). A real miscount is 3r-4r, and the 2r floor, the pair and the
+/// this one). Since #82 (2026-11-06, G1964) it is also the trio ceiling's
+/// slack: q + 2 + one per tick (time::TICKS, capped by the PM timer's ms + 2)
+/// + TICK_SLACK; honest trios read at most q + their ticks, the least margin
+/// 6 over 142 boots on the mini, at rest and beside 20 busy loops.
+/// A real miscount is 3r-4r, and the 2r floor, the pair and the
 /// trio catch the rest.
 const TICK_SLACK: u64 = 4;
 
@@ -654,7 +676,16 @@ ktest!("task.1000.switches", fn thousand_switches(t: &mut TestCtx) {
         ));
         // r = 0: the tick switches nothing, which is task.preempt.counter's
         // to say; this row counts the switches a tick makes, when it makes them.
-        if r > 0 && ticked < 2 * r {
+        // A yield_now that turned interrupts on inside the partner's runs lets
+        // a tick cut each run in two, so the count below would blame a correct
+        // switches(): that cause is named first, from the partner's own read
+        // of IF (G1908, ruled 2026-11-01).
+        let ifon = BIFON.load(Ordering::SeqCst);
+        if ifon > 0 {
+            t.fail(format_args!(
+                "yield_now returned with interrupts on in {ifon} of the partner's {r} runs, though the partner called it with them off: yield_now must give IF back as it found it"
+            ));
+        } else if r > 0 && ticked < 2 * r {
             t.fail(format_args!(
                 "the partner ran {r} times while this task spun without yielding, {} switches, but sched::switches() moved {ticked}: switches() does not count the switches the tick makes",
                 2 * r
@@ -686,15 +717,24 @@ ktest!("task.1000.switches", fn thousand_switches(t: &mut TestCtx) {
         // a partner's yield, which ends one of its counted runs, or a tick's:
         // so switches() moves at least once per run plus once per time this
         // task saw the partners' count move (the tick took it out each time),
-        // and at most once per run plus twice per tick of that time (a tick
-        // handler that runs the pick before and after its EOI switches twice;
-        // task.eoi_before_switch is the row that refuses it), give or take the
-        // two runs a window edge can split from their yields.
+        // and at most once per run plus once per tick of that time, give or
+        // take the two runs a window edge can split from their yields and
+        // TICK_SLACK. The tick term is the ticks time::TICKS counted in the
+        // window, capped by the PM timer's tms + 2 (G1964, 2026-11-06, class B
+        // (c1), lab 12's spin-row ceiling): on a loaded host the tick arrives
+        // late and fewer times than tms, and a ceiling of tms alone let a
+        // count that adds 2 for a tick's switch among three tasks through
+        // (tick-trio-double, 9/9 at load 16-24); a TICKS that runs fast
+        // cannot loosen it past tms + 2. Before, the ceiling allowed two per
+        // tick, sized for a tick handler that runs the pick before and after
+        // its EOI; that handler is task.eoi_before_switch's to refuse and now
+        // fails here too. Each edge reads switches(), TICKS and the partners'
+        // runs together with interrupts off (G1841), so no tick falls between
+        // the three reads.
         let c1 = task::spawn(trio0);
         let c2 = task::spawn(trio1);
+        let (t0, k0, q0) = quiet(|| (sched::switches(), ticks(), truns()));
         let mut tc = Clock::new();
-        let t0 = sched::switches();
-        let q0 = truns();
         let (mut seen, mut outs) = (q0, 0u64);
         while tc.ms() < TICK_SPIN_MS {
             let q = truns();
@@ -703,15 +743,15 @@ ktest!("task.1000.switches", fn thousand_switches(t: &mut TestCtx) {
                 seen = q;
             }
         }
-        let q = truns().wrapping_sub(q0);
-        let tsw = sched::switches().wrapping_sub(t0);
+        let (tsw, tk, q1) = quiet(|| (sched::switches().wrapping_sub(t0), ticks().wrapping_sub(k0), truns()));
+        let q = q1.wrapping_sub(q0);
         let tms = tc.ms();
         TSTOP.store(true, Ordering::SeqCst);
         let cgone = reap(&[c1, c2], 1000);
         let tlo = (q + outs).saturating_sub(2);
-        let thi = q + 2 + 2 * (tms + 2);
+        let thi = q + 2 + tk.min(tms + 2) + TICK_SLACK;
         t.note(format_args!(
-            "task.1000.switches: while this task spun {tms} ms without yielding beside two partners, they ran {q} times, the tick took this task out at least {outs} times, and sched::switches() moved {tsw}"
+            "task.1000.switches: while this task spun {tms} ms without yielding beside two partners, they ran {q} times, the tick took this task out at least {outs} times, time::TICKS moved {tk}, and sched::switches() moved {tsw}"
         ));
         // outs = 0: the tick switches nothing, which is task.preempt.counter's to say.
         if outs > 0 && tsw < tlo {
@@ -720,7 +760,7 @@ ktest!("task.1000.switches", fn thousand_switches(t: &mut TestCtx) {
             ));
         } else if outs > 0 && tsw > thi {
             t.fail(format_args!(
-                "two partners ran {q} times in {tms} ms while this task spun, at most {thi} switches with two for every tick of that time, but sched::switches() moved {tsw}: switches() counts more than the switches"
+                "two partners ran {q} times in {tms} ms while this task spun and time::TICKS moved {tk}, at most {thi} switches with one for every tick, but sched::switches() moved {tsw}: switches() counts more than the switches"
             ));
         }
         t.expect(cgone, "the two partner tasks gone from the task table within 1 s of finishing");

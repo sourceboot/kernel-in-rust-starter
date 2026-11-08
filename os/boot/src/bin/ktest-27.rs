@@ -43,7 +43,12 @@
 //!   1 `port.survives` (K, plain) — at the stop the program is still running
 //!     (it never exits on its own: its loop is `while (1)`), nothing killed it
 //!     (`mm::last_kill` did not move), and no syscall it made was `-ENOSYS`
-//!     (`syscall::enosys_count` did not move). Each failure names the cause.
+//!     (`syscall::enosys_count` did not move). Each failure names the cause
+//!     in ONE line, the row's last `#` line (`# port.survives: …`, W3's Q3 (b)):
+//!     the exit or the kill, and, when `enosys_count` moved, which of the
+//!     program's own calls the learner's dispatcher has no arm for (asked
+//!     again at the stop, `PATH_CALLS`). The always-printed line before it is
+//!     `# port: …`, so only the failure line starts with the row's id.
 //!
 //! Plan 1.
 
@@ -57,6 +62,7 @@ mod shim;
 
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 use alloc::sync::Arc;
 use core::arch::asm;
 use core::sync::atomic::Ordering;
@@ -70,7 +76,7 @@ use kernel::fs::mount;
 use kernel::fs::vfs::InodeRef;
 use kernel::ktap;
 use kernel::proc::{self, Pid};
-use kernel::syscall::{self, Errno};
+use kernel::syscall::{self, Errno, SyscallFrame};
 use kernel::{bootinfo, frame, gdt, heap, idt, irq, mm, sched, serial, time};
 
 const HEAP_START: u64 = 0xffff_ffff_d000_0000;
@@ -100,6 +106,39 @@ const GRID_W: u64 = 40;
 const GRID_H: u64 = 25;
 // The title lights 260 of these 1,000 points against the stop's 250; that
 // holds only because the screen mode and the data file are fixed.
+
+/// The calls the program makes on its way to the title (CONTRACT §B.2-27:
+/// measured 2026-10-22 on the reference, 2 3 7 8 9 11 16 19 20 35 72 83 158
+/// 204 217 218 228), each with its name, the lab that gives it its arm
+/// (CONTRACT's syscall table) and arguments every arm of the reference
+/// refuses at once with an error of its own (a bad fd, a null pointer, a
+/// count or length out of range, an unknown clock or code), so asking one
+/// does nothing. Asked only on a failing row whose `enosys_count` moved
+/// (`unarmed`): a call whose asking moves `enosys_count` has no arm. Never
+/// asked: 56 (`clone`), which only the program's error path calls and no lab
+/// serves, and which a kernel that did serve it would act on.
+const PATH_CALLS: [(u64, &str, u8, [u64; 6]); 17] = {
+    const M: u64 = u64::MAX;
+    [
+        (2, "open", 17, [0; 6]),
+        (3, "close", 9, [M, 0, 0, 0, 0, 0]),
+        (7, "poll", 26, [0, M, 0, 0, 0, 0]),
+        (8, "lseek", 17, [M, 0, 0, 0, 0, 0]),
+        (9, "mmap", 25, [0, 0, M, 0x22, M, 0]),
+        (11, "munmap", 25, [1, 0, 0, 0, 0, 0]),
+        (16, "ioctl", 9, [M, 0, 0, 0, 0, 0]),
+        (19, "readv", 25, [M, 0, 0, 0, 0, 0]),
+        (20, "writev", 25, [M, 0, 0, 0, 0, 0]),
+        (35, "nanosleep", 25, [0; 6]),
+        (72, "fcntl", 15, [M, 0, 0, 0, 0, 0]),
+        (83, "mkdir", 20, [0; 6]),
+        (158, "arch_prctl", 25, [0; 6]),
+        (204, "sched_getaffinity", 25, [0; 6]),
+        (217, "getdents64", 20, [M, 0, 0, 0, 0, 0]),
+        (218, "set_tid_address", 25, [0; 6]),
+        (228, "clock_gettime", 25, [M, 0, 0, 0, 0, 0]),
+    ]
+};
 
 // ── Time that does not depend on the learner's tick ──────────────────────
 
@@ -248,6 +287,25 @@ fn mount_dev() -> Result<(), String> {
 
 // ── The run ──────────────────────────────────────────────────────────────
 
+/// Which of `PATH_CALLS` the learner's dispatcher has no arm for: each is
+/// asked once, as a program's call would be, and one whose asking moves
+/// `enosys_count` reached the `_` arm. `"35 (nanosleep, lab 25)"` each, in
+/// number order. Called with interrupts off, after the stop's readings.
+fn unarmed() -> Vec<String> {
+    let mut out = Vec::new();
+    for (nr, name, lab, a) in PATH_CALLS {
+        // SAFETY: an all-zero frame is a valid SyscallFrame (plain
+        // integers); none of these calls reads or writes it.
+        let mut f: SyscallFrame = unsafe { core::mem::zeroed() };
+        let before = syscall::enosys_count();
+        let _ = syscall::dispatch(nr, a, &mut f);
+        if syscall::enosys_count() != before {
+            out.push(format!("{nr} ({name}, lab {lab:02})"));
+        }
+    }
+    out
+}
+
 /// Start the program, wait until it holds a picture on the screen (or
 /// `BOUND_MS`), and say whether it is still running, unkilled and served.
 /// Returns the row's failure, if any.
@@ -300,12 +358,13 @@ fn port() -> Option<String> {
     }
     let (k1, e1, f1) = (mm::last_kill(), syscall::enosys_count(), frame::stats().used);
     ktap::note(format_args!(
-        "{SURVIVES_ID}: {PROGRAM} pid {} ran {ms} ms after its exec ({started} ms to start); enosys_count() {e0} -> {e1}; frames in use {f0} -> {f1}",
+        "port: {PROGRAM} pid {} ran {ms} ms after its exec ({started} ms to start); enosys_count() {e0} -> {e1}; frames in use {f0} -> {f1}",
         pid.0
     ));
+    let exited = exit_of(pid);
     let mut why = String::new();
-    if let Some(v) = exit_of(pid) {
-        why += &format!("{PROGRAM} {} {ms} ms after its exec; it runs until it is stopped", status_text(v));
+    if let Some(v) = exited {
+        why += &format!("{PROGRAM} {} {ms} ms after its exec, where it should run until it is stopped", status_text(v));
     }
     if k1 != k0 {
         if let Some(k) = k1 {
@@ -319,7 +378,16 @@ fn port() -> Option<String> {
         if !why.is_empty() {
             why += "; ";
         }
-        why += &format!("{} of its system calls returned -ENOSYS (enosys_count() {e0} -> {e1}): every call it makes is a row of the syscall table at or before lab 26", e1 - e0);
+        why += &format!("{} of its system calls returned -ENOSYS (enosys_count() {e0} -> {e1}); ", e1 - e0);
+        let none = unarmed();
+        let those = if e1 - e0 == 1 { "that call" } else { "those calls" };
+        if !none.is_empty() {
+            why += &format!("your dispatcher has no arm for {}", none.join(", "));
+        } else if exited.is_some() {
+            why += &format!("each of the 17 calls it makes on its way to the title has an arm, so {those} came after it gave up (its error path calls clone, 56, which no lab serves): the cause is an earlier call's answer");
+        } else {
+            why += &format!("each of the 17 calls it makes on its way to the title has an arm, so {those} came off that path");
+        }
     }
     (!why.is_empty()).then_some(why)
 }

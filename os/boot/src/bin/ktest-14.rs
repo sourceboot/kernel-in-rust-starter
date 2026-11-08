@@ -475,6 +475,10 @@ fn probe_sleep() -> bool {
     let early = EARLY.load(Ordering::SeqCst);
     let mut took: Vec<u64> = Vec::new();
     let mut back = true;
+    // The queue read (s5-60, G1166's lab 14 half): right after each of its
+    // wakeups, interrupts off, the sleeper either ran already (raced, not
+    // judged) or is in the run queue.
+    let (mut judged, mut queued, mut raced) = (0u32, 0u32, 0u32);
     for round in 1..=PROBE_ROUNDS {
         // From round 2 on: wait until the sleeper is asleep for this round
         // (it says so holding the lock, and `sleep` lets the lock go).
@@ -486,8 +490,22 @@ fn probe_sleep() -> bool {
             back = false;
             break;
         }
+        let s_w = sched::slices(t);
         PROBE_GO.store(round, Ordering::SeqCst);
         sched::wakeup(probe_chan());
+        let (ran, inq) = quiet(|| {
+            let now = sched::slices(t);
+            let q = task::with_table(|tt| tt.ready.contains(&t));
+            (now != s_w, q)
+        });
+        if ran {
+            raced += 1;
+        } else {
+            judged += 1;
+            if inq {
+                queued += 1;
+            }
+        }
         let mut c = Clock::new();
         let mut yields = 0u64;
         while WOKEN.load(Ordering::SeqCst) < round && c.ms() < 1000 {
@@ -513,7 +531,16 @@ fn probe_sleep() -> bool {
         },
         held
     ));
-    let ok = back && most <= PROBE_YIELDS;
+    note(format_args!(
+        "sleep probe: right after each wakeup, with interrupts off, the sleeper was in the run queue {queued} of {judged} times ({raced} more it had already run, not judged)"
+    ));
+    if queued < judged {
+        note(format_args!(
+            "{SLICES_ID}: right after sched::wakeup on the channel a task sleeps on, the task had not run and was not in the run queue ({} of {judged} times): wakeup puts every task asleep on the channel back in the run queue before it returns, not at a later yield or tick",
+            judged - queued
+        ));
+    }
+    let ok = back && most <= PROBE_YIELDS && queued == judged;
     if !ok {
         note(format_args!(
             "{SLICES_ID}: sched::wakeup on the channel a task sleeps on did not put it back to run: wakeup moves every sleeper on that channel to the run queue, so it runs on the next turn"
@@ -999,8 +1026,9 @@ unsafe extern "C" fn _start() -> ! {
 
     let mounted = mount_archive();
     // Grow the heap once, before counting, for the kernel stacks the run
-    // will need (the heap never gives frames back): what the count then
-    // shows is what the processes themselves kept.
+    // will need, so a heap that keeps what it grew shows only what the
+    // processes themselves kept. A heap that gives free pages back may
+    // undo this; the count feeds a note only, never a row.
     drop(core::hint::black_box(alloc::vec![0u8; 256 * 1024]));
     let frames0 = frames_used();
     let envp = format!("SBOOT_NONCE={nonce}");

@@ -23,8 +23,7 @@
 //! kernel: an `execve` (a syscall, interrupts off) that found it held by a
 //! preempted task would spin forever.
 //!
-//! Fill in the bodies; keep the signatures — later labs and the course's
-//! tests use them.
+//! Fill in the bodies; keep the signatures — later labs use them.
 
 extern crate alloc;
 
@@ -157,12 +156,12 @@ pub trait Inode: Send + Sync {
 /// already, `-ENOMEM` when the table holds `MAX_MOUNTS` already.
 pub fn mount(path: &str, root: InodeRef) -> Result<(), Errno> {
     let _ = (path, root);
-    todo!("lab 13 step 2 — mount: a table of (path, root), at most MAX_MOUNTS, interrupts off around it")
+    todo!("lab 13 task 2 — mount: a table of (path, root), at most MAX_MOUNTS, interrupts off around it")
 }
 
 /// The root of the file system mounted at `/`; `-ENOENT` before one is.
 pub fn root() -> Result<InodeRef, Errno> {
-    todo!("lab 13 step 6 — root: the root inode of what is mounted at /")
+    todo!("lab 13 task 2 — root: the root inode of what is mounted at /")
 }
 
 /// The inode `path` names. An absolute path starts at the root of the mount
@@ -174,5 +173,5 @@ pub fn root() -> Result<InodeRef, Errno> {
 /// directory; `-ENAMETOOLONG` for a component over `NAME_MAX`.
 pub fn walk(cwd: &InodeRef, path: &str) -> Result<InodeRef, Errno> {
     let _ = (cwd, path);
-    todo!("lab 13 step 7 — walk: the longest-prefix mount (or cwd), then one lookup per component")
+    todo!("lab 13 task 2 — walk: the longest-prefix mount (or cwd), then one lookup per component")
 }

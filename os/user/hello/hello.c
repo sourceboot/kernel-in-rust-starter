@@ -9,7 +9,10 @@
  * the rest into stdio's own, in one call -- fgets would read a byte at a time
  * with read) and writes with writev. It also asks for the calls a
  * program takes for granted -- the ids, the CPU set, the clocks, a sleep, the
- * signal tables, a futex -- and checks each answer. It prints two lines:
+ * signal tables, a futex -- and checks each answer, including that the signal
+ * table refuses a number outside 1 to 64 with EINVAL (2026-11-02, G1923: musl's
+ * own sigaction() refuses one before it reaches the kernel, so those three
+ * asks are raw syscalls). It prints two lines:
  *
  *   hello, musl: <16 hex: splitmix64(a ^ w)> t<12 hex>
  *   ids 0 0 0 0 pid <getpid> cpus 1 slept <n> ms realtime <s> sig ok futex ok
@@ -51,6 +54,13 @@ static int64_t ms_of(const struct timespec *t) {
 
 static volatile sig_atomic_t never;
 static void on_usr1(int sig) { never = sig; }
+
+/* rt_sigaction(sig, act, oact, 8) asked directly, past musl's own range check:
+ * 1 if the kernel answered -1 with EINVAL, as Linux does for a number outside 1-64. */
+static int refused(long sig, const uint64_t *act, uint64_t *oact) {
+    errno = 0;
+    return syscall(SYS_rt_sigaction, sig, act, oact, 8) == -1 && errno == EINVAL;
+}
 
 int main(int argc, char **argv) {
     char *end;
@@ -103,7 +113,11 @@ int main(int argc, char **argv) {
     if (gettimeofday(&tv, 0) != 0) return fail("gettimeofday failed");
     if (tv.tv_sec < rt.tv_sec || tv.tv_sec > rt.tv_sec + 1) return fail("gettimeofday and CLOCK_REALTIME disagree");
 
-    /* the signal tables: what is stored comes back. */
+    /* the signal tables: a number outside 1 to 64 names no signal, before any
+     * action is set and after one is; what is stored comes back. */
+    uint64_t kact[4] = {1 /* SIG_IGN */, 0, 0, 0}, koact[4];
+    if (!refused(0, 0, koact)) return fail("rt_sigaction(0) did not fail with EINVAL");
+    if (!refused(65, 0, koact)) return fail("rt_sigaction(65) did not fail with EINVAL");
     struct sigaction sa, old;
     memset(&sa, 0, sizeof sa);
     sa.sa_handler = on_usr1;
@@ -114,6 +128,8 @@ int main(int argc, char **argv) {
     if (sigaction(SIGUSR1, 0, &old) != 0) return fail("sigaction(SIGUSR1, get) failed");
     if (old.sa_handler != on_usr1 || !(old.sa_flags & SA_RESTART) || !sigismember(&old.sa_mask, SIGUSR2))
         return fail("sigaction did not give back what was stored");
+    if (!refused(65, kact, 0)) return fail("rt_sigaction(65, set) did not fail with EINVAL");
+    if (!refused(0, 0, koact)) return fail("rt_sigaction(0) did not fail with EINVAL");
     sigset_t block, was, now;
     sigemptyset(&block);
     sigaddset(&block, SIGUSR2);

@@ -1351,6 +1351,19 @@ fn control_recover(bad: &mut Vec<String>) {
     if !md.take().is_empty() {
         bad.push(String::from("recover() of a header without the magic wrote to the device"));
     }
+    // The magic, and n one past LOGSIZE: not a log this kernel wrote, so
+    // recovery refuses it before it replays a block.
+    let over: Vec<u64> = (1..=LOGSIZE as u64 + 1).collect();
+    md.seed(C_HDR, header_bytes(&over));
+    let got = quiet(|| lg.recover(&cache));
+    let wrote = md.take().len();
+    if got != Err(EINVAL) || wrote != 0 {
+        let ans = match got {
+            Ok(n) => format!("Ok({n})"),
+            Err(e) => errno_text(e),
+        };
+        bad.push(format!("recover() of a header with the magic and n = {}, past LOGSIZE ({LOGSIZE}), answered {ans} and wrote {wrote} blocks to the device, expected {} and no write", over.len(), errno_text(EINVAL)));
+    }
 }
 
 // ── The disk ─────────────────────────────────────────────────────────────
@@ -1509,7 +1522,8 @@ fn shape_disk(r: &mut Row, raw: &Raw, lm: &LogMap, wrap: &Arc<Wrap>, fs: Arc<Ext
     if !stopped {
         r.fail(format_args!("{SHAPE_ID}: no write to the header block {} carried n > 0: the transaction never committed through the log ({} writes)", lm.header, ws.len()));
     }
-    let at = ws.iter().position(|w| w.header_n.is_some_and(|n| n > 0)).unwrap_or(ws.len());
+    let hdr_at = ws.iter().position(|w| w.header_n.is_some_and(|n| n > 0));
+    let at = hdr_at.unwrap_or(ws.len());
     let h = raw_header(lm)?;
     let homes: BTreeSet<u64> = h.2.iter().copied().collect();
     if h.0 != MAGIC || h.1 == 0 || h.1 as usize > MAXOPBLOCKS || homes.len() != h.1 as usize || !h.3 || homes.iter().any(|b| *b >= raw.blocks || lm.all.contains(b)) {
@@ -1549,7 +1563,8 @@ fn shape_disk(r: &mut Row, raw: &Raw, lm: &LogMap, wrap: &Arc<Wrap>, fs: Arc<Ext
         Err(e) => r.fail(format_args!("{SHAPE_ID}: /tmp/{name} through the remount: {}", errno_text(e))),
     }
     let writes = |ws: &[Wr]| ws.iter().map(|w| if w.header_n.is_some() { format!("hdr(n={})", w.header_n.unwrap()) } else { format!("{}", w.block) }).collect::<Vec<_>>().join(" ");
-    note(format_args!("{SHAPE_ID}: the commit wrote {} (the header was write {}); {}", writes(&ws[..(at + 1).min(ws.len())]), at + 1, header_text(&h)));
+    let which = hdr_at.map(|k| format!("the header was write {}", k + 1)).unwrap_or_else(|| String::from("no header with n > 0"));
+    note(format_args!("{SHAPE_ID}: the commit wrote {} ({which}); {}", writes(&ws[..(at + 1).min(ws.len())]), header_text(&h)));
     if wrap.refused_writes() != r0 {
         r.fail(format_args!("{SHAPE_ID}: refused_writes() moved by {} across this row, whose refusals were this file's own (the hook disarmed)", wrap.refused_writes().wrapping_sub(r0)));
     }

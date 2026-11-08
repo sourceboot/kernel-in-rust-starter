@@ -54,17 +54,29 @@
  * EV_SYN SYN_REPORT as `.`; anything else as t<type>:<code>=<value>. `time`
  * checks every event's timestamp: microseconds under a million, never
  * going back, inside [ready, the last read] by CLOCK_REALTIME.
- * Then it writes `# sboot poll-ready` to /dev/console, the serial line,
- * and polls: the grader reads that line there and types F12 at the
- * machine (a press, then its release 50 ms later). poll(3 s) must wake
- * for the press within 2 s with POLLIN; poll(0) must say POLLIN before the
- * press and its SYN_REPORT, poll(1 s) must wake for the release, poll(0)
- * must say POLLIN before its SYN_REPORT, and 0 after it. The line goes to
- * the console, not to stdout, because stdout is a pipe the test reads only
- * when it gets the CPU; the console write reaches the serial port from
- * this program's own syscall. Last, a read of
- * the empty device must be -1 with EAGAIN; then the grab is let go
- * (0) and let go again (-EINVAL).
+ * Then ROUNDS rounds of F12. Round k writes `# sboot poll-ready k/ROUNDS`
+ * to /dev/console, the serial line: the grader reads that line there and
+ * types F12 at the machine (a press, then its release 50 ms later). The
+ * round reads CLOCK_MONOTONIC, asks poll(0), reads the clock again and
+ * calls poll(3000). It is not judged (inconclusive) when poll(0) already
+ * said POLLIN, F12 having come before poll(3000) was asked, or when more
+ * than GAP_MAX_NS passed between the two clock reads; its four events are
+ * then read and dropped, waiting up to DRAIN_MS for the release, and the
+ * next round starts. A judged round: poll(3 s) must wake for the press
+ * within 2 s with POLLIN; poll(0) must say POLLIN before the press and its
+ * SYN_REPORT, poll(1 s) must wake for the release, poll(0) must say POLLIN
+ * before its SYN_REPORT, and 0 after it. The first judged round that fails
+ * ends the rounds. Each round prints
+ *
+ *   round <k> <ok|fail|early|gap|nocue> gap <us between the clock reads>
+ *
+ * (`early`: F12 was in at poll(0); `gap`: over GAP_MAX_NS; `nocue`: the
+ * line could not be written). `poll ok` needs at least one judged round
+ * and every judged round passed. The line goes to the console, not to
+ * stdout, because stdout is a pipe the test reads only when it gets the
+ * CPU; the console write reaches the serial port from this program's own
+ * syscall. Last, a read of the empty device must be -1 with EAGAIN; then
+ * the grab is let go (0) and let go again (-EINVAL).
  * It exits 0 once every line is printed; `evtest: <what>` and 1 when it
  * cannot go on.
  */
@@ -82,15 +94,34 @@
 #include <unistd.h>
 
 #define DEV "/dev/input/"
-/* The serial line the grader waits for before it types the poll's key. */
-#define POLL_READY "# sboot poll-ready\n"
+/* The serial line the grader waits for before it types round k's key: no
+ * round's line is a part of another's (the grader's wait matches anywhere
+ * in the capture). */
+#define POLL_READY "# sboot poll-ready %d/%d\n"
+/* The rubric's [[script]] types one F12 per round (2026-11-06, G1834). */
+#ifndef ROUNDS
+#define ROUNDS 3
+#endif
+/* A round whose two clock reads, around poll(0), are further apart than this
+ * is not judged: a kernel that holds the program between poll(0)'s look and
+ * poll(3000)'s would let F12 in first. Measured 2026-11-06 (G1834; CONTRACT
+ * §B.2-26): the reference's gap. */
+#ifndef GAP_MAX_NS
+#define GAP_MAX_NS 5000000LL
+#endif
+/* How long an unjudged round waits for its F12's release. */
+#define DRAIN_MS 2000
 #define EVENTS 20
 
 static char bad[1024];
 
+static void add(char *to, size_t cap, const char *what, long got) {
+    size_t n = strlen(to);
+    snprintf(to + n, cap - n, "%s%s %ld", n ? "; " : "", what, got);
+}
+
 static void miss(const char *what, long got) {
-    size_t n = strlen(bad);
-    snprintf(bad + n, sizeof bad - n, "%s%s %ld", n ? "; " : "", what, got);
+    add(bad, sizeof bad, what, got);
 }
 
 static int64_t ns(clockid_t c) {
@@ -194,6 +225,24 @@ static void console(void) {
     r = ask(1, &con, (short[]){POLLIN}, rev, 0);
     if (r != 0) miss("poll(0) on the console after reading its line: revents", rev[0]);
     close(con);
+}
+
+/* An unjudged round's F12: read its events until the release and its
+ * SYN_REPORT are in, waiting up to DRAIN_MS, so none is left for the next
+ * round. Reads even when poll says no, as the keys loop does. */
+static void drain(int fd) {
+    int64_t until = ns(CLOCK_MONOTONIC) + DRAIN_MS * 1000000LL;
+    int released = 0;
+    while (ns(CLOCK_MONOTONIC) < until) {
+        struct input_event e;
+        if (read(fd, &e, sizeof e) == (ssize_t)sizeof e) {
+            if (e.type == EV_KEY && e.code == KEY_F12 && e.value == 0) released = 1;
+            else if (released && e.type == EV_SYN) return;
+            continue;
+        }
+        short rev;
+        ask(1, &fd, (short[]){POLLIN}, &rev, 20);
+    }
 }
 
 /* Let the grab go, twice: the second must be -EINVAL. */
@@ -308,34 +357,61 @@ int main(int argc, char **argv) {
     short rev;
     int r = ask(1, &fd, (short[]){POLLIN}, &rev, 0);
     if (r != 0) miss("poll(0) on the device after the keys returned", r);
-    /* The grader types F12 once this line is on the serial port. */
+    /* The grader types F12 once round k's line is on the serial port. */
     int con = open("/dev/console", O_WRONLY);
-    if (con < 0) {
-        miss("open /dev/console to ask for the key: errno", errno);
-    } else {
-        ssize_t w = write(con, POLL_READY, sizeof POLL_READY - 1);
-        if (w != (ssize_t)(sizeof POLL_READY - 1)) miss("write to /dev/console returned", w);
-        close(con);
+    if (con < 0) miss("open /dev/console to ask for the key: errno", errno);
+    int judged = 0;
+    for (int k = 1; k <= ROUNDS && con >= 0; k++) {
+        char cue[48];
+        int len = snprintf(cue, sizeof cue, POLL_READY, k, ROUNDS);
+        ssize_t w = write(con, cue, len);
+        if (w != len) {
+            miss("write to /dev/console returned", w);
+            printf("round %d nocue gap 0\n", k);
+            break;
+        }
+        int64_t t1 = ns(CLOCK_MONOTONIC);
+        int pre = ask(1, &fd, (short[]){POLLIN}, &rev, 0);
+        int64_t t2 = ns(CLOCK_MONOTONIC);
+        long gap = (long)((t2 - t1) / 1000);
+        if (pre != 0 || t2 - t1 > GAP_MAX_NS) {
+            /* Not judged: F12 may have come before poll(3000) looked. */
+            drain(fd);
+            printf("round %d %s gap %ld\n", k, pre != 0 ? "early" : "gap", gap);
+            continue;
+        }
+        judged++;
+        char rb[512] = "";
+        r = ask(1, &fd, (short[]){POLLIN}, &rev, 3000);
+        int64_t waited = (ns(CLOCK_MONOTONIC) - t2) / 1000000;
+        if (r != 1 || rev != POLLIN) add(rb, sizeof rb, "poll(3000) as a key came in: revents", rev);
+        if (waited >= 2000) add(rb, sizeof rb, "poll(3000) as a key came in returned after (ms)", waited);
+        char in[96] = "", *ip = in;
+        for (int i = 0; i < 4; i++) {
+            /* The release comes 50 ms after the press: poll waits for it. */
+            r = ask(1, &fd, (short[]){POLLIN}, &rev, i == 2 ? 1000 : 0);
+            if (r != 1 || rev != POLLIN) add(rb, sizeof rb, i == 2 ? "poll(1000) as the key was released: revents" : "poll(0) before the key's next event: revents", rev);
+            struct input_event e;
+            if (read(fd, &e, sizeof e) == (ssize_t)sizeof e) ip = show(ip, &e);
+        }
+        if (strcmp(in, " 88+ . 88- .") != 0) {
+            size_t n = strlen(rb);
+            snprintf(rb + n, sizeof rb - n, "%sF12 read as \"%s\"", n ? "; " : "", in);
+        }
+        r = ask(1, &fd, (short[]){POLLIN}, &rev, 0);
+        if (r != 0) add(rb, sizeof rb, "poll(0) after F12's events: revents", rev);
+        printf("round %d %s gap %ld\n", k, rb[0] ? "fail" : "ok", gap);
+        if (rb[0]) {
+            size_t n = strlen(bad);
+            snprintf(bad + n, sizeof bad - n, "%sround %d/%d: %s", n ? "; " : "", k, ROUNDS, rb);
+            break;
+        }
     }
-    int64_t t0 = ns(CLOCK_MONOTONIC);
-    r = ask(1, &fd, (short[]){POLLIN}, &rev, 3000);
-    int64_t waited = (ns(CLOCK_MONOTONIC) - t0) / 1000000;
-    if (r != 1 || rev != POLLIN) miss("poll(3000) as a key came in: revents", rev);
-    if (waited >= 2000) miss("poll(3000) as a key came in returned after (ms)", waited);
-    char in[96] = "", *ip = in;
-    for (int i = 0; i < 4; i++) {
-        /* The release comes 50 ms after the press: poll waits for it. */
-        r = ask(1, &fd, (short[]){POLLIN}, &rev, i == 2 ? 1000 : 0);
-        if (r != 1 || rev != POLLIN) miss(i == 2 ? "poll(1000) as the key was released: revents" : "poll(0) before the key's next event: revents", rev);
-        struct input_event e;
-        if (read(fd, &e, sizeof e) == (ssize_t)sizeof e) ip = show(ip, &e);
+    if (con >= 0) close(con);
+    if (judged == 0) {
+        size_t n = strlen(bad);
+        snprintf(bad + n, sizeof bad - n, "%sno F12 round judged", n ? "; " : "");
     }
-    if (strcmp(in, " 88+ . 88- .") != 0) {
-        size_t k = strlen(bad);
-        snprintf(bad + k, sizeof bad - k, "%sF12 read as \"%s\"", k ? "; " : "", in);
-    }
-    r = ask(1, &fd, (short[]){POLLIN}, &rev, 0);
-    if (r != 0) miss("poll(0) after F12's events: revents", rev);
     printf("poll %s\n", bad[0] ? bad : "ok");
 
     struct input_event e;

@@ -12,15 +12,14 @@
 //! because that is what the scheduler loads into CR3; the record keeps its root.
 //!
 //! A process ends two ways: it asks (`exit`, syscall 60) or it faults
-//! (`kill`, from `mm::fault`'s user-mode arm or from the #UD and #GP
-//! handlers `init` installs) — the kill line first, then the same end. Either way its
+//! (`kill`, from `mm::fault`'s user-mode arm or from the handlers
+//! `init` installs for the other ring-3 exceptions) — the kill line first, then the same end. Either way its
 //! user half goes back to the frame pool, its status is recorded in Linux's
 //! `wait4` encoding, and its task ends; the record stays, for `each`.
 //! Touch the table only with interrupts off: a syscall or a fault that found
 //! it held would spin on it forever.
 //!
-//! Fill in the bodies; keep the signatures — later labs and the course's
-//! tests use them.
+//! Fill in the bodies; keep the signatures — later labs use them.
 
 extern crate alloc;
 
@@ -97,20 +96,20 @@ impl VmaList {
     /// range, `-EEXIST` when it overlaps a VMA already there.
     pub fn insert(&mut self, v: Vma) -> Result<(), Errno> {
         let _ = v;
-        todo!("lab 12 step 3 — VmaList::insert: sorted by start, refusing an overlap")
+        todo!("lab 12 task 2 — VmaList::insert: sorted by start, refusing an overlap")
     }
 
     /// The VMA holding `va`, if one does.
     pub fn find(&self, va: VirtAddr) -> Option<&Vma> {
         let _ = va;
-        todo!("lab 12 step 8 — VmaList::find: the VMA whose [start, end) holds va")
+        todo!("lab 12 task 4 — VmaList::find: the VMA whose [start, end) holds va")
     }
 
     /// Whether every byte of `[start, start + len)` lies in VMAs that allow
     /// every bit of `need`. An empty range is covered.
     pub fn covers(&self, start: VirtAddr, len: usize, need: u8) -> bool {
         let _ = (start, len, need);
-        todo!("lab 12 step 7 — VmaList::covers: every byte of the range in a VMA allowing `need`")
+        todo!("lab 12 task 4 — VmaList::covers: every byte of the range in a VMA allowing `need`")
     }
 
     /// Lab 25: take `[start, end)` out of the list. A VMA inside it goes, one
@@ -119,7 +118,7 @@ impl VmaList {
     /// the caller's).
     pub fn carve(&mut self, start: VirtAddr, end: VirtAddr) -> Vec<(VirtAddr, VirtAddr)> {
         let _ = (start, end);
-        todo!("lab 25 step 1 — VmaList::carve: drop, shrink or split every VMA overlapping [start, end), return the ranges taken")
+        todo!("lab 25 task 1 — VmaList::carve: drop, shrink or split every VMA overlapping [start, end), return the ranges taken")
     }
 }
 
@@ -136,23 +135,26 @@ pub struct Process {
     pub cwd: Path,
     pub argv: Vec<String>,
     /// How it ended, as `wait4` reports it: `code << 8` for an exit, the
-    /// signal number (11 SIGSEGV, 4 SIGILL) for a kill. `None` while it runs.
+    /// signal number Linux sends for the fault (e.g. 11 SIGSEGV) for a kill.
+    /// `None` while it runs.
     pub exit: Option<i32>,
     pub children: Vec<Pid>,
 }
 
-/// Route #UD (vector 6) and #GP (13) here through `idt::set_handler`: from
-/// ring 3 (the frame's CS RPL is 3) with a process running, each ends that
-/// process (kill line reason `ud`/`gp`, `addr` 0, `rip` from the frame); any
-/// other #UD or #GP is a kernel bug and halts. Call once, after `idt::init`.
+/// Route #DE (vector 0), #DB (1), #UD (6), #SS (12), #GP (13) and #XM (19)
+/// here through `idt::set_handler`: from ring 3 (the frame's CS RPL is 3)
+/// with a process running, each ends that process (kill line reason `de`,
+/// `db`, `ud`, `ss`, `gp` or `xm`, `addr` 0, `rip` from the frame); any other
+/// is a kernel bug and panics naming its vector. May be called again: it
+/// only installs the handlers.
 pub fn init() {
-    todo!("lab 12 step 1 — init: #UD and #GP from ring 3 kill the running process")
+    todo!("lab 12 task 1 — init: an exception from ring 3 kills the running process")
 }
 
 /// The running process: the one whose task is on the CPU and has not ended.
 /// `None` in a kernel task (the boot flow, a vehicle's helpers).
 pub fn current() -> Option<Pid> {
-    todo!("lab 12 step 4 — current: the process whose task is on the CPU, if any")
+    todo!("lab 12 task 3 — current: the process whose task is on the CPU, if any")
 }
 
 /// Run `f` on the running process's record, with interrupts off; `None` in
@@ -160,14 +162,14 @@ pub fn current() -> Option<Pid> {
 /// table's lock must not be held while it runs.
 pub fn with_current<R>(f: impl FnOnce(&mut Process) -> R) -> Option<R> {
     let _ = f;
-    todo!("lab 12 step 9 — with_current: the running process's record, for exit")
+    todo!("lab 12 task 5 — with_current: the running process's record, for exit")
 }
 
 /// Call `f` on every process, in spawn order (interface 17). Interrupts are
 /// off while it runs.
 pub fn each(f: impl FnMut(&Process)) {
     let _ = f;
-    todo!("lab 12 step 5 — each: every record, in spawn order")
+    todo!("lab 12 task 3 — each: every record, in spawn order")
 }
 
 /// Lab 23: `path` made absolute: itself when it starts with `/` (or is
@@ -203,7 +205,7 @@ pub fn getcwd() -> String {
 /// task, which has no VMAs to ask.
 pub fn vmas_allow(va: VirtAddr, len: usize, need: u8) -> Option<bool> {
     let _ = (va, len, need);
-    todo!("lab 12 step 6 — vmas_allow: ask the running process's VMA list")
+    todo!("lab 12 task 3 — vmas_allow: ask the running process's VMA list")
 }
 
 /// Start `image` (layout `flat`) as a new process with `argv`; returns its
@@ -213,7 +215,7 @@ pub fn vmas_allow(va: VirtAddr, len: usize, need: u8) -> Option<bool> {
 /// does not fit the top stack page.
 pub fn spawn_user(image: &[u8], argv: &[&str]) -> Result<Pid, Errno> {
     let _ = (image, argv);
-    todo!("lab 12 step 2 — spawn_user: an address space, the image and the stack mapped, the initial stack, a task that enters ring 3")
+    todo!("lab 12 task 2 — spawn_user: an address space, the image and the stack mapped, the initial stack, a task that enters ring 3")
 }
 
 /// `wait4`'s options: return 0 at once when no child has ended yet.
@@ -244,7 +246,7 @@ pub fn wait4(p: &mut Process, pid: i64, status: VirtAddr, opts: u32) -> Result<P
 /// and the wakeup of the parent behind the same signature.
 pub fn exit(p: &mut Process, code: i32) -> ! {
     let _ = (p, code);
-    todo!("lab 12 step 10 — exit: the user half back to the frame pool, the status recorded, the task ended")
+    todo!("lab 12 task 5 — exit: the user half back to the frame pool, the status recorded, the task ended")
 }
 
 /// The kill line, `kill: pid=<n> reason=<reason> rip=0x<hex> addr=0x<hex>`.
@@ -256,17 +258,18 @@ pub struct KillLine {
 impl fmt::Display for KillLine {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let _ = f;
-        todo!("lab 12 step 12 — KillLine: the kill line above, the addresses in lowercase hex with 0x")
+        todo!("lab 12 task 6 — KillLine: the kill line above, the addresses in lowercase hex with 0x")
     }
 }
 
 /// End the running process `pid` for the fault `k` describes: the kill line on
 /// the console, then the same end as `exit`, with the signal `wait4` reports
-/// (4 = SIGILL for `ud`, 11 = SIGSEGV for the rest). Called from the fault
+/// (Linux's for the fault: 8 SIGFPE for `de` and `xm`, 5 SIGTRAP for `db`,
+/// 4 SIGILL for `ud`, 7 SIGBUS for `ss`, 11 SIGSEGV for the rest). Called from the fault
 /// path, on the process's own task.
 pub fn kill(pid: Pid, k: Kill) -> ! {
     let _ = (pid, k);
-    todo!("lab 12 step 11 — kill: print the line, then end the process as exit does")
+    todo!("lab 12 task 6 — kill: print the line, then end the process as exit does")
 }
 
 // ── Lab 31: signals ──────────────────────────────────────────────────────

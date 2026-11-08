@@ -33,7 +33,10 @@
 //!     (never the writer's LBA 2), uses 256- or 512-byte entries (never the
 //!     writer's 128), and places partition 2, all as `unpredictable` picks:
 //!     its first LBA, its blocks() and one block read through it must be
-//!     that table's.
+//!     that table's. Last (G2039, 2026-11-04): a second `partition2` over
+//!     the drive behind a wrapper that counts its reads, and a read one
+//!     block past that partition's end, must be refused with no read
+//!     reaching the drive (the partition checks its own end first).
 //!   3 `cache.hit.count` (derived) — the learner's `Cache` over a device
 //!     wrapper this vehicle owns, which counts the reads that reach the
 //!     partition. A nonce-chosen run of `get`s over a nonce-chosen set of
@@ -58,8 +61,12 @@
 //!     learner's hook, which row 5 tests): `Err(EIO)` after two attempts;
 //!     `sync` again: `Ok` after one; again: `Ok` after none; X and Y read
 //!     back with this file's own port I/O (no learner code) hold the new
-//!     bytes. Both blocks
-//!     are put back. It runs before row 5 arms anything, so a broken hook
+//!     bytes. Both blocks are put back. Last (G2039, 2026-11-04): a write
+//!     one block past the partition's end, through a second `partition2`
+//!     over the drive behind a wrapper that counts the writes it is handed
+//!     and passes none on, must be refused with none handed to it, and the
+//!     disk block just past partition 2, read with this file's own port I/O
+//!     before and after, must not change. It runs before row 5 arms anything, so a broken hook
 //!     does not reach it.
 //!   5 `blk.fault_hook.present` (plain) — on the partition, at free fs
 //!     blocks X = 32,767 and 32,766, 32,765 (amended 2026-10-17, the TL's
@@ -79,8 +86,11 @@
 //! (write-only, so it cannot be read back) as the learner's driver needs
 //! it: nIEN clear when IRQ 14 can reach the CPU (both PICs unmask it, an
 //! interrupt-driven driver), set otherwise (a polled one, the lesson's). It
-//! writes only before row 2, to a block no cache holds, and reads only
-//! after the learner's `sync` has returned.
+//! writes only in row 2, before any cache exists (between the learner
+//! driver's two reads of the block it changes), and reads only there and in
+//! row 4 after the learner's last `sync` has returned. The one other write
+//! is row 4's: the block just past partition 2 put back, only if a write
+//! past the partition's end reached the disk anyway.
 //!
 //! Between rows, `#` lines only: the time per 4 KiB read (64 reads of
 //! `/big`, timed on the ACPI PM timer) and, after row 3, one `write` and
@@ -89,7 +99,9 @@
 //! After row 5, `#` lines only: `sync` across a refused write (two dirty
 //! buffers, `arm_fail_after(1)`: `Err(EIO)` after two device writes, then
 //! one more write from the next `sync`), and a block past the partition's
-//! end read and written (`-EIO` each, no refusal counted).
+//! end read and written with `refused_writes()` taken across it (`-EIO`
+//! each, no refusal counted: rows 2 and 4 require the refusal, no row
+//! grades the count).
 
 #![no_std]
 #![no_main]
@@ -787,6 +799,27 @@ fn read_matches(dev: Option<&Arc<Ata>>) -> Option<Arc<Partition>> {
         ktap::note(format_args!("{READ_ID}: fs block {w} read through your driver, rewritten on the disk, read again, then put back as it was: {put_back}"));
     }
     gpt_elsewhere(&mut r);
+    // Last: the partition's own end (G2039). One block past it, through a
+    // second `partition2` over the drive behind a wrapper that counts its
+    // reads, is refused before the drive is asked.
+    if part.is_some() {
+        let counted = Counted::new(dev.clone());
+        match ata::partition2(counted.clone()) {
+            Ok(pe) => {
+                let end = pe.blocks();
+                let mut past = Box::new([0u8; BLOCK_SIZE]);
+                let r0 = counted.reads.load(Ordering::Relaxed);
+                let rd = pe.read_block(end, &mut past);
+                let asked = counted.reads.load(Ordering::Relaxed) - r0;
+                if rd.is_ok() || asked != 0 {
+                    r.fail(format_args!(
+                        "partition read_block({end}), one block past its end (blocks() = {end}): asked the drive for {asked} read(s), then returned {rd:?}; expected an error before the drive is asked"
+                    ));
+                }
+            }
+            Err(e) => r.fail(format_args!("partition2(drive), asked a second time, returned -{} ({e})", errno_text(e))),
+        }
+    }
     r.finish(2);
     part
 }
@@ -963,7 +996,7 @@ fn sync_refused_probe(c: Option<&(Cache, Arc<Counted>)>, part: Option<&Arc<Parti
 
 // ── Row 4: cache.write.sync ──────────────────────────────────────────────
 
-fn write_sync(part: Option<&Arc<Partition>>) {
+fn write_sync(dev: Option<&Arc<Ata>>, part: Option<&Arc<Partition>>) {
     let mut r = Row::new(WRITE_ID);
     let d = r.derived(WRITE_ID);
     let x = WRITE_FREE_FIRST + d % WRITE_FREE_SPAN;
@@ -1110,10 +1143,11 @@ fn write_sync(part: Option<&Arc<Partition>>) {
     r.expect_eq("writes a sync with nothing dirty made", w5 - w4, 0);
 
     // 6. On the disk, read by this file's own port I/O after sync returned.
-    for (n, want, what) in [(x, &px, "block X on the disk after sync, read without your driver"), (y, &py, "block Y on the disk after sync, read without your driver")] {
+    for (n, want) in [(x, &px), (y, &py)] {
+        let what = alloc::format!("block {n} on the disk after sync, read without your driver");
         let mut got = Box::new([0u8; BLOCK_SIZE]);
         match raw_read(P2_FIRST_LBA / 8 + n, &mut got) {
-            Ok(()) => compare(&mut r, what, &got, want),
+            Ok(()) => compare(&mut r, &what, &got, want),
             Err(e) => raw_text(&mut r, e, P2_FIRST_LBA / 8 + n),
         }
     }
@@ -1125,6 +1159,42 @@ fn write_sync(part: Option<&Arc<Partition>>) {
         restored &= p.write_block(n, o).is_ok() && p.read_block(n, &mut back).is_ok() && first_diff(&back, o).is_none();
     }
     ktap::note(format_args!("{WRITE_ID}: fs blocks {x}, {y} put back as they were: {restored}"));
+
+    // 7. Last: the partition's own end (G2039): a write one block past it, through
+    //    a second `partition2` over the drive behind a wrapper that counts the
+    //    writes it is handed and passes none on, is refused before the drive
+    //    is asked, and the disk block just past partition 2 does not change.
+    if let Some(dev) = dev {
+        let counted = Counted::new(dev.clone());
+        match ata::partition2(counted.clone()) {
+            Ok(pe) => {
+                let end = pe.blocks();
+                let past = P2_FIRST_LBA / 8 + P2_BLOCKS;
+                let mut before = Box::new([0u8; BLOCK_SIZE]);
+                let mut after = Box::new([0u8; BLOCK_SIZE]);
+                let seen = raw_read(past, &mut before);
+                counted.refuse.store(u64::MAX, Ordering::Relaxed);
+                let w0 = counted.writes.load(Ordering::Relaxed);
+                let wr = pe.write_block(end, &px);
+                let handed = counted.writes.load(Ordering::Relaxed) - w0;
+                if wr.is_ok() || handed != 0 {
+                    r.fail(format_args!(
+                        "partition write_block({end}), one block past its end (blocks() = {end}): asked the drive for {handed} write(s), then returned {wr:?}; expected an error before the drive is asked"
+                    ));
+                }
+                match seen.and_then(|()| raw_read(past, &mut after)) {
+                    Ok(()) => {
+                        if first_diff(&after, &before).is_some() {
+                            r.fail(format_args!("disk block {past}, just past partition 2, changed when the partition was asked to write its block {end}"));
+                            let _ = raw_write(past, &before);
+                        }
+                    }
+                    Err(e) => raw_text(&mut r, e, past),
+                }
+            }
+            Err(e) => r.fail(format_args!("partition2(drive), asked a second time, returned -{} ({e})", errno_text(e))),
+        }
+    }
     r.finish(4);
 }
 
@@ -1299,7 +1369,7 @@ unsafe extern "C" fn _start() -> ! {
     }
     let cache = cache_hits(part.as_ref());
     sync_probe(cache.as_ref());
-    write_sync(part.as_ref());
+    write_sync(ata.as_ref(), part.as_ref());
     fault_hook(part.as_ref());
     sync_refused_probe(cache.as_ref(), part.as_ref());
     ktap::end();

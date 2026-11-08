@@ -13,7 +13,7 @@
 //! dropped — or, when it holds the only reference left (the other side
 //! exited, or already copied), the same frame made writable again. The
 //! kernel's own writes into user memory fault the same way, because CR0.WP
-//! stays set (CONTRACT §A.5): `wait4`'s status, `read`'s buffer.
+//! stays set (lab 09): `wait4`'s status, `read`'s buffer.
 //!
 //! A page that was never writable (the program's text) is shared read-only
 //! and never marked `COW`: a write to it is still a kill (`pf-write-ro`).
@@ -23,14 +23,14 @@
 //! change under it while it forks, and the faulting process's entry changes
 //! in the fault.
 //!
-//! Fill in the bodies; keep the signatures — `proc::fork`, `mm::fault` and
-//! the course's tests use them. Add private helpers as you need them.
+//! Fill in the bodies; keep the signatures — `proc::fork` and
+//! `mm::fault` use them. Add private helpers as you need them.
 
 use crate::addr::VirtAddr;
 use crate::paging::AddressSpace;
 use crate::syscall::Errno;
 
-/// Step 1. Share the 4 KiB page at `va` of `src` into `dst`: the same frame,
+/// Task 1. Share the 4 KiB page at `va` of `src` into `dst`: the same frame,
 /// one more reference on it. A writable (or already copy-on-write) page
 /// becomes `COW` and read-only in both spaces; a read-only page is mapped
 /// read-only in `dst` and is never `COW`. USER and NX carry over. Nothing
@@ -44,7 +44,7 @@ pub fn share(src: &mut AddressSpace, dst: &mut AddressSpace, va: VirtAddr) -> Re
     todo!("lab 24 task 1 — share: one frame mapped in both spaces, copy-on-write when writable")
 }
 
-/// Step 2. The fault arm: `true` when the fault at `addr` (error code
+/// Task 2. The fault arm: `true` when the fault at `addr` (error code
 /// `error`) was a write to a present `COW` page at a user address and is
 /// resolved — the running tables now map a writable page there, holding what
 /// the shared one held. `false` for every other fault, and when no frame is

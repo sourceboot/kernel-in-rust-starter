@@ -6,7 +6,7 @@ kernel in stable Rust instead of watching someone else write one. It starts with
 pixels on the screen and a serial line you can trust, then the CPU's descriptor
 tables, its faults, the timer and the keyboard, your own frames and page tables,
 and a program running at ring 3 that talks to your kernel through Linux's own
-system-call interface. Processes, pipes, a disk, a file system Linux can mount
+system-call interface. Processes, pipes, a disk, an ext2 file system that Linux's own checker, e2fsck, passes,
 and a shell come after that.
 
 This repo is exactly what a learner's workspace starts as: a Rust workspace that
@@ -24,12 +24,11 @@ which is what makes it worth showing people.
 
 A Mac or a Linux machine and a terminal, plus QEMU, the PC emulator your kernel
 boots on. Lab 00 walks you through Rust (stable, with the bare-metal
-`x86_64-unknown-none` target), the C compiler and linker your build needs, and
-QEMU itself — on disk, about 230 MB on Linux and 1 GB on a Mac. Git is optional.
+`x86_64-unknown-none` target; about 1.5 GB), the C compiler and linker your
+build needs (230 MB on Linux), and QEMU itself (up to 560 MB; 950 MB on a Mac),
+on disk, measured 2026-10-25. Git is optional.
 
-**Windows:** this course does not run on native Windows. Its Windows path is
-WSL2, and lab 00 gains its WSL2 steps once that path has been tested end to end.
-Until then, use a Mac or a Linux machine.
+**Windows:** the course runs inside WSL2; follow lab 00's Linux steps there.
 
 ## Use it
 

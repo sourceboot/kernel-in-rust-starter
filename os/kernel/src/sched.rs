@@ -8,7 +8,9 @@
 //! keep — the x87/SSE registers (`FXSAVE`/`FXRSTOR`) and the FS base (MSR
 //! `0xC000_0100`) — and point the TSS's `rsp0` and the syscall entry at the
 //! next task's kernel stack. Interrupts stay off from the moment the queue
-//! is read until the next task runs.
+//! is read until the next task runs, and `yield_now` returns with them as
+//! its caller had them (lab 10's `HeapGuard` rule; `task::with_table` saves
+//! and restores them the same way).
 //!
 //! Lab 14 adds waiting without the CPU: `sleep(chan, lock, guard)` takes
 //! the task off the CPU and out of the run queue until a `wakeup(chan)` —
@@ -16,48 +18,50 @@
 //! between and is lost — and `slices` counts the times each task was given
 //! the CPU (a task asleep is given none).
 //!
-//! Fill in the bodies; keep the signatures — later labs and the course's
-//! tests use them.
+//! Fill in the bodies; keep the signatures — later labs use them.
 
 use crate::addr::VirtAddr;
 use crate::sync::{SpinGuard, SpinLock};
 use crate::task::Tid;
 
-/// The boot flow becomes task 0, with `boot_stack` as the kernel stack a
+/// The boot flow becomes `Tid(0)`, with `boot_stack` as the kernel stack a
 /// trap from ring 3 lands on while it runs. Call once, before the first
 /// `spawn`.
 pub fn init(boot_stack: VirtAddr) {
     let _ = boot_stack;
-    todo!("lab 11 step 1 — init: task 0 in the table, its kernel stack named")
+    todo!("lab 11 task 1 — init: the boot flow in the table, its kernel stack named")
 }
 
-/// The running task's id (task 0 before anything was spawned).
+/// The running task's id (`Tid(0)` before anything was spawned).
 pub fn current() -> Tid {
-    todo!("lab 11 step 6 — current: who is on the CPU")
+    todo!("lab 11 task 6 — current: who is on the CPU")
 }
 
 /// How many context switches have happened since boot.
 pub fn switches() -> u64 {
-    todo!("lab 11 step 6 — switches: count every switch")
+    todo!("lab 11 task 6 — switches: count every switch")
 }
 
 /// Give the CPU to the next ready task, if there is one; return when this
-/// task is picked again. Frees tasks that died meanwhile.
+/// task is picked again, with interrupts as the caller had them. Frees
+/// tasks that died meanwhile.
 pub fn yield_now() {
-    todo!("lab 11 step 2 — yield_now: the running task to the back of the queue, the front one onto the CPU; nobody waiting = return")
+    todo!("lab 11 task 2 — yield_now: the running task to the back of the queue, the front one onto the CPU; nobody waiting = return")
 }
 
 /// IRQ 0, after the EOI: the running task's time is up. Called with
 /// interrupts off and inside the handler. Never allocates or frees (the
-/// interrupted code may hold the heap's lock).
+/// tick must stay short and must not fail: a heap call, to allocate or to
+/// free, can walk a long list, an allocation can fail, and a dead task's
+/// drops run code that takes locks).
 pub fn tick() {
-    todo!("lab 11 step 3 — tick: the same switch as yield_now, without touching the heap")
+    todo!("lab 11 task 3 — tick: the same switch as yield_now, without touching the heap")
 }
 
 /// End the running task: dead, out of the run queue, and switched away
 /// from for good. Its memory is freed later, by a task not running on it.
 pub fn exit_current() -> ! {
-    todo!("lab 11 step 7 — exit_current: mark the running task Dead and switch away for good")
+    todo!("lab 11 task 6 — exit_current: mark the running task Dead and switch away for good")
 }
 
 /// How many slices task `id` has been given: the times the switch put it on

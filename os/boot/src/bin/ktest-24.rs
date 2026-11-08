@@ -7,7 +7,7 @@
 //! MSRs, the heap, `sse_on`, `proc::init`, task 0, the PIC and the PIT).
 //! Then two probes of the learner's `cow.rs`, before any process runs:
 //!
-//!   A (step 1, the first call into lab 24's code): two fresh spaces; a
+//!   A (task 1, the first call into lab 24's code): two fresh spaces; a
 //!     writable page and a read-only page mapped in the first, one page left
 //!     unmapped; `cow::share` of each into the second. The writable page must
 //!     be read-only and `COW` in both, on the same frame, which now has two
@@ -15,7 +15,7 @@
 //!     references; nothing mapped for the unmapped one. Both spaces are then
 //!     torn down (this file's `teardown`, which frees what `proc::discard`
 //!     frees) and every frame comes back.
-//!   B (step 2), interrupts off: two fresh spaces, the first made the
+//!   B (task 2), interrupts off: two fresh spaces, the first made the
 //!     running one and both of its pages written once through it (the TLB
 //!     holds them writable), then shared. Each fault below is taken inside a
 //!     process: the first space is the learner's own process's — the
@@ -87,6 +87,15 @@
 //! Every wait is bounded by the ACPI PM timer (never the learner's tick); a
 //! line that never comes fails the row that waited for it, and the rows
 //! after it say they could not run.
+//!
+//! What a failing row shows (W4 fix wave, sprint 7 #80, 2026-11-06): the CLI
+//! keeps a row's last 8 `#` lines, each cut at 400 runes. Rows 2 and 4 end,
+//! when they fail, on one summary line, `# <id>: first wrong of N: <fact>`
+//! (`# <id>: wrong: <fact>` for one), the first failure in the order the row
+//! checks it: probe answers first, then cowtest's (row 2: `torn` pages before
+//! the read-backs). Every line is under 400 runes with its conclusion first.
+//! The unpublished words are printed after the last row's result, in no row's
+//! window.
 
 #![no_std]
 #![no_main]
@@ -268,14 +277,38 @@ struct Row {
     id: &'static str,
     failed: bool,
     used_nonce: bool,
+    /// Rows 2 and 4 (W4 fix wave, sprint 7 #80 Q3 (b), 2026-11-06): a failed
+    /// row ends with one `#` line naming its first failure and how many it
+    /// had, because the CLI shows only a row's last 8 `#` lines.
+    summed: bool,
+    first: Option<String>,
+    wrong: usize,
 }
+
+/// The longest first failure a summary line quotes, in characters: with
+/// `# <id>: first wrong of NN: ` in front it stays under the 400 runes the
+/// engine keeps of a `#` line (grader/ktap.go `ktapDiagMaxRunes`).
+const SUMMARY_FACT: usize = 350;
 
 impl Row {
     fn new(id: &'static str) -> Row {
-        Row { id, failed: false, used_nonce: false }
+        Row { id, failed: false, used_nonce: false, summed: false, first: None, wrong: 0 }
+    }
+    /// A row that ends, when it fails, with `# <id>: first wrong of N: …`.
+    fn summed(id: &'static str) -> Row {
+        Row { summed: true, ..Row::new(id) }
     }
     fn fail(&mut self, why: core::fmt::Arguments) {
         self.failed = true;
+        self.wrong += 1;
+        if self.summed && self.first.is_none() {
+            let s = format!("{why}");
+            let mut cut: String = s.chars().take(SUMMARY_FACT).collect();
+            if s.chars().count() > SUMMARY_FACT {
+                cut.push('…');
+            }
+            self.first = Some(cut);
+        }
         note(format_args!("{}: {why}", self.id));
     }
     fn nonce(&mut self) -> [u8; 32] {
@@ -284,8 +317,14 @@ impl Row {
     }
     fn finish(mut self, n: usize) {
         if self.used_nonce && ktap::nonce().is_none() {
-            self.failed = true;
-            note(format_args!("{}: derived from the run's nonce, and this run has none", self.id));
+            self.fail(format_args!("derived from the run's nonce, and this run has none"));
+        }
+        if let Some(fact) = &self.first {
+            if self.wrong == 1 {
+                note(format_args!("{}: wrong: {fact}", self.id));
+            } else {
+                note(format_args!("{}: first wrong of {}: {fact}", self.id, self.wrong));
+            }
         }
         quiet(|| {
             if self.failed {
@@ -328,8 +367,8 @@ fn pte_at(root: PhysAddr, va: u64) -> Option<u64> {
 /// half maps, each through `frame::free`, then its tables and its PML4 —
 /// without naming it, so this file builds against every cut of the course
 /// and the learner's template, where `discard` is not there yet (2026-10-22).
-/// The spaces here are never the running one when they go: step A never
-/// switches to them and step B restores the boot tables first.
+/// The spaces here are never the running one when they go: probe A never
+/// switches to them and probe B restores the boot tables first.
 fn teardown(a: AddressSpace) {
     fn walk(table: u64, level: u32) {
         for i in 0..512 {
@@ -499,8 +538,8 @@ fn probe_share(p: &mut Probes, word: u64) {
     let free1 = frame::stats().free;
     if free1 != free0 && rw <= 2 && rr <= 2 {
         p.row4.push(format!(
-            "two spaces that shared two frames were torn down and {} frames stayed in use",
-            free0.abs_diff(free1)
+            "two spaces that shared two frames were torn down and {}",
+            moved(free0, free1)
         ));
     }
 }
@@ -642,8 +681,8 @@ fn probe_fault_quiet(p: &mut Probes, seed: u64) {
     let free1 = frame::stats().free;
     if free1 != free0 {
         p.row4.push(format!(
-            "after two spaces that shared two pages took their copy-on-write faults and were torn down, {} frames stayed in use",
-            free0.abs_diff(free1)
+            "after two spaces that shared two pages took their copy-on-write faults and were torn down, {}",
+            moved(free0, free1)
         ));
     }
 }
@@ -695,7 +734,7 @@ fn probe_faults(
     if let FaultOutcome::Kill(k) = out {
         write_cr3(boot);
         p.fatal = Some(format!(
-            "mm::fault for a kernel write to a COW page at user address {:#x} (error code 0x3: present, write, not user) returned Kill (reason {}) instead of resolving it: the kernel's own write into a page a process shares after fork (wait4's status, read's buffer) would stop the machine. When the fault was taken, the page's entry was {} in the space CR3 named, which was also the running task's and the running process's own",
+            "mm::fault for a kernel write to a COW page at user address {:#x} (error code 0x3: present, write, not user) returned Kill (reason {}) instead of resolving it, with the page's entry {} in the running space: the kernel's own writes into shared pages (wait4's status, read's buffer) would stop the machine",
             PB_1 + 8,
             k.reason.as_str(),
             bits(a0)
@@ -718,7 +757,7 @@ fn probe_faults(
         ));
     } else if let Some(w) = (0..512).find(|&w| word_of(a1, w) != page_word(s1, w)) {
         p.row2.push(format!(
-            "a write fault on a COW page mapped a new frame holding {:#x} at byte {} where the page held {:#x}: the copy must carry all 4,096 bytes of the page",
+            "a write fault's copy of a COW page is short: the new frame holds {:#x} at byte {} where the page held {:#x}, and the copy must carry all 4,096 bytes of the page",
             word_of(a1, w),
             w * 8,
             page_word(s1, w)
@@ -1039,6 +1078,16 @@ fn s4_page(first: u64, i: u64) -> u64 {
     S4_FIRST + (first + i) % (BIG_PAGES - S4_FIRST)
 }
 
+/// A note printed when it is dropped: at the end of `rows`, whichever way it
+/// returns, after the last row's result line.
+struct Late(String);
+
+impl Drop for Late {
+    fn drop(&mut self) {
+        note(format_args!("{}", self.0));
+    }
+}
+
 fn rows(pr: Probes) {
     let fatal = pr.fatal.clone();
     // The disk and the program.
@@ -1131,9 +1180,10 @@ fn rows(pr: Probes) {
                 for (k, &r) in rets.iter().enumerate() {
                     if r <= 0 {
                         r1.fail(format_args!(
-                            "fork {} of {FORKS}, by a process holding 48 MiB, returned {}: with frames shared rather than copied, three forks fit in this machine's memory ({} frames)",
+                            "fork {} of {FORKS}, by a process holding 48 MiB, returned {} with {} of {} frames free after the forks: with frames shared rather than copied, three forks fit in this machine's memory",
                             k + 1,
                             if r < 0 { errno_text(-r) } else { String::from("0 in the parent") },
+                            s1.free,
                             s1.total
                         ));
                     }
@@ -1166,7 +1216,7 @@ fn rows(pr: Probes) {
     }
 
     // ── Row 2 ──
-    let mut r2 = Row::new(PRIVATE_ID);
+    let mut r2 = Row::summed(PRIVATE_ID);
     let nn = r2.nonce();
     let seed = ktap::derive(&nn, PRIVATE_ID) ^ t;
     let u = unpublished();
@@ -1186,7 +1236,7 @@ fn rows(pr: Probes) {
     for (k, bad) in &ready {
         if *bad != 0 {
             r2.fail(format_args!(
-                "child {k} found {bad} word(s) of its memory different from its parent's at its fork: the parent's writes right after fork reached the child's pages"
+                "child {k} found {bad} word(s) of its memory different from what its parent's held at its fork"
             ));
         }
     }
@@ -1200,38 +1250,6 @@ fn rows(pr: Probes) {
         r2.fail(format_args!("{why}"));
         later = Some(why);
     } else {
-        let mut seen = alloc::vec![false; kids.len() + 1];
-        let lines: Vec<String> = run.tee.lines().filter(|l| l.starts_with("private ")).map(String::from).collect();
-        for l in &lines {
-            let mut f = Fields(l["private ".len()..].split(' '));
-            let (Some(i), Some(h), Some(bad)) = (f.dec(), f.hex(), f.dec()) else {
-                r2.fail(format_args!("cowtest printed a malformed line: {l}"));
-                continue;
-            };
-            if i < 0 || i as usize > kids.len() {
-                r2.fail(format_args!("cowtest reported for process {i}, which it never forked"));
-                continue;
-            }
-            seen[i as usize] = true;
-            let want = fold(seed, i as u64);
-            if bad != 0 {
-                r2.fail(format_args!(
-                    "process {i} ({}) read back {bad} word(s) different from what it wrote or from what the page held before the fork: another process's write reached a page it maps",
-                    if i == 0 { "the parent" } else { "a child" }
-                ));
-            } else if h != want {
-                r2.fail(format_args!("process {i} folded what it read back to {h:016x}, but its pattern folds to {want:016x}"));
-            }
-            if i == 0 {
-                match f.hex() {
-                    Some(back) if back == u => {}
-                    back => r2.fail(format_args!(
-                        "the parent read {:?} back from the page it had read its control message into, not the word the message carried",
-                        back.map(|b| format!("{b:016x}"))
-                    )),
-                }
-            }
-        }
         let torn: Vec<String> = run.tee.lines().filter_map(|l| l.strip_prefix("torn ")).map(String::from).collect();
         // A child's torn page 2 whose parent entry is still on the shared frame:
         // the parent's `read` wrote into it in place (fx24c-n1). Any other torn
@@ -1249,13 +1267,55 @@ fn rows(pr: Probes) {
             };
             let who = if i == 0 { "the parent" } else { "a child" };
             match y_in_place {
+                // The conclusion first, and the cause the entry shows: still
+                // writable on the shared frame is an arm that made it writable
+                // in place; still COW there is a write through a stale
+                // translation (C-24-7, W4 fix wave, 2026-11-06).
                 Some(e) if i != 0 && page == Y_PAGE as i64 => r2.fail(format_args!(
-                    "process {i} ({who}) read {n} word(s) of page {page} of its 48 MiB, words it never wrote, different from what the page held at the forks, the first at byte {byte} of the page: the parent's read put its control message into that page while its children shared it, and the parent's entry for the page is still on the frame they shared, now {}: the kernel's write went into the shared page itself, not into a copy",
-                    bits(e)
+                    "the kernel's write went into the frame the children share, not into a copy: {}; process {i} ({who}) read {n} word(s) of page {page} of its 48 MiB, words it never wrote, different from what the page held at the forks, the first at byte {byte}",
+                    if e & flags::WRITE != 0 {
+                        format!("the parent's read wrote page 2 while its entry there was writable, {}", bits(e))
+                    } else if e & flags::COW != 0 {
+                        format!("the parent's entry for page 2 is still COW on that frame, {}, so the write went through a stale translation", bits(e))
+                    } else {
+                        format!("the parent's entry for page 2 is still on that frame, {}", bits(e))
+                    }
                 )),
                 _ => r2.fail(format_args!(
                     "process {i} ({who}) read {n} word(s) of page {page} of its 48 MiB, words it never wrote, different from what the page held at the forks, the first at byte {byte} of the page"
                 )),
+            }
+        }
+        let mut seen = alloc::vec![false; kids.len() + 1];
+        let lines: Vec<String> = run.tee.lines().filter(|l| l.starts_with("private ")).map(String::from).collect();
+        for l in &lines {
+            let mut f = Fields(l["private ".len()..].split(' '));
+            let (Some(i), Some(h), Some(bad)) = (f.dec(), f.hex(), f.dec()) else {
+                r2.fail(format_args!("cowtest printed a malformed line: {l}"));
+                continue;
+            };
+            if i < 0 || i as usize > kids.len() {
+                r2.fail(format_args!("cowtest reported for process {i}, which it never forked"));
+                continue;
+            }
+            seen[i as usize] = true;
+            let want = fold(seed, i as u64);
+            if bad != 0 {
+                r2.fail(format_args!(
+                    "process {i} ({}) read back {bad} word(s) different from what it wrote or from what the page held at the forks",
+                    if i == 0 { "the parent" } else { "a child" }
+                ));
+            } else if h != want {
+                r2.fail(format_args!("process {i} folded what it read back to {h:016x}, but its pattern folds to {want:016x}"));
+            }
+            if i == 0 {
+                match f.hex() {
+                    Some(back) if back == u => {}
+                    back => r2.fail(format_args!(
+                        "the parent read {:?} back from the page it had read its control message into, not the word the message carried",
+                        back.map(|b| format!("{b:016x}"))
+                    )),
+                }
             }
         }
         for (i, s) in seen.iter().enumerate() {
@@ -1284,7 +1344,9 @@ fn rows(pr: Probes) {
         }
     }
     r2.finish(2);
-    note(format_args!("{PRIVATE_ID}: the unpublished words were t={t:016x} u={u:016x}"));
+    // Printed once the run is over, after the last row's result: a line here,
+    // after row 2's result, would sit in row 3's window (W4 fix wave, 2026-11-06).
+    let _words = Late(format!("{PRIVATE_ID}: the unpublished words were t={t:016x} u={u:016x}"));
     if let Some(why) = later {
         not_run(3, TEXT_ID, &why);
         not_run(4, DELTAS_ID, &why);
@@ -1337,7 +1399,7 @@ fn rows(pr: Probes) {
     r3.finish(3);
 
     // ── Row 4 ──
-    let mut r4 = Row::new(DELTAS_ID);
+    let mut r4 = Row::summed(DELTAS_ID);
     for line in &pr.row4 {
         r4.fail(format_args!("{line}"));
     }
@@ -1377,8 +1439,12 @@ fn rows(pr: Probes) {
     let f2 = f1.and_then(|_| run.settle(&[pid], |t| t.find("reaped4").is_some()));
     let mut f3 = None;
     let mut moved = 0;
+    let mut shared_still = 0;
     if f2.is_some() {
         frames_of(&mut s4_frames);
+        // Frames of the K pages that still count another owner with the
+        // child gone: what the parent's writes are about to find.
+        shared_still = s4_frames.iter().filter(|&&f| f != 0 && frame::refs(Frame(PhysAddr(f))) > 1).count();
         run.send(b"p");
         f3 = run.settle(&[pid], |t| t.find("rewrote").is_some());
         let before_frames = s4_frames.clone();
@@ -1411,14 +1477,22 @@ fn rows(pr: Probes) {
                     f2 as i64 - f1 as i64
                 ));
             }
+            // Which rule the parent's writes broke: frames that still counted
+            // another owner after the child's exit were never given back a
+            // reference; frames at one were copied anyway (2026-11-06).
+            let why = if shared_still != 0 {
+                format!("{shared_still} of their frames still counted more than one reference after the child had exited: each copy the child's writes made must drop one reference on the old frame")
+            } else {
+                String::from("a page whose frame has one reference is made writable in place, never copied")
+            };
             if f3 != f2 {
                 r4.fail(format_args!(
-                    "when the parent then wrote the same K={k} pages, which no other process mapped any more, free frames went from {f2} to {f3}: a page whose frame has one reference is made writable in place"
+                    "when the parent then wrote the same K={k} pages, which no other process mapped any more, free frames went from {f2} to {f3}: {why}"
                 ));
             }
             if moved != 0 {
                 r4.fail(format_args!(
-                    "{moved} of the parent's K={k} pages moved to new frames when it wrote them after its child had exited: a page whose frame has one reference is made writable in place, never copied"
+                    "{moved} of the parent's K={k} pages moved to new frames when it wrote them after its child had exited: {why}"
                 ));
             }
         }
@@ -1515,4 +1589,15 @@ unsafe extern "C" fn _start() -> ! {
     sched::yield_now();
     quiet(ktap::end);
     halt()
+}
+
+/// Which way the free count moved between `before` and `after`, for row 4's
+/// notes: fewer free frames means frames stayed in use, more means something
+/// (a heap that gave pages back, say) freed frames it held before.
+fn moved(before: usize, after: usize) -> String {
+    if after < before {
+        format!("{} frames stayed in use", before - after)
+    } else {
+        format!("{} more frames were free than before", after - before)
+    }
 }

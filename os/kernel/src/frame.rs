@@ -6,8 +6,8 @@
 //! reference count. `alloc` hands out a zeroed frame with count 1; `inc`
 //! adds a reference; `free` drops one and the frame returns to the pool at 0.
 //!
-//! Fill in the bodies; keep the signatures and the types — later labs and
-//! the course's tests use them.
+//! Fill in the bodies; keep the signatures and the types — later labs
+//! use them.
 
 use crate::addr::{PhysAddr, PhysRange};
 use crate::bootinfo::MemRegion;

@@ -1,9 +1,11 @@
 //! Lab 12's vehicle: processes. The prelude is lab 11's (the GDT, the IDT,
 //! the frame pool, the syscall MSRs, the heap, `sse_on`, task 0, the PIC
-//! and the PIT) plus the learner's `proc::init`, which routes #UD and #GP
-//! from ring 3 to `proc::kill` as a #PF goes to `mm::fault` (CONTRACT §A.9
-//! S2). `kill.ud_gp.routed` observes both: a `ud2` probe and a `hlt` probe,
-//! each kill line read off COM1 through an I/O breakpoint (below).
+//! and the PIT) plus the learner's `proc::init`, which routes the ring-3
+//! exceptions (#DE, #DB, #UD, #SS, #GP, #XM) to `proc::kill` as a #PF goes
+//! to `mm::fault` (CONTRACT §A.9 S2, §A.6). `kill.ud_gp.routed` observes the
+//! four TCG can raise: a `ud2`, a `hlt`, a division by zero and a TF probe,
+//! plus an SSE division by zero that TCG lets through to a `ud2`; each kill
+//! line read off COM1 through an I/O breakpoint (below).
 //!
 //! Every program runs as a process the learner's `proc::spawn_user` built,
 //! preempted by the learner's tick like any task. The vehicle (task 0) only
@@ -35,8 +37,9 @@
 //!         an unaligned and an empty range — *added 2026-10-19, s12
 //!         widening round*)
 //!   13    `kill.ud_gp.routed` (this vehicle, last: a `proc::init` that
-//!         routes nothing ends the run in lab 05's default, and only this
-//!         row is lost)
+//!         misses a vector ends the run in lab 05's default, and only this
+//!         row is lost; #DE, #DB and the #XM tripwire added 2026-11-02,
+//!         G1897)
 //!
 //! `ring3.cs.rpl` appears twice. The judge looks only at the rubric's ids
 //! and passes one only when exactly one result line names it, so the pair
@@ -65,11 +68,11 @@ mod shim;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::arch::asm;
+use core::arch::{asm, naked_asm};
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 use kernel::addr::{PhysAddr, VirtAddr};
-use kernel::idt::{self, TrapFrame};
+use kernel::idt;
 use kernel::ktap;
 use kernel::mm::{self, KillReason};
 use kernel::paging;
@@ -1102,7 +1105,17 @@ fn rsp0_follows() {
 
 /// What came out of COM1's data port while the tap was armed: an x86 I/O
 /// breakpoint (CR4.DE, DR0 = 0x3F8, DR7 R/W0 = I/O) traps after every byte
-/// the kernel sends there, whoever sends it, and `on_db` keeps the byte.
+/// the kernel sends there, whoever sends it, and `tap_hit` keeps the byte.
+///
+/// The breakpoint is a #DB (vector 1), and so is the ring-3 single-step
+/// trap the #DB probe raises, which must reach the handler the learner's
+/// `proc::init` installed. So the tap is not an `idt::set_handler` handler:
+/// while it is armed the CPU runs on a copy of the kernel's IDT whose vector
+/// 1 gate is `db_tap`, which keeps a byte when the trap is the breakpoint
+/// in ring 0 and otherwise jumps to the kernel's own vector 1 entry with
+/// the CPU's frame and every register as they came (ktest-32's watch, G1928).
+/// A kernel that routes no #DB then panics in lab 05's default report as it
+/// would with no tap, and the run ends there.
 mod tap {
     use super::*;
     pub static BUF: [AtomicU8; 1024] = [const { AtomicU8::new(0) }; 1024];
@@ -1111,12 +1124,132 @@ mod tap {
     pub static CR4: AtomicUsize = AtomicUsize::new(0);
     const DR7_IO: u64 = 1 | (1 << 8) | (1 << 9) | (1 << 10) | (0b10 << 16);
 
+    /// The kernel's own vector 1 entry, from its IDT gate: where `db_tap`
+    /// goes on to.
+    static CHAIN_DB: AtomicU64 = AtomicU64::new(0);
+    /// The copy of the kernel's IDT the tap runs on.
+    static TAP_IDT: [[AtomicU64; 2]; 256] = [const { [AtomicU64::new(0), AtomicU64::new(0)] }; 256];
+    /// The kernel's IDTR, as `arm` found it.
+    static OLD_BASE: AtomicU64 = AtomicU64::new(0);
+    static OLD_LIMIT: AtomicU64 = AtomicU64::new(0);
+
+    #[repr(C, packed)]
+    struct Dtr {
+        limit: u16,
+        base: u64,
+    }
+
+    /// The tap's #DB gate. A #DB pushes no error code, so on entry the stack
+    /// holds rip, cs, rflags, rsp, ss. The nine caller-saved registers go on
+    /// top (the CPU aligned rsp to 16 before its five pushes, so after nine
+    /// more the call below is aligned as the C ABI wants), `tap_hit` reads
+    /// them through rdi, and its answer picks the way out: `iretq` for a
+    /// byte kept, else the kernel's entry. `pop` leaves the flags `test` set.
+    #[unsafe(naked)]
+    extern "C" fn db_tap() {
+        naked_asm!(
+            "push rax", "push rcx", "push rdx", "push rsi", "push rdi",
+            "push r8", "push r9", "push r10", "push r11",
+            "mov rdi, rsp",
+            "cld",
+            "call {hit}",
+            "test rax, rax",
+            "pop r11", "pop r10", "pop r9", "pop r8",
+            "pop rdi", "pop rsi", "pop rdx", "pop rcx", "pop rax",
+            "jz 2f",
+            "iretq",
+            "2:",
+            "jmp qword ptr [rip + {chain}]",
+            hit = sym tap_hit,
+            chain = sym CHAIN_DB,
+        )
+    }
+
+    /// `db_tap`'s test, on the registers it saved: `s[8]` rax, `s[5]` rsi,
+    /// then the CPU's frame, `s[9]` rip and `s[10]` cs. The breakpoint in
+    /// ring 0 while armed (DR6.B0): keep the byte, clear DR6, answer 1. Any
+    /// other #DB: 0, and DR6 is left for the kernel's handler. The trap comes
+    /// after the instruction, so the byte is still where `out dx, al` (or
+    /// `outsb`) took it from.
+    extern "C" fn tap_hit(s: *const u64) -> u64 {
+        // SAFETY: `db_tap` passes its own stack: nine registers, then the
+        // CPU's five-word frame.
+        let (rax, rsi, rip, cs) = unsafe { (*s.add(8), *s.add(5), *s.add(9), *s.add(10)) };
+        let dr6: u64;
+        // SAFETY: reading DR6 has no side effect.
+        unsafe { asm!("mov {}, dr6", out(reg) dr6, options(nomem, nostack, preserves_flags)) };
+        if dr6 & 1 == 0 || cs & 3 != 0 || !ON.load(Ordering::SeqCst) {
+            return 0;
+        }
+        // SAFETY: the last byte of the kernel instruction that just ran.
+        let op = unsafe { ((rip - 1) as *const u8).read_volatile() };
+        let byte = match op {
+            0xee => Some(rax as u8),
+            // SAFETY: outsb read the byte at rsi and moved rsi past it.
+            0x6e => Some(unsafe { ((rsi - 1) as *const u8).read_volatile() }),
+            _ => None,
+        };
+        if let Some(b) = byte {
+            let i = LEN.fetch_add(1, Ordering::SeqCst);
+            if i < BUF.len() {
+                BUF[i].store(b, Ordering::Relaxed);
+            }
+        }
+        // SAFETY: clearing DR6's sticky bits touches nothing else.
+        unsafe { asm!("xor {t:e}, {t:e}", "mov dr6, {t}", t = out(reg) _, options(nomem, nostack, preserves_flags)) };
+        1
+    }
+
+    /// An interrupt gate's two words for `h` on IST 0, keeping `lo`'s
+    /// selector and its type, DPL and present bits (40-47) and replacing the
+    /// offset: what the old `idt::set_handler(1, on_db, 0)` wrote.
+    fn gate_to(lo: u64, h: u64) -> (u64, u64) {
+        // IST 0, never the learner's: the tap's #DB nests in kill paths, and on their IST it restarts at the top, over the outer frame.
+        ((h & 0xffff) | (lo & 0x0000_ff00_ffff_0000) | ((h >> 16) & 0xffff) << 48, h >> 32)
+    }
+
+    /// The offset a gate's two words name.
+    fn gate_offset(lo: u64, hi: u64) -> u64 {
+        (lo & 0xffff) | ((lo >> 48) & 0xffff) << 16 | (hi & 0xffff_ffff) << 32
+    }
+
+    /// With interrupts off: load a copy of the kernel's IDT whose vector 1
+    /// gate is `db_tap`, chained to the kernel's own entry, then turn the
+    /// breakpoint on.
     pub fn arm() {
         LEN.store(0, Ordering::SeqCst);
         ON.store(true, Ordering::SeqCst);
-        // SAFETY: CR4.DE turns DR7's R/W = 10 into an I/O breakpoint; DR0
-        // names the port; nothing else the kernel relies on changes.
+        let mut old = Dtr { limit: 0, base: 0 };
+        // SAFETY: sidt stores 10 bytes into `old`.
+        unsafe { asm!("sidt [{}]", in(reg) &mut old, options(nostack, preserves_flags)) };
+        let (base, limit) = (old.base, old.limit as usize);
+        OLD_BASE.store(base, Ordering::SeqCst);
+        OLD_LIMIT.store(limit as u64, Ordering::SeqCst);
+        for (v, g) in TAP_IDT.iter().enumerate() {
+            let (lo, hi) = if v * 16 + 15 <= limit {
+                // SAFETY: the gate lies inside the loaded IDT's limit; a read.
+                unsafe {
+                    let p = (base as *const u64).add(v * 2);
+                    (core::ptr::read_volatile(p), core::ptr::read_volatile(p.add(1)))
+                }
+            } else {
+                (0, 0)
+            };
+            g[0].store(lo, Ordering::Relaxed);
+            g[1].store(hi, Ordering::Relaxed);
+        }
+        let (lo, hi) = (TAP_IDT[1][0].load(Ordering::Relaxed), TAP_IDT[1][1].load(Ordering::Relaxed));
+        CHAIN_DB.store(gate_offset(lo, hi), Ordering::SeqCst);
+        let (lo, hi) = gate_to(lo, db_tap as extern "C" fn() as usize as u64);
+        TAP_IDT[1][0].store(lo, Ordering::Relaxed);
+        TAP_IDT[1][1].store(hi, Ordering::Relaxed);
+        let new = Dtr { limit: 256 * 16 - 1, base: TAP_IDT.as_ptr() as u64 };
+        // SAFETY: the copy holds every gate of the kernel's table, its vector
+        // 1 gate chained to the kernel's own entry; CR4.DE turns DR7's R/W =
+        // 10 into an I/O breakpoint; DR0 names the port; nothing else the
+        // kernel relies on changes.
         unsafe {
+            asm!("lidt [{}]", in(reg) &new, options(readonly, nostack, preserves_flags));
             let cr4: u64;
             asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
             CR4.store(cr4 as usize, Ordering::SeqCst);
@@ -1128,15 +1261,18 @@ mod tap {
         }
     }
 
-    /// Off again; the bytes caught, in order.
+    /// Off again, and the kernel's own IDT back; the bytes caught, in order.
     pub fn disarm() -> Vec<u8> {
-        // SAFETY: DR7 = 0 turns the breakpoint off; CR4 goes back as it was.
+        let old = Dtr { limit: OLD_LIMIT.load(Ordering::SeqCst) as u16, base: OLD_BASE.load(Ordering::SeqCst) };
+        // SAFETY: DR7 = 0 turns the breakpoint off; CR4 goes back as it was;
+        // the IDTR is the kernel's own, as `arm` read it.
         unsafe {
             asm!(
                 "xor {t:e}, {t:e}", "mov dr7, {t}", "mov dr6, {t}", "mov cr4, {c}",
                 t = out(reg) _, c = in(reg) CR4.load(Ordering::SeqCst) as u64,
                 options(nomem, nostack, preserves_flags)
             );
+            asm!("lidt [{}]", in(reg) &old, options(readonly, nostack, preserves_flags));
         }
         ON.store(false, Ordering::SeqCst);
         let n = LEN.load(Ordering::SeqCst).min(BUF.len());
@@ -1144,51 +1280,145 @@ mod tap {
     }
 }
 
-/// #DB: the tap's breakpoint. The trap comes after the instruction, so the
-/// byte is still where `out dx, al` (or `outsb`) took it from.
-fn on_db(tf: &mut TrapFrame) {
-    let dr6: u64;
-    // SAFETY: reading DR6 has no side effect.
-    unsafe { asm!("mov {}, dr6", out(reg) dr6, options(nomem, nostack, preserves_flags)) };
-    if dr6 & 1 != 0 && tf.cs & 3 == 0 && tap::ON.load(Ordering::SeqCst) {
-        // SAFETY: the last byte of the kernel instruction that just ran.
-        let op = unsafe { ((tf.rip - 1) as *const u8).read_volatile() };
-        let byte = match op {
-            0xee => Some(tf.regs[14] as u8),
-            // SAFETY: outsb read the byte at rsi and moved rsi past it.
-            0x6e => Some(unsafe { ((tf.regs[10] - 1) as *const u8).read_volatile() }),
-            _ => None,
-        };
-        if let Some(b) = byte {
-            let i = tap::LEN.fetch_add(1, Ordering::SeqCst);
-            if i < tap::BUF.len() {
-                tap::BUF[i].store(b, Ordering::Relaxed);
-            }
-        }
-    }
-    // SAFETY: clearing DR6's sticky bits touches nothing else.
-    unsafe { asm!("xor {t:e}, {t:e}", "mov dr6, {t}", t = out(reg) _, options(nomem, nostack, preserves_flags)) };
+/// One probe of `routed`: a program of a few instructions that raises one
+/// exception in ring 3, and the kill it must end in.
+struct Probe {
+    name: &'static str,
+    code: &'static [u8],
+    /// What the program does, for the notes.
+    does: &'static str,
+    vec: &'static str,
+    reason: &'static str,
+    /// Where the kill line's rip must point, from the program's entry.
+    rip_off: u64,
+    /// Why there, for a note naming the rip field.
+    rip_why: &'static str,
+    sig: i32,
+    sig_name: &'static str,
+    /// The kill the program may end in instead, when the CPU raises nothing
+    /// and the instruction after the one that should have trapped runs.
+    fallback: Option<Fallback>,
 }
 
-/// Two programs of one instruction each, run while the tap is armed: `ud2`
-/// (#UD, vector 6) and `hlt` (privileged at CPL 3: #GP, vector 13). Each
+/// A probe's other accepted ending: the `ud2` its code ends in.
+struct Fallback {
+    vec: &'static str,
+    reason: &'static str,
+    rip_off: u64,
+    sig: i32,
+    sig_name: &'static str,
+    /// The note that says which ending it was.
+    why: &'static str,
+}
+
+/// The four exceptions a program can raise in ring 3 under every QEMU the
+/// course supports (8.2.2, 10.2.1, 11.1.1, TCG; G1897's measurements,
+/// 2026-11-02). #SS and #XM are routed too (CONTRACT §A.6) but TCG raises
+/// neither: a stack access at a non-canonical address is a #GP on 10.2.1 and
+/// 11.1.1 and a #PF on 8.2.2, and an unmasked SSE exception sets its MXCSR
+/// flag and traps nowhere. `int1` is a #DB on 10.2.1 and 11.1.1 but a #UD on
+/// 8.2.2, so the #DB probe sets TF instead. The fifth probe is a tripwire
+/// for #XM (G1996): it unmasks the SSE divide-by-zero exception, divides by
+/// zero and then runs `ud2`, so on TCG it ends as a `ud` kill at the `ud2`
+/// and on a CPU that raises #XM as an `xm` kill at the `divss`; either is a
+/// kill, and a `proc::init` that leaves vector 19 out panics there. #SS has
+/// no probe: TCG turns every stack fault into a #GP or a #PF, so a probe
+/// would have to accept `gp`, which a kernel folding #SS into #GP also gives.
+/// Such a probe would also have to accept a #PF on 8.2.2, and would not catch
+/// folding: it would only catch an omitted vector 12 on a CPU that raises #SS.
+const PROBES: [Probe; 5] = [
+    Probe {
+        name: "ud-probe",
+        code: &[0x0f, 0x0b],
+        does: "whose first instruction is ud2",
+        vec: "#UD (vector 6)",
+        reason: "ud",
+        rip_off: 0,
+        rip_why: "the rip of the instruction that faulted, from the trap frame",
+        sig: 4,
+        sig_name: "SIGILL",
+        fallback: None,
+    },
+    Probe {
+        name: "gp-probe",
+        code: &[0xf4],
+        does: "whose first instruction is hlt",
+        vec: "#GP (vector 13)",
+        reason: "gp",
+        rip_off: 0,
+        rip_why: "the rip of the instruction that faulted, from the trap frame",
+        sig: 11,
+        sig_name: "SIGSEGV",
+        fallback: None,
+    },
+    // xor ecx, ecx; div ecx
+    Probe {
+        name: "de-probe",
+        code: &[0x31, 0xc9, 0xf7, 0xf1],
+        does: "that divides by zero (div ecx, ecx = 0)",
+        vec: "#DE (vector 0)",
+        reason: "de",
+        rip_off: 2,
+        rip_why: "the rip of the instruction that faulted, from the trap frame",
+        sig: 8,
+        sig_name: "SIGFPE",
+        fallback: None,
+    },
+    // pushfq; or qword [rsp], 0x100; popfq; nop; ud2. TF set by popfq traps
+    // after the instruction that follows it: the frame's rip is past the nop.
+    Probe {
+        name: "db-probe",
+        code: &[0x9c, 0x48, 0x81, 0x0c, 0x24, 0x00, 0x01, 0x00, 0x00, 0x9d, 0x90, 0x0f, 0x0b],
+        does: "that sets TF (pushfq; orq $0x100, (%rsp); popfq; nop)",
+        vec: "#DB (vector 1)",
+        reason: "db",
+        rip_off: 11,
+        rip_why: "the rip in the trap frame, the instruction after the one that trapped (a #DB is a trap)",
+        sig: 5,
+        sig_name: "SIGTRAP",
+        fallback: None,
+    },
+    // push 0x1d00; ldmxcsr [rsp] (ZE unmasked); mov eax, 1;
+    // cvtsi2ss xmm0, eax; xorps xmm1, xmm1; divss xmm0, xmm1; ud2
+    Probe {
+        name: "xm-probe",
+        code: &[
+            0x68, 0x00, 0x1d, 0x00, 0x00, 0x0f, 0xae, 0x14, 0x24, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xf3, 0x0f, 0x2a,
+            0xc0, 0x0f, 0x57, 0xc9, 0xf3, 0x0f, 0x5e, 0xc1, 0x0f, 0x0b,
+        ],
+        does: "that divides by zero in SSE with the exception unmasked (divss), then runs ud2",
+        vec: "#XM (vector 19)",
+        reason: "xm",
+        rip_off: 21,
+        rip_why: "the rip of the instruction that faulted, from the trap frame",
+        sig: 8,
+        sig_name: "SIGFPE",
+        fallback: Some(Fallback {
+            vec: "#UD (vector 6)",
+            reason: "ud",
+            rip_off: 25,
+            sig: 4,
+            sig_name: "SIGILL",
+            why: "the CPU raised no #XM (TCG never does) and the ud2 after the divss was killed",
+        }),
+    },
+];
+
+/// The programs of `PROBES`, run one at a time while the tap is armed. Each
 /// must end killed with §A.6's line — its pid, the reason its vector names,
-/// rip at the instruction, addr 0 — and the signal `wait4` will report
-/// (4 for ud, 11 for gp). The expected line never goes on the wire from
-/// here; a field that differs is named, never shown.
+/// rip from the trap frame, addr 0 — and the signal `wait4` will report.
+/// The expected line never goes on the wire from here; a field that differs
+/// is named, never shown.
 fn routed(nonce: &str) -> bool {
     let mut ok = true;
     let mut fail = |why: core::fmt::Arguments| {
         ok = false;
         note(format_args!("{ROUTED_ID}: {why}"));
     };
-    idt::set_handler(1, on_db, 0);
-    let rip = proc::BASE + 120;
-    for (name, code, insn, vec, reason, sig) in [
-        ("ud-probe", &[0x0f, 0x0b][..], "ud2", "#UD (vector 6)", "ud", 4),
-        ("gp-probe", &[0xf4][..], "hlt", "#GP (vector 13)", "gp", 11),
-    ] {
-        let img = probe_image(code);
+    let entry = proc::BASE + 120;
+    for pr in &PROBES {
+        let (name, vec) = (pr.name, pr.vec);
+        let img = probe_image(pr.code);
         let p = quiet(|| {
             tap::arm();
             let p = proc::spawn_user(&img, &[name, nonce]);
@@ -1208,7 +1438,8 @@ fn routed(nonce: &str) -> bool {
         let cap = quiet(tap::disarm);
         let st = exit_of(p);
         note(format_args!(
-            "{ROUTED_ID}: a program whose first instruction is {insn}: pid {} {}",
+            "{ROUTED_ID}: a program {}: pid {} {}",
+            pr.does,
             p.0,
             if ended { status_text(st) } else { String::from("did not end within 2 s") }
         ));
@@ -1216,26 +1447,42 @@ fn routed(nonce: &str) -> bool {
             fail(format_args!("pid {} did not end within 2 s of a {vec} in ring 3: the handler proc::init installs did not end the process", p.0));
             continue;
         }
+        let text = String::from_utf8_lossy(&cap);
+        let line = text.split('\n').map(|l| l.trim_end_matches('\r')).find(|l| l.starts_with("kill:"));
+        // The kill this run is held to: the probe's own, or its fallback's
+        // when the kill line names the fallback's reason, so every note below
+        // names the trap that happened. Any other reason is held to the probe's.
+        let got = line.and_then(|l| l.split(' ').find_map(|f| f.strip_prefix("reason=")));
+        let (vec, reason, rip_off, rip_why, sig, sig_name) = match &pr.fallback {
+            Some(f) if got == Some(f.reason) => {
+                note(format_args!("{ROUTED_ID}: {name}: {}", f.why));
+                (f.vec, f.reason, f.rip_off, "the rip of the ud2, from the trap frame", f.sig, f.sig_name)
+            }
+            _ => (vec, pr.reason, pr.rip_off, pr.rip_why, pr.sig, pr.sig_name),
+        };
         if st != Some(sig) {
             fail(format_args!(
-                "pid {} ended with {}, not killed by signal {sig} ({}): a {vec} kill reports {sig}",
+                "pid {} ended with {}, not killed by signal {sig} ({sig_name}): a {vec} kill reports {sig}",
                 p.0,
                 status_text(st),
-                if sig == 4 { "SIGILL" } else { "SIGSEGV" }
             ));
         }
-        let text = String::from_utf8_lossy(&cap);
-        let Some(line) = text.split('\n').map(|l| l.trim_end_matches('\r')).find(|l| l.starts_with("kill:")) else {
+        let Some(line) = line else {
             fail(format_args!("no kill line came out on the serial port while pid {} ended: the {vec} did not reach proc::kill", p.0));
             continue;
         };
         let fields: Vec<&str> = line.split(' ').collect();
-        let want = [format!("pid={}", p.0), format!("reason={reason}"), format!("rip={rip:#x}"), String::from("addr=0x0")];
+        let want = [
+            format!("pid={}", p.0),
+            format!("reason={reason}"),
+            format!("rip={:#x}", entry + rip_off),
+            String::from("addr=0x0"),
+        ];
         let why = [
             "the pid of the process that ran the instruction",
-            "the reason the vector names (vector 6 is ud, 13 is gp)",
-            "the rip of the instruction that trapped, from the trap frame",
-            "0: a #UD or #GP has no faulting address",
+            "the reason the vector names",
+            rip_why,
+            "0: only a page fault has a faulting address",
         ];
         if fields.len() != 5 || fields[0] != "kill:" {
             fail(format_args!("after the {vec}, the kill line has {} space-separated fields, not the kill line's five", fields.len()));
@@ -1497,7 +1744,7 @@ unsafe extern "C" fn _start() -> ! {
     row(killed && regs_seen, N_KWRITE, KWRITE_ID);
     row(no_vma(&nonce), N_NOVMA, NOVMA_ID);
     row(vma_insert(), N_INSERT, INSERT_ID);
-    // Last: a #UD or #GP no handler takes ends the run in lab 05's default.
+    // Last: a ring-3 exception no handler takes ends the run in lab 05's default.
     row(routed(&nonce), N_ROUTED, ROUTED_ID);
     quiet(ktap::end);
     halt()

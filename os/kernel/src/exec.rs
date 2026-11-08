@@ -17,12 +17,10 @@
 //! to register), interrupts on, in ring 3 (`user::enter`).
 //!
 //! `spawn` is the same work for a process that does not exist yet — the
-//! kernel starting a program, as the course's tests do before lab 14 gives
-//! the kernel `fork`: the image is built the same way, and your `proc`
-//! makes a process around it.
+//! kernel starting a program before lab 14 gives it `fork`: the image is
+//! built the same way, and your `proc` makes a process around it.
 //!
-//! Fill in the bodies; keep the signatures — later labs and the course's
-//! tests use them.
+//! Fill in the bodies; keep the signatures — later labs use them.
 
 use crate::addr::VirtAddr;
 use crate::elf::ReadAt;
@@ -71,7 +69,7 @@ pub struct Image {
 /// pool's lock).
 pub fn build(r: &dyn ReadAt, execfn: &str, argv: &[&str], envp: &[&str]) -> Result<Image, Errno> {
     let _ = (r, execfn, argv, envp);
-    todo!("lab 13 step 8 — build: a fresh address space, elf::load, the stack pages and their VMA, the initial stack (lesson: The initial stack)")
+    todo!("lab 13 task 4 — build: a fresh address space, elf::load, the stack pages and their VMA, the initial stack (lesson: The initial stack)")
 }
 
 /// Replace the running process `p`'s program with the executable at `path`,
@@ -82,7 +80,7 @@ pub fn build(r: &dyn ReadAt, execfn: &str, argv: &[&str], envp: &[&str]) -> Resu
 /// `p`'s own task, with interrupts off.
 pub fn execve(p: &mut Process, path: &str, argv: &[&str], envp: &[&str]) -> Errno {
     let _ = (p, path, argv, envp);
-    todo!("lab 13 step 12 — execve: build the new image beside the old one; only when it is whole, swap it in and enter it")
+    todo!("lab 13 task 7 — execve: build the new image beside the old one; only when it is whole, swap it in and enter it")
 }
 
 /// Start the executable at `path` as a new process with `argv` and `envp`;
@@ -91,15 +89,15 @@ pub fn execve(p: &mut Process, path: &str, argv: &[&str], envp: &[&str]) -> Errn
 /// back.
 pub fn spawn(path: &str, argv: &[&str], envp: &[&str]) -> Result<Pid, Errno> {
     let _ = (path, argv, envp);
-    todo!("lab 13 step 5 — spawn: the file through the VFS, its image, and a process around it")
+    todo!("lab 13 task 3 — spawn: the file through the VFS, its image, and a process around it")
 }
 
 /// Syscall 59: copy the path, argv and envp in from the caller's memory —
 /// all of it, before the old image goes — and do what `execve` does.
-/// Returns the errno; on success it does not return. The copies are dropped
-/// before the new program is entered (a stack that is never returned to
-/// frees nothing).
+/// Returns the errno; on success it does not return. Every copy is dropped,
+/// or moved into the record as argv is, before the new program is entered (a
+/// stack that is never returned to frees nothing).
 pub fn sys_execve(path: VirtAddr, argv: VirtAddr, envp: VirtAddr) -> Errno {
     let _ = (path, argv, envp);
-    todo!("lab 13 step 10 — sys_execve: copy the path and both vectors in, then what execve does")
+    todo!("lab 13 task 6 — sys_execve: copy the path and both vectors in, then what execve does")
 }

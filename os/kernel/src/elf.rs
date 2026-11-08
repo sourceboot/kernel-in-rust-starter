@@ -25,8 +25,7 @@
 //! kernel already holds), a file of the boot archive (lab 13), an ext2
 //! file (lab 17).
 //!
-//! Fill in the body; keep the signatures — later labs and the course's
-//! tests use them.
+//! Fill in the body; keep the signatures — later labs use them.
 
 use crate::addr::VirtAddr;
 use crate::paging::AddressSpace;
@@ -96,5 +95,5 @@ pub const PHENT: u16 = 56;
 /// mapped so far stay in `aspace`: the caller throws the space away.
 pub fn load(r: &dyn ReadAt, aspace: &mut AddressSpace, vmas: &mut VmaList) -> Result<Loaded, Errno> {
     let _ = (r, aspace, vmas);
-    todo!("lab 13 step 9 — load: check the header, map each PT_LOAD (the tail past p_filesz zero), a VMA per segment, AT_PHDR's address")
+    todo!("lab 13 task 5 — load: check the header, map each PT_LOAD (the tail past p_filesz zero), a VMA per segment, AT_PHDR's address")
 }

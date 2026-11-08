@@ -27,19 +27,21 @@
 //! `kbd::push`, one scancode at a time: `echo `, a word drawn for this run
 //! (letters and digits, some shifted with either shift key, a wrong key and
 //! a backspace inside it), Enter. The shell must print the word: a console
-//! that does not edit typed keys into lines fails every row but row 7. While
-//! it types that line, COM1 is in loopback (MCR bit 4, as ktest-22's row 6)
-//! with its received-data interrupt off (IER bit 0, restored after, as the
-//! MCR is), so what the console echoes comes back in the UART's receive FIFO
-//! instead of leaving the machine, and an IRQ 4 handler does not take it.
-//! Any other reader of COM1's receive still can: interrupts stay on while
-//! the shell echoes, so a timer tick or a task that drains the FIFO takes
-//! the echo first, and nothing here can park it (CONTRACT §B.2-23, G1342).
-//! After each key that types a byte (a printable
-//! key, backspace, Enter) the next key waits until the echo since the key
-//! holds that byte (backspace: 0x08; Enter: `\n`), up to `ECHO_MS`. The
-//! first key not echoed in time is noted, and the second prompt goes out as
-//! `$~ `; the line's echo is then forwarded as it came. The second prompt is
+//! that does not edit typed keys into lines fails every row but row 7. The
+//! five keys of `echo ` go in one at a time: this file prints `[key]` on the
+//! serial line before the first and after each, through the learner's own
+//! `serial::write_str` (so behind anything the console's echo has queued
+//! there), once `KEY_MS` and `KEY_TURNS` turns of its loop have passed since
+//! the key went in. A console that echoes each key as the shell's `read`
+//! takes it puts every echo between two marks,
+//! `[key]e[key]c[key]h[key]o[key] [key]`; a key not echoed by then leaves
+//! two marks side by side. The rest of the line goes in one scancode per
+//! turn, `PACE_MS` apart, unmarked. The console's echo leaves the machine on
+//! the serial line as the console writes it: this file never reads COM1's
+//! receive side, so whatever else the kernel does with it (an IRQ 4
+//! handler, a tick or a transmit that drains it) cannot move a verdict
+//! (G1342, built 2026-11-04; until then the line was typed with COM1 in
+//! loopback and every such reader could take the echo first). The second prompt is
 //! held until `# sboot keys-ready` has been printed, which is the rubric
 //! script's first `wait`; the script then types one command group at a time,
 //! each ending with `echo $? "q"N`, and waits for `# sboot mark-N`, a line
@@ -56,11 +58,11 @@
 //! segment per command typed.
 //!
 //! The rubric's first row, `sh.prompt.echo.paced`, is a serial row: the
-//! substring `$ echo "q"1` — the forwarded second prompt followed by the
-//! console's echo of the typed line, shifted quote included. This file
-//! forwards that prompt as `$~ ` instead when the console did not echo its
-//! own first line key by key (below), so the row also stands for that
-//! echo. The seven rows here:
+//! forwarded first prompt followed by the marks and the echo of `echo `
+//! (`$ [key]e[key]c[key]h[key]o[key] [key]`), no two marks side by side
+//! anywhere on the line (`lacks`), and `$ echo "q"1` — the forwarded second
+//! prompt followed by the console's echo of the script's first line,
+//! shifted quotes included. The seven rows here:
 //!
 //!   1 `sh.ls.proc` (plain) — `cd /procx`, a backspace, Enter: no output;
 //!     `ls` prints exactly `/proc`'s names: `meminfo`, `mounts`, `sboot`,
@@ -115,10 +117,12 @@
 //!     `/tmp` and this run's directory, never under `/proc` or `/dev`.
 //!
 //! Whenever the serial row cannot pass because of something this file saw
-//! (no shell ran, a key of the first line went unechoed, the shell never
-//! printed its second prompt), it says so on a `# sh.prompt.echo.paced: `
-//! line; the rubric's row `lacks` that prefix, so the engine quotes it.
-//! A time appears in this file's output only on a failure, beside its limit.
+//! (no shell ran, the shell never printed its second prompt, the second
+//! line's quotes came back as apostrophes), it says so on a
+//! `# sh.prompt.echo.paced: ` line. A key of `echo ` not echoed before its
+//! mark is on the serial line itself, two marks side by side, which the row
+//! `lacks`, so the engine quotes that line. A time appears in this file's
+//! output only on a failure, beside its limit.
 //!
 //! When `kbd::translate` is wrong, or the four mounts fail, no shell runs and
 //! every row says why. The session ends when the shell closes its output, when
@@ -189,7 +193,8 @@ const MOUNTS: [(&str, &str, &str); 4] =
 
 /// How long the shell may run, by the PM timer: the backstop for a shell that
 /// keeps printing and never reaches the script's end. The honest shell runs
-/// about 45 s (CONTRACT §B.2-23); a run cut here ends with its rows at
+/// about 45 s (CONTRACT §B.2-23; about 3 s more since the marked echo,
+/// 2026-11-04); a run cut here ends with its rows at
 /// about 101 s, inside the rubric's timeout.
 const SH_MS: u64 = 100_000;
 
@@ -201,38 +206,34 @@ const SH_MS: u64 = 100_000;
 /// §B.2-23, measured 2026-10-19); this is several times that.
 const STALL_MS: u64 = 30_000;
 
-/// How long one key of the first line may go unechoed before the next key
-/// comes anyway. An honest console echoes a key as the shell's `read` takes
-/// it, a few scheduler turns after `push`; after the first key past this
-/// bound the rest of the line goes in without waiting.
-const ECHO_MS: u64 = 3_000;
+/// What this file prints on the serial line before the first key of
+/// `echo ` and after each of its five keys, through the learner's own
+/// `serial::write_str`. No shell output, program, prompt or typed key holds
+/// it: `[`, `]` are in neither the drawn word's alphabet nor the nonce's
+/// hex, and the script types neither.
+const KEY_MARK: &str = "[key]";
+
+/// How long after each key of `echo ` the next mark waits, by the PM timer,
+/// and how many turns of the session's loop (each a `sched::yield_now`) it
+/// waits as well: the time bounds a slow scheduler, the turns a host that
+/// stops the guest's CPU while its clock runs on. An honest console echoes a
+/// key as the shell's `read` takes it, a few turns after `push` (CONTRACT
+/// §B.2-23, "Built 2026-11-04": the slowest of 1,700 echoes, measured at
+/// load 4-30 on 12 cores, was on the wire within 22.6 ms and two turns, so the
+/// wait is about 22 times that time and 10 times those turns).
+const KEY_MS: u64 = 500;
+const KEY_TURNS: u32 = 20;
+
+/// The keys of the first line that carry marks: `echo `, each a make code
+/// and its break code.
+const MARKED: usize = 10;
+
+/// The pause between two scancodes of the rest of the first line (the drawn
+/// word, Enter); each also waits for a turn of the loop.
+const PACE_MS: u64 = 10;
 
 /// The serial row's id (the rubric's; no ktap line carries it).
 const PROMPT_ID: &str = "sh.prompt.echo.paced";
-
-/// COM1, the serial line every console in the course writes to (lab 02).
-const COM1: u16 = 0x3f8;
-
-fn port_in(port: u16) -> u8 {
-    let v: u8;
-    // SAFETY: a port read touches no memory.
-    unsafe { asm!("in al, dx", out("al") v, in("dx") port, options(nomem, nostack, preserves_flags)) };
-    v
-}
-
-fn port_out(port: u16, v: u8) {
-    // SAFETY: a port write touches no memory; COM1 is the serial line.
-    unsafe { asm!("out dx, al", in("dx") port, in("al") v, options(nomem, nostack, preserves_flags)) };
-}
-
-/// Spin until `done` or a bounded number of tries.
-fn port_wait(done: impl Fn() -> bool) {
-    let mut n = 0u32;
-    while !done() && n < 1_000_000 {
-        n += 1;
-        core::hint::spin_loop();
-    }
-}
 
 /// `/proc`'s fixed names (procfs.rs).
 const PROC_TOP: [&str; 4] = ["meminfo", "mounts", "sboot", "uptime"];
@@ -658,18 +659,17 @@ fn words() -> Words {
 /// The line this file types itself at the shell's first prompt, as
 /// scancodes (each key's make code, then its break code): `echo `, a word
 /// of ten letters and digits — some shifted, with either shift key, and a
-/// wrong key and a backspace inside it — then Enter. Each scancode comes
-/// with the byte its echo must hold (`None` for a modifier or a break code).
-/// And the word.
-fn first_line(seed: u64) -> (Vec<(u8, Option<u8>)>, String) {
+/// wrong key and a backspace inside it — then Enter. Its first `MARKED`
+/// scancodes are `echo `'s five keys. And the word.
+fn first_line(seed: u64) -> (Vec<u8>, String) {
     let mut d = Draw(seed);
     let mut sc = Vec::new();
-    let tap = |sc: &mut Vec<(u8, Option<u8>)>, k: u8, echo: u8| {
-        sc.push((k, Some(echo)));
-        sc.push((k | 0x80, None));
+    let tap = |sc: &mut Vec<u8>, k: u8| {
+        sc.push(k);
+        sc.push(k | 0x80);
     };
-    for (k, c) in [(0x12, b'e'), (0x2e, b'c'), (0x23, b'h'), (0x18, b'o'), (0x39, b' ')] {
-        tap(&mut sc, k, c);
+    for k in [0x12, 0x2e, 0x23, 0x18, 0x39] {
+        tap(&mut sc, k);
     }
     // Letters and digits; shift+4 (`$`) would be the shell's. No `q` (G1843,
     // 2026-10-29): the script then waited for the shell's markers
@@ -684,23 +684,23 @@ fn first_line(seed: u64) -> (Vec<(u8, Option<u8>)>, String) {
     for i in 0..10 {
         if i == wrong_at {
             let l = letters[d.below(letters.len())];
-            tap(&mut sc, l, plain_shifted(l).map_or(b'x', |(p, _)| p));
-            tap(&mut sc, 0x0e, 0x08); // backspace
+            tap(&mut sc, l);
+            tap(&mut sc, 0x0e); // backspace
         }
         let k = pool[d.below(pool.len())];
         let (plain, shifted) = plain_shifted(k).unwrap_or((b'x', b'X'));
         if (i % 3 == 1 || d.below(4) == 0) && k != 0x05 {
             let (make, brk) = if d.below(2) == 0 { (0x2a, 0xaa) } else { (0x36, 0xb6) };
-            sc.push((make, None));
-            tap(&mut sc, k, shifted);
-            sc.push((brk, None));
+            sc.push(make);
+            tap(&mut sc, k);
+            sc.push(brk);
             word.push(shifted as char);
         } else {
-            tap(&mut sc, k, plain);
+            tap(&mut sc, k);
             word.push(plain as char);
         }
     }
-    tap(&mut sc, 0x1c, b'\n'); // Enter
+    tap(&mut sc, 0x1c); // Enter
     (sc, word)
 }
 
@@ -718,9 +718,6 @@ struct Tee {
     held: Option<Vec<u8>>,
     /// The last byte forwarded to the serial line, if any.
     last: Option<u8>,
-    /// Why the first line was not echoed key by key, once its check is
-    /// over: the second prompt then goes out as `$~ `.
-    unechoed: Option<String>,
     /// The shell's current line, since its last `\n` or `$ `.
     line: Vec<u8>,
     /// Whether `line` started at a `$ `: the first line of a segment, as
@@ -752,11 +749,6 @@ impl Tee {
                         self.held = Some(Vec::new());
                     } else if let Some(h) = self.held.take() {
                         let mut first = h;
-                        if let Some(why) = &self.unechoed {
-                            note(format_args!("{PROMPT_ID}: {why}; the prompt after it goes out as `$~ `"));
-                            let n = w.len();
-                            w.splice(n - 1..n - 1, [b'~']);
-                        }
                         first.extend_from_slice(&w);
                         quiet(|| kernel::kprintln!("# sboot keys-ready"));
                         self.send(&first);
@@ -811,114 +803,60 @@ impl Tee {
     }
 }
 
-/// The first line's echo, key by key, with COM1 in loopback while the line
-/// is typed: what the console echoes comes back in the UART's receive FIFO
-/// (16 bytes), which this drains every turn of the session's loop. IER bit 0
-/// (received data available) is clear for the same window, so a kernel whose
-/// IRQ 4 handler takes COM1's received bytes does not race this file for the
-/// echo (CONTRACT §B.2-23, fix round 1c).
-struct EchoCheck {
-    /// The MCR as it was, while loopback is on.
-    mcr: Option<u8>,
-    /// The IER as it was, while loopback is on (its bit 0 is clear then).
-    ier: u8,
-    /// Every byte echoed since loopback went on.
-    cap: Vec<u8>,
-    /// What the key pushed last must echo: its byte, its place in the line,
-    /// where its echo starts in `cap`, and when it went in.
-    want: Option<(u8, usize, usize, u64)>,
-    /// The first key not echoed in time.
-    fail: Option<String>,
+/// The first line, typed at the shell's first prompt: `[key]`, then each
+/// key of `echo ` followed, once `KEY_MS` and `KEY_TURNS` have passed, by
+/// `[key]` again; then the rest of the line one scancode at a time. The
+/// console's echo goes out on the serial line as the console writes it, so
+/// each key's echo is between two marks unless it came late (G1342, built
+/// 2026-11-04). Nothing here reads COM1.
+struct Typist {
+    /// Scancodes pushed so far.
+    typed: usize,
+    /// Marks printed so far (one more than the marked keys waited out).
+    marks: usize,
+    /// When the last scancode went in, by the session's clock.
+    since: u64,
+    /// Turns of the session's loop since the last marked key went in.
+    turns: u32,
     done: bool,
 }
 
-impl EchoCheck {
-    fn start(&mut self) {
-        quiet(|| {
-            // Received-data interrupt off first: from here until `stop`,
-            // nothing but this file reads the receive FIFO.
-            let ier = port_in(COM1 + 1);
-            port_out(COM1 + 1, ier & !1);
-            self.ier = ier;
-            port_wait(|| port_in(COM1 + 5) & 0x40 != 0);
-            let mcr = port_in(COM1 + 4);
-            port_out(COM1 + 2, 0xC7);
-            let mut n = 0;
-            while port_in(COM1 + 5) & 1 != 0 && n < 64 {
-                let _ = port_in(COM1);
-                n += 1;
+impl Typist {
+    /// One turn of the session's loop, at `now` ms.
+    fn step(&mut self, now: u64, line: &[u8]) {
+        if self.done {
+            return;
+        }
+        self.turns = self.turns.saturating_add(1);
+        let marked = MARKED.min(line.len());
+        if self.typed < marked || self.marks <= marked / 2 {
+            if self.marks > 0 && (now - self.since < KEY_MS || self.turns < KEY_TURNS) {
+                return;
             }
-            port_out(COM1 + 4, mcr | 0x10);
-            self.mcr = Some(mcr);
-        });
-    }
-    fn drain(&mut self) {
-        if self.mcr.is_some() {
-            quiet(|| {
-                while port_in(COM1 + 5) & 1 != 0 && self.cap.len() < 4096 {
-                    self.cap.push(port_in(COM1));
+            forward(KEY_MARK.as_bytes());
+            self.marks += 1;
+            if self.typed < marked {
+                // A key's make code and its break code, together.
+                for _ in 0..2 {
+                    let sc = line[self.typed];
+                    quiet(|| kbd::push(sc));
+                    self.typed += 1;
                 }
-            });
-        }
-    }
-    /// Whether the next key may go in: the last one's echo came, or it
-    /// timed out (noted once; after that nothing is waited for).
-    fn ready(&mut self, now: u64, line_len: usize) -> bool {
-        let Some((b, i, from, at)) = self.want else { return true };
-        if self.cap[from..].contains(&b) {
-            self.want = None;
-            return true;
-        }
-        if now - at < ECHO_MS {
-            return false;
-        }
-        self.fail.get_or_insert_with(|| {
-            format!(
-                "scancode {} of the {line_len} the test typed at the first prompt ({}) was not echoed within the limit of {} ms; the serial line carried {:?} after it",
-                i + 1,
-                key_name(b),
-                grouped(ECHO_MS),
-                String::from_utf8_lossy(&self.cap[from..])
-            )
-        });
-        self.want = None;
-        true
-    }
-    /// Loopback off and the IER restored; the echo goes out on the serial
-    /// line as it came, ended by a newline when it has none, so a note after
-    /// it starts a line.
-    fn stop(&mut self) {
-        self.drain();
-        if let Some(mcr) = self.mcr.take() {
-            quiet(|| {
-                port_wait(|| port_in(COM1 + 5) & 0x40 != 0);
-                port_out(COM1 + 4, mcr);
-                // What looped back after the last drain is this file's, not
-                // input: dropped before the kernel's interrupt can take it.
-                // Unpinned: no measured kernel was red without this drain
-                // (TL review 2026-10-22, N2), so no case would notice it gone.
-                let mut n = 0;
-                while port_in(COM1 + 5) & 1 != 0 && n < 64 {
-                    let _ = port_in(COM1);
-                    n += 1;
-                }
-                port_out(COM1 + 1, self.ier);
-            });
-            forward(&self.cap);
-            if self.cap.last() != Some(&b'\n') {
-                forward(b"\n");
+                self.turns = 0;
             }
+            self.since = now;
+            return;
         }
-        self.done = true;
-    }
-}
-
-/// What a scancode of the first line types, for the note.
-fn key_name(b: u8) -> String {
-    match b {
-        0x08 => String::from("backspace"),
-        b'\n' => String::from("Enter"),
-        c => format!("`{}`", c as char),
+        if self.typed >= line.len() {
+            self.done = true;
+            return;
+        }
+        if now - self.since >= PACE_MS {
+            let sc = line[self.typed];
+            quiet(|| kbd::push(sc));
+            self.typed += 1;
+            self.since = now;
+        }
     }
 }
 
@@ -962,7 +900,7 @@ fn place(out: &[u8]) -> String {
     }
 }
 
-fn session(words: &Words, line: &[(u8, Option<u8>)]) -> Result<Session, String> {
+fn session(words: &Words, line: &[u8]) -> Result<Session, String> {
     let (r, w) = pipe::open(0).map_err(|e| format!("pipe::open(0) returned {}", errno_text(e)))?;
     r.flags.store(r.flags.load(Ordering::SeqCst) | O_NONBLOCK, Ordering::SeqCst);
     let env = [
@@ -974,12 +912,11 @@ fn session(words: &Words, line: &[(u8, Option<u8>)]) -> Result<Session, String> 
     let sh = start_with("/bin/sh", || exec::spawn("/bin/sh", &["sh"], &envp), &[(1, &w), (2, &w)]);
     drop(w);
     let sh = sh?;
-    let mut tee = Tee { at_start: true, dollar: false, prompts: 0, held: None, last: None, unechoed: None, line: Vec::new(), fresh: false, marks: 0 };
-    // The first line's scancodes go in one per turn of the loop once the
-    // first prompt is out, each after the last one's echo, so the shell
-    // takes them as they come.
-    let mut typed = 0;
-    let mut ek = EchoCheck { mcr: None, ier: 0, cap: Vec::new(), want: None, fail: None, done: false };
+    let mut tee = Tee { at_start: true, dollar: false, prompts: 0, held: None, last: None, line: Vec::new(), fresh: false, marks: 0 };
+    // The first line's scancodes go in once the first prompt is out, at
+    // most one key per turn of the loop, so the shell takes them as they
+    // come.
+    let mut ty = Typist { typed: 0, marks: 0, since: 0, turns: 0, done: false };
     let mut out = Vec::new();
     let mut buf = alloc::vec![0u8; 4096];
     let mut c = Clock::new();
@@ -988,24 +925,8 @@ fn session(words: &Words, line: &[(u8, Option<u8>)]) -> Result<Session, String> 
     // When the shell last printed.
     let mut last = 0;
     loop {
-        if tee.prompts >= 1 && !ek.done {
-            if ek.mcr.is_none() {
-                ek.start();
-            }
-            ek.drain();
-            let now = c.ms();
-            if ek.ready(now, line.len()) {
-                if typed < line.len() {
-                    let (sc, echo) = line[typed];
-                    quiet(|| kbd::push(sc));
-                    let from = ek.cap.len();
-                    ek.want = echo.filter(|_| ek.fail.is_none()).map(|b| (b, typed, from, now));
-                    typed += 1;
-                } else {
-                    ek.stop();
-                    tee.unechoed = ek.fail.clone();
-                }
-            }
+        if tee.prompts >= 1 {
+            ty.step(c.ms(), line);
         }
         match r.read(&mut buf) {
             Ok(0) => {
@@ -1013,24 +934,6 @@ fn session(words: &Words, line: &[(u8, Option<u8>)]) -> Result<Session, String> 
                 break;
             }
             Ok(n) => {
-                // The shell has printed: the line's check is over (an echo
-                // still owed is late), and loopback must be off before the
-                // tee forwards anything.
-                if !ek.done && ek.mcr.is_some() {
-                    ek.drain();
-                    if let Some((b, i, from, _)) = ek.want.take() {
-                        if !ek.cap[from..].contains(&b) {
-                            ek.fail.get_or_insert_with(|| {
-                                format!("scancode {} of the {} the test typed at the first prompt ({}) was not echoed before the shell printed", i + 1, line.len(), key_name(b))
-                            });
-                        }
-                    }
-                    if typed < line.len() {
-                        ek.fail.get_or_insert_with(|| format!("the shell printed before the test had typed its first line ({typed} of {} scancodes)", line.len()));
-                    }
-                    ek.stop();
-                    tee.unechoed = ek.fail.clone();
-                }
                 last = c.ms();
                 out.extend_from_slice(&buf[..n]);
                 tee.feed(&buf[..n]);
@@ -1054,11 +957,8 @@ fn session(words: &Words, line: &[(u8, Option<u8>)]) -> Result<Session, String> 
             }
         }
     }
-    if !ek.done {
-        ek.stop();
-    }
     tee.flush();
-    if tee.prompts < 2 && tee.unechoed.is_none() {
+    if tee.prompts < 2 {
         note(format_args!(
             "{PROMPT_ID}: the shell printed {} prompt(s) and never the one after the line typed at its first, so nothing typed later was echoed after a prompt",
             tee.prompts
@@ -1930,8 +1830,12 @@ fn wrong_steps(out: &[u8], want: &[(usize, String, Want)], bad: &mut Vec<String>
     }
 }
 
-/// How many of row 7's wrong steps it prints; the rest it counts.
-const CWD_SHOWN: usize = 12;
+/// How many of row 7's wrong steps it prints before its summary line; the
+/// rest it counts. The engine quotes a failed row's last eight `#` lines
+/// (grader/ktap.go `ktapDiagMaxLines`), so seven steps and the summary are
+/// all of the row, and the summary, the row's last `#` line, names the first
+/// wrong step even when the window is cut (#74 Q3 (b), G1700's convention).
+const CWD_SHOWN: usize = 7;
 
 fn cwd_row(run: CwdRun) {
     let mut r = Row::new(CWD_ID);
@@ -1964,11 +1868,15 @@ fn cwd_row(run: CwdRun) {
             )),
         }
     }
-    for b in bad.iter().take(CWD_SHOWN) {
-        r.fail(format_args!("{CWD_ID}: {b}"));
+    // One wrong step is its own summary; more print in order, then the
+    // summary: how many, and the first again.
+    if bad.len() > 1 {
+        for b in bad.iter().take(CWD_SHOWN) {
+            r.fail(format_args!("{CWD_ID}: {b}"));
+        }
     }
-    if bad.len() > CWD_SHOWN {
-        r.fail(format_args!("{CWD_ID}: and {} more calls that did not return what they must", bad.len() - CWD_SHOWN));
+    if let Some(first) = bad.first() {
+        r.fail(format_args!("{CWD_ID}: first wrong of {}: {first}", bad.len()));
     }
     r.finish(7);
 }

@@ -410,14 +410,32 @@ struct Row {
     id: &'static str,
     failed: bool,
     used_nonce: bool,
+    /// The W3 window rule (#74 Q3 (b)): a row whose failure lines outrun
+    /// the 8 the grader shows ends, only when it fails, on one line that
+    /// names its first wrong check and how many were wrong.
+    summed: bool,
+    wrong: usize,
+    first: Option<String>,
 }
+
+/// How much of the first wrong check's line the summary carries: the
+/// grader cuts a `#` line at 400 characters.
+const SUMMARY_CHARS: usize = 300;
 
 impl Row {
     fn new(id: &'static str) -> Row {
-        Row { id, failed: false, used_nonce: false }
+        Row { id, failed: false, used_nonce: false, summed: false, wrong: 0, first: None }
+    }
+    /// A row that ends on its summary line when it fails.
+    fn summed(id: &'static str) -> Row {
+        Row { summed: true, ..Row::new(id) }
     }
     fn fail(&mut self, why: core::fmt::Arguments) {
         self.failed = true;
+        self.wrong += 1;
+        if self.summed && self.first.is_none() {
+            self.first = Some(format!("{why}"));
+        }
         note(why);
     }
     fn expect(&mut self, cond: bool, what: &str) {
@@ -456,8 +474,19 @@ impl Row {
     }
     fn finish(mut self, n: usize) {
         if self.used_nonce && ktap::nonce().is_none() {
-            self.failed = true;
-            note(format_args!("{}: derived from the run's nonce, and this run has none", self.id));
+            let id = self.id;
+            self.fail(format_args!("{id}: derived from the run's nonce, and this run has none"));
+        }
+        if self.summed && self.failed {
+            let id = self.id;
+            let first = self.first.take().unwrap_or_default();
+            let line = first.strip_prefix(id).and_then(|l| l.strip_prefix(": ")).unwrap_or(&first);
+            let cut = match line.char_indices().nth(SUMMARY_CHARS) {
+                Some((at, _)) => format!("{}…", &line[..at]),
+                None => String::from(line),
+            };
+            let (k, s) = (self.wrong, if self.wrong == 1 { "" } else { "s" });
+            note(format_args!("{id}: first wrong: {cut}; {k} check{s} wrong in all"));
         }
         quiet(|| {
             if self.failed {
@@ -1871,7 +1900,7 @@ fn res(out: &[u8], k: usize) -> i64 {
 // ── Row 2: ext2.walk.open_read ───────────────────────────────────────────
 
 fn walk_row(mounted: bool, raw: Option<&Raw>) {
-    let mut r = Row::new(WALK_ID);
+    let mut r = Row::summed(WALK_ID);
     let d = r.derived(WALK_ID);
     let (n, m, nbig) = walk_pick(d);
     let (sn, sm) = (t_size(n), t_size(m));

@@ -13,7 +13,7 @@
 //! carries it has read it back (CONTRACT §A.1-5).
 //!
 //! Before any program runs, the vehicle calls the learner's
-//! `VmaList::carve` (lab 25 step 1) on a list it builds: the cut that
+//! `VmaList::carve` (lab 25 task 1) on a list it builds: the cut that
 //! `munmap` and `mremap` stand on, checked where a failure can name it.
 //!
 //! The four rows, printed in this order:
@@ -26,7 +26,9 @@
 //!     while it ran; it runs at least the sleep it asked for by the PM
 //!     timer; it exits 0. Red when musl's start-up (`arch_prctl`), `readv`,
 //!     `writev`, an id, the CPU set, a clock, the sleep, the signal tables
-//!     or the futex answer wrong — `hello` checks each and says which.
+//!     (since 2026-11-02, G1923, among them `rt_sigaction` for signals 0
+//!     and 65, which must answer -EINVAL) or the futex answer wrong —
+//!     `hello` checks each and says which.
 //!   2 `musl.tls.survives.preempt` (derived) — two copies of `tls`, run at
 //!     once with different words and slots, each print
 //!     `tls <splitmix64(s ^ splitmix64(s ^ 0x7115))> t<w> gaps A B turns C D`
@@ -52,9 +54,25 @@
 //!     the space's leaf entries (`AddressSpace::entry_mut`) and the frame
 //!     pool (`frame::refs`, `frame::stats`): no page given back may keep a
 //!     present entry, and every frame it held must be back (`probe_unmap`).
+//!     Before those calls, a fresh page reads 0 (since 2026-11-06, G2090:
+//!     a fill that hands out a frame it has not zeroed was full marks):
+//!     each of the 16 pages, read whole through the HHDM (all 512 words),
+//!     holds the one word the process wrote at byte 0 and 0 in every other
+//!     word. A failure here is the kernel's fill, not musl's `malloc`.
 //!   4 `musl.enosys.none` (plain) — `syscall::enosys_count()` did not move
 //!     while the three programs ran, and each ran to its exit. A failure
-//!     names the programs whose calls moved it.
+//!     names the programs whose calls moved it, and its last line names,
+//!     per program, the numbers that reached the dispatch's no-arm path:
+//!     this file's `trace_entry` sits in front of the learner's `LSTAR`
+//!     entry and, at each call, notes the number and whether
+//!     `enosys_count()` moved since the call before (`noarm`).
+//!
+//! When a row fails, its last `#` line, just above its `not ok`, is one
+//! summary (#80, W3's Q3 (b)): `<id>: <the failure>` when there is one,
+//! `<id>: the first of N failures: <the first>` when there are more, or for
+//! row 4 the numbers by program. The engine shows a failed row only
+//! its last eight `#` lines, each cut at 400 characters, so every line
+//! here stays under that and puts what decides first.
 //!
 //! Plan 4. A program that is still running after `RUN_MS` (5 s) by the PM
 //! timer fails its row; the vehicle then goes on to the next.
@@ -73,6 +91,8 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::arch::asm;
 use core::sync::atomic::{AtomicU64, Ordering};
+
+use kernel::paging;
 
 use kernel::addr::{PhysAddr, VirtAddr};
 use kernel::blk::ata::{self, Ata, BlockDevice};
@@ -228,15 +248,38 @@ struct Row {
     id: &'static str,
     failed: bool,
     used_nonce: bool,
+    /// How many failure lines, and the first of them after `<id>: `.
+    wrong: usize,
+    first: Option<String>,
+    /// What the summary says in place of the first failure.
+    lead: Option<String>,
+}
+
+/// The longest `#` line this file prints, in characters after `# `: the
+/// engine cuts each at 400 (grader/ktap.go `ktapDiagMaxRunes`).
+const LINE_MAX: usize = 396;
+
+/// `s` cut to `max` characters, with `…` when something was cut.
+fn cut(s: &str, max: usize) -> String {
+    match s.char_indices().nth(max) {
+        Some((i, _)) => format!("{}…", &s[..i]),
+        None => String::from(s),
+    }
 }
 
 impl Row {
     fn new(id: &'static str) -> Row {
-        Row { id, failed: false, used_nonce: false }
+        Row { id, failed: false, used_nonce: false, wrong: 0, first: None, lead: None }
     }
     fn fail(&mut self, why: core::fmt::Arguments) {
         self.failed = true;
-        note(why);
+        let line = format!("{why}");
+        note(format_args!("{}", cut(&line, LINE_MAX)));
+        self.wrong += 1;
+        if self.first.is_none() {
+            let text = line.strip_prefix(self.id).and_then(|t| t.strip_prefix(": ")).unwrap_or(&line);
+            self.first = Some(String::from(text));
+        }
     }
     fn nonce(&mut self) -> [u8; 32] {
         self.used_nonce = true;
@@ -244,8 +287,19 @@ impl Row {
     }
     fn finish(mut self, n: usize) {
         if self.used_nonce && ktap::nonce().is_none() {
-            self.failed = true;
-            note(format_args!("{}: derived from the run's nonce, and this run has none", self.id));
+            let id = self.id;
+            self.fail(format_args!("{id}: derived from the run's nonce, and this run has none"));
+        }
+        if self.failed {
+            // The row's last `#` line (#80, W3's Q3 (b)), printed only here.
+            let id = self.id;
+            let text = match (self.lead.take(), &self.first) {
+                (Some(lead), _) => lead,
+                (None, Some(first)) if self.wrong == 1 => first.clone(),
+                (None, Some(first)) => format!("the first of {} failures: {first}", self.wrong),
+                (None, None) => format!("{} failures", self.wrong),
+            };
+            note(format_args!("{}", cut(&format!("{id}: {text}"), LINE_MAX)));
         }
         quiet(|| {
             if self.failed {
@@ -438,10 +492,10 @@ fn mount_root() -> Result<(), String> {
     mount::mount("/dev/hda2", "/", "ext2", root).map_err(|e| format!("mount::mount(\"/dev/hda2\", \"/\", \"ext2\", its root) returned {}", errno_text(e)))
 }
 
-/// `VmaList::carve` arrives in lab 25 step 1. This twin lets the file build
+/// `VmaList::carve` arrives in lab 25 task 1. This twin lets the file build
 /// against the cuts before it and the learner's template: the inherent
 /// method wins once the cut has it, and before that `carve` takes nothing,
-/// so step 1 fails as it should (2026-10-22).
+/// so task 1 fails as it should (2026-10-22).
 trait CarveOf {
     #[allow(dead_code)]
     fn carve(&mut self, start: VirtAddr, end: VirtAddr) -> Vec<(VirtAddr, VirtAddr)>;
@@ -482,14 +536,30 @@ fn list_text(l: &[Vma]) -> String {
 }
 
 fn ranges_text(r: &[(u64, u64)]) -> String {
-    let parts: Vec<String> = r.iter().map(|(a, b)| format!("{a:#x}-{b:#x}")).collect();
+    let mut parts: Vec<String> = r.iter().take(2).map(|(a, b)| format!("{a:#x}-{b:#x}")).collect();
+    if r.len() > 2 {
+        parts.push(format!("{} more", r.len() - 2));
+    }
     format!("[{}]", parts.join(", "))
 }
 
+/// At most two VMAs of `l`, then how many more.
+fn some_vmas(l: &[Vma]) -> String {
+    let mut s = list_text(&l[..l.len().min(2)]);
+    if l.len() > 2 {
+        s.insert_str(s.len() - 1, &format!(", {} more", l.len() - 2));
+    }
+    s
+}
+
+/// The five cuts, in the order `carve_check` makes them.
+const CARVE_CASES: [&str; 5] = ["a head", "a tail past the list's end", "a hole in the middle", "across two adjacent VMAs", "where nothing is"];
+
 /// Five cuts in a row on one list: a head, a tail past the list's end, a
-/// hole in the middle, a range across two VMAs and a gap, and a range
+/// hole in the middle, a range across two adjacent VMAs, and a range
 /// where nothing is. Each returns the ranges taken and leaves the list
-/// shown. Every failure, in one line each.
+/// shown. Every failure, in one line each, what was returned first (C-25-34:
+/// the whole lists ran to 582 characters, past the engine's 400).
 fn carve_check() -> Vec<String> {
     let rx = prot::READ | prot::EXEC;
     let rw = prot::READ | prot::WRITE;
@@ -534,19 +604,34 @@ fn carve_check() -> Vec<String> {
         ),
     ];
     let mut fails = Vec::new();
-    for ((a, b), want_taken, want_list) in cases {
-        let before: Vec<Vma> = l.iter().copied().collect();
+    for (k, ((a, b), want_taken, want_list)) in cases.into_iter().enumerate() {
         let taken: Vec<(u64, u64)> = l.carve(VirtAddr(a), VirtAddr(b)).iter().map(|(x, y)| (x.0, y.0)).collect();
         let after: Vec<Vma> = l.iter().copied().collect();
         if taken != want_taken || after != want_list {
-            fails.push(format!(
-                "VmaList::carve({a:#x}, {b:#x}) on {} returned {} and left {}; expected {} and {}",
-                list_text(&before),
-                ranges_text(&taken),
-                list_text(&after),
-                ranges_text(&want_taken),
-                list_text(&want_list)
-            ));
+            let mut s = format!("VmaList::carve({a:#x}, {b:#x}), cut {} of 5 ({}): ", k + 1, CARVE_CASES[k]);
+            if taken != want_taken {
+                s.push_str(&format!("returned {}, expected {}", ranges_text(&taken), ranges_text(&want_taken)));
+            } else {
+                s.push_str(&format!("returned {} as expected", ranges_text(&taken)));
+            }
+            if after != want_list {
+                let extra: Vec<Vma> = after.iter().filter(|v| !want_list.contains(v)).copied().collect();
+                let missing: Vec<Vma> = want_list.iter().filter(|v| !after.contains(v)).copied().collect();
+                let mut parts = Vec::new();
+                if !extra.is_empty() {
+                    parts.push(format!("holds {} it should not", some_vmas(&extra)));
+                }
+                if !missing.is_empty() {
+                    parts.push(format!("lacks {}", some_vmas(&missing)));
+                }
+                if parts.is_empty() && after.len() != want_list.len() {
+                    parts.push(format!("holds {} VMAs where {} are right, one of them more than once, {}", after.len(), want_list.len(), some_vmas(&after)));
+                } else if parts.is_empty() {
+                    parts.push(format!("holds the right VMAs in the wrong order, {}", some_vmas(&after)));
+                }
+                s.push_str(&format!("; the list it left {}", parts.join(" and ")));
+            }
+            fails.push(s);
             // Go on from the list a right cut leaves.
             l = VmaList::new();
             for v in want_list {
@@ -598,7 +683,7 @@ fn hello_row(n: usize) -> Option<Run> {
             match secs {
                 None => row.fail(format_args!("{HELLO_ID}: /bin/hello's second line is {l2:?}; expected {pre2:?}, the seconds of CLOCK_REALTIME, then {post2:?}")),
                 Some(s) if s < lo || s > hi => row.fail(format_args!(
-                    "{HELLO_ID}: CLOCK_REALTIME read {s} s; it is fs::ext2::EPOCH ({}) plus the monotonic clock, which was {lo}..={hi} while hello ran",
+                    "{HELLO_ID}: CLOCK_REALTIME read {s} s; it is fs::ext2::EPOCH ({}) plus the monotonic clock's seconds, {lo}..={hi} while hello ran",
                     ext2::EPOCH
                 )),
                 Some(_) => {}
@@ -877,6 +962,7 @@ fn on_ud(tf: &mut TrapFrame) {
             s.step
         };
         if step == 1 {
+            dirty_free_frames();
             match probe_map() {
                 Ok((a, b)) => {
                     let mut s = PROBE.lock();
@@ -912,6 +998,33 @@ fn on_ud(tf: &mut TrapFrame) {
         }
     }
     panic!("#UD (vector 6) rip={:#x} cs={:#x}", tf.rip, tf.cs);
+}
+
+/// G2090's recycled-frame half (#80, sk25v): take every frame the pool has
+/// free, fill each with 0xa5 and give it back, so every frame the probe's
+/// mappings get next is one an earlier owner left dirty, whatever order the
+/// pool hands frames out in (a next-fit pool never wraps in a lab 25 run, so
+/// without this no frame the probe gets was ever used). The drained frames
+/// are chained through their own first word: nothing is allocated meanwhile.
+fn dirty_free_frames() {
+    const END: u64 = u64::MAX;
+    let mut head = END;
+    while let Some(f) = frame::alloc() {
+        let p = paging::hhdm(f.0).as_mut_ptr::<u64>();
+        // SAFETY: `f` was just handed out and is held by nothing else; the
+        // HHDM maps every RAM frame, and word 0 lies inside it.
+        unsafe { p.write_volatile(head) };
+        head = f.0 .0;
+    }
+    while head != END {
+        let p = paging::hhdm(PhysAddr(head)).as_mut_ptr::<u64>();
+        // SAFETY: `head` is a frame this loop still holds (taken above).
+        let next = unsafe { p.read_volatile() };
+        // SAFETY: as above; the write stays inside the one frame.
+        unsafe { core::ptr::write_bytes(p.cast::<u8>(), 0xa5, PAGE as usize) };
+        frame::free(Frame(PhysAddr(head)));
+        head = next;
+    }
 }
 
 /// The probe's two mappings, each `PROBE_PAGES` pages, readable and writable.
@@ -969,6 +1082,33 @@ fn probe_check(a: u64, b: u64) -> (Vec<String>, Vec<String>) {
         }
         frames.push(e & ADDR_BITS);
     }
+    // G2090 (#80 class B Q2 (a)): each page reads as the process left it,
+    // through the HHDM at the frame its entry names: word 0 the one word it
+    // wrote (the page's own address), every other word 0. A fill that hands
+    // out a frame it has not zeroed fails here; nothing else reads a fresh
+    // page before writing it.
+    let mut dirty: Vec<(u64, usize, u64, u64)> = Vec::new();
+    for (va, &fr) in pages(a).chain(pages(b)).zip(frames.iter()) {
+        let p = paging::hhdm(PhysAddr(fr)).as_ptr::<u64>();
+        for w in 0..(PAGE as usize / 8) {
+            // SAFETY: `fr` is the frame a present leaf entry names, a RAM
+            // frame the HHDM maps; `w` < 512 stays inside it.
+            let v = unsafe { p.add(w).read_volatile() };
+            let want = if w == 0 { va } else { 0 };
+            if v != want {
+                dirty.push((va, w * 8, v, want));
+                break;
+            }
+        }
+    }
+    if let Some(&(va, off, v, want)) = dirty.first() {
+        let what = if off == 0 { format!("where the process wrote {want:#x}") } else { String::from("not 0") };
+        fails.push(format!(
+            "a fresh page reads 0 but for what the process wrote: the page at {va:#x}, which mmap returned and the process wrote one word to (at byte 0), holds {v:#x} at byte {off}, {what}; {} of the {} pages hold a word the process did not write; every frame the pool had free held 0xa5 bytes just before the mmap",
+            dirty.len(),
+            2 * PROBE_PAGES
+        ));
+    }
     // munmap: three pages from the middle of the first mapping.
     let (lo, n) = (a + 2 * PAGE, 3u64);
     let u0 = frame::stats().used;
@@ -980,7 +1120,7 @@ fn probe_check(a: u64, b: u64) -> (Vec<String>, Vec<String>) {
             let gone: Vec<u64> = (0..n).map(|k| lo + k * PAGE).collect();
             let kept: Vec<u64> = pages(a).filter(|va| !gone.contains(va)).collect();
             let back = gone_check(&mut fails, &format!("{call} returned 0"), &gone, &frames[2..5], &kept, (u0, u1));
-            seen.push(format!("munmap({lo:#x}, {:#x}): {back} of 3 frames back, in use {u0} -> {u1}", n * PAGE));
+            seen.push(format!("munmap({lo:#x}, {:#x}): {back} of 3 frames back, used {u0} -> {u1}", n * PAGE));
         }
         Some(Err(e)) => fails.push(format!("{call} returned {}", errno_text(e))),
         None => fails.push(String::from("the probe's process was not the running one")),
@@ -998,7 +1138,7 @@ fn probe_check(a: u64, b: u64) -> (Vec<String>, Vec<String>) {
             let gone = [a + PAGE, a + 5 * PAGE];
             let kept = [a, a + 6 * PAGE, a + 7 * PAGE];
             let back = gone_check(&mut fails, &format!("{call} returned 0"), &gone, &[frames[1], frames[5]], &kept, (u0, u1));
-            seen.push(format!("munmap({lo:#x}, {:#x}): {back} of 2 frames back, in use {u0} -> {u1}", n * PAGE));
+            seen.push(format!("munmap({lo:#x}, {:#x}): {back} of 2 frames back, used {u0} -> {u1}", n * PAGE));
         }
         Some(Err(e)) => fails.push(format!("{call} returned {}", errno_text(e))),
         None => fails.push(String::from("the probe's process was not the running one")),
@@ -1027,7 +1167,7 @@ fn shrink(fails: &mut Vec<String>, seen: &mut Vec<String>, base: u64, from: u64,
             let gone: Vec<u64> = (0..from).map(|k| base + k * PAGE).filter(|&va| va < at || va >= at + to * PAGE).collect();
             let kept: Vec<u64> = (0..to).map(|k| at + k * PAGE).collect();
             let back = gone_check(fails, &format!("{call} returned {at:#x}"), &gone, &held, &kept, (u0, u1));
-            seen.push(format!("mremap({base:#x}, {:#x}, {:#x}, {flag}) -> {at:#x}: {back} of {} frames back, in use {u0} -> {u1}", from * PAGE, to * PAGE, held.len()));
+            seen.push(format!("mremap({base:#x}, {:#x}, {:#x}, {flag}) -> {at:#x}: {back} of {} frames back, used {u0} -> {u1}", from * PAGE, to * PAGE, held.len()));
             Some(at)
         }
         Some(Err(e)) => {
@@ -1114,7 +1254,7 @@ fn mem_row(n: usize, carve: &[String]) -> Option<Run> {
             row.fail(format_args!("{MEM_ID}: {why}"));
         }
         if !seen.is_empty() {
-            note(format_args!("{MEM_ID}: a process the tests start, after mem: {}", seen.join("; ")));
+            note(format_args!("{MEM_ID}: a test process, after mem: {}", seen.join("; ")));
         }
     }
     row.finish(n);
@@ -1185,11 +1325,40 @@ fn enosys_row(n: usize, moved: &[(&str, u64)], before: u64, ends: &[(&str, Optio
     let each: Vec<String> = moved.iter().map(|(p, d)| format!("{p} {d}")).collect();
     if total != 0 {
         let who: Vec<&str> = moved.iter().filter(|m| m.1 != 0).map(|m| m.0).collect();
+        // The lab's table claim only when every number seen is in it (#81's
+        // wrong-cause class: an arm an earlier lab owes is not in it).
+        let all_in_table = (1..=3).any(|w| !noarm::seen(w).is_empty()) && (1..=3).all(|w| noarm::seen(w).iter().all(|&(nr, _)| nr_name(nr).is_some()));
+        let table = if all_in_table { "; each is in the lab's table of calls a static musl program makes" } else { "" };
         row.fail(format_args!(
-            "{ENOSYS_ID}: {total} system calls named a number the dispatch has no arm for ({}): {} called them; each is in the lab's table of calls a static musl program makes",
+            "{ENOSYS_ID}: {total} system calls named a number the dispatch has no arm for ({}): {} called them{table}",
             each.join(", "),
             who.join(", ")
         ));
+        // The row's last line: the numbers, by program.
+        let mut by = Vec::new();
+        for (w, (p, d)) in moved.iter().enumerate() {
+            if *d == 0 {
+                continue;
+            }
+            let seen = noarm::seen(w + 1);
+            let mut nrs: Vec<String> = seen
+                .iter()
+                .map(|&(nr, k)| {
+                    let call = match nr_name(nr) {
+                        Some(s) => format!("{nr} {s}"),
+                        None if nr == u64::MAX => String::from("a number of 512 or more"),
+                        None => format!("{nr}"),
+                    };
+                    if k == 1 { call } else { format!("{call} x{k}") }
+                })
+                .collect();
+            let known: u64 = seen.iter().map(|s| s.1).sum();
+            if known < *d {
+                nrs.push(format!("{} whose number was not seen", d - known));
+            }
+            by.push(format!("{p} {d}: {}", nrs.join(", ")));
+        }
+        row.lead = Some(format!("the numbers with no arm, by program: {}", by.join("; ")));
     }
     for (p, st) in ends {
         if !matches!(st, Some(v) if v & 0x7f == 0) {
@@ -1197,7 +1366,207 @@ fn enosys_row(n: usize, moved: &[(&str, u64)], before: u64, ends: &[(&str, Optio
         }
     }
     note(format_args!("{ENOSYS_ID}: enosys_count() {before} before the programs, {} after ({})", before + total, each.join(", ")));
+    if total != 0 && row.wrong > 1 {
+        // A program that did not reach its exit too: say so after the numbers.
+        let rest = row.wrong - 1;
+        let lead = row.lead.take().unwrap_or_default();
+        row.lead = Some(format!("{lead}; and {rest} program{} did not reach {} exit", if rest == 1 { "" } else { "s" }, if rest == 1 { "its" } else { "their" }));
+    }
     row.finish(n);
+}
+
+/// The name of a number in the lesson's table of calls a static musl
+/// program makes (Linux's x86-64 numbers).
+fn nr_name(nr: u64) -> Option<&'static str> {
+    Some(match nr {
+        9 => "mmap",
+        11 => "munmap",
+        12 => "brk",
+        13 => "rt_sigaction",
+        14 => "rt_sigprocmask",
+        19 => "readv",
+        20 => "writev",
+        25 => "mremap",
+        35 => "nanosleep",
+        96 => "gettimeofday",
+        102 => "getuid",
+        104 => "getgid",
+        107 => "geteuid",
+        108 => "getegid",
+        109 => "setpgid",
+        112 => "setsid",
+        158 => "arch_prctl",
+        202 => "futex",
+        204 => "sched_getaffinity",
+        218 => "set_tid_address",
+        228 => "clock_gettime",
+        _ => return None,
+    })
+}
+
+// ── Which numbers reached the no-arm path, by row ────────────────────────
+
+/// The learner's `syscall::entry` is reached through `trace_entry`, which
+/// `install` puts in `LSTAR` in its place. At each system call, on the way
+/// in and with interrupts off (lab 09's `SFMASK`), it checks whether
+/// `enosys_count()` moved since the call before; if it did, the call before
+/// reached the no-arm path, and its number is counted for the row whose
+/// programs are running. In a kernel that keeps interrupts off through its
+/// dispatch (the reference does), the no-arm path never blocks, so no other
+/// call can come between it and the next one's way in, and a row's end
+/// settles its last call; in one that turns them back on, a tick there can
+/// let the other copy's call in first, and the numbers may then name the
+/// wrong call (the count is still `enosys_count()`'s). It reads every register it is given and changes none:
+/// the learner's entry sees the same machine.
+mod noarm {
+    use core::arch::{asm, naked_asm};
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    use alloc::vec::Vec;
+
+    const LSTAR: u32 = 0xC000_0082;
+    const SFMASK: u32 = 0xC000_0084;
+    /// Numbers counted one by one; any other is counted as `BIG`.
+    const NRS: usize = 512;
+    const BIG: usize = NRS;
+
+    /// The learner's entry, as `LSTAR` named it after `syscall::init`.
+    static ENTRY: AtomicU64 = AtomicU64::new(0);
+    /// The caller's `rsp` while `record` runs on `STACK`.
+    static SAVED_RSP: AtomicU64 = AtomicU64::new(0);
+    static STACK_TOP: AtomicU64 = AtomicU64::new(0);
+    /// 1 if the learner's `SFMASK` leaves IF set at entry: `trace_entry`
+    /// runs with interrupts off (one `STACK`, one `SAVED_RSP`) and sets IF
+    /// again just before the learner's entry, so that entry starts as
+    /// `syscall` would have started it.
+    static IF_ON: AtomicU64 = AtomicU64::new(0);
+    #[repr(align(16))]
+    #[allow(dead_code)] // only its address is taken
+    struct Stack([u8; 8192]);
+    static mut STACK: Stack = Stack([0; 8192]);
+
+    /// The call before: its number and `enosys_count()` on its way in.
+    static LAST_NR: AtomicU64 = AtomicU64::new(u64::MAX);
+    static LAST_COUNT: AtomicU64 = AtomicU64::new(0);
+    /// Which row's programs run: 0 none, else 1..=3.
+    static ROW: AtomicU64 = AtomicU64::new(0);
+    #[allow(clippy::declare_interior_mutable_const)]
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    #[allow(clippy::declare_interior_mutable_const)]
+    const ZEROS: [AtomicU64; NRS + 1] = [ZERO; NRS + 1];
+    static COUNTS: [[AtomicU64; NRS + 1]; 3] = [ZEROS; 3];
+
+    fn rdmsr(msr: u32) -> u64 {
+        let (lo, hi): (u32, u32);
+        // SAFETY: reading LSTAR or SFMASK has no side effect.
+        unsafe { asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi, options(nomem, nostack, preserves_flags)) };
+        (hi as u64) << 32 | lo as u64
+    }
+
+    fn wrmsr(msr: u32, v: u64) {
+        // SAFETY: LSTAR only, with `trace_entry`, which goes on to the entry
+        // `syscall::init` installed.
+        unsafe { asm!("wrmsr", in("ecx") msr, in("eax") v as u32, in("edx") (v >> 32) as u32, options(nostack, preserves_flags)) };
+    }
+
+    /// After `syscall::init`: put `trace_entry` in front of the learner's entry.
+    pub fn install() {
+        let top = (&raw const STACK) as u64 + core::mem::size_of::<Stack>() as u64;
+        STACK_TOP.store(top, Ordering::SeqCst);
+        LAST_COUNT.store(kernel::syscall::enosys_count(), Ordering::SeqCst);
+        IF_ON.store(((rdmsr(SFMASK) >> 9) & 1) ^ 1, Ordering::SeqCst);
+        ENTRY.store(rdmsr(LSTAR), Ordering::SeqCst);
+        wrmsr(LSTAR, trace_entry as extern "C" fn() as usize as u64);
+    }
+
+    /// Count the call before if `enosys_count()` moved since its way in.
+    fn settle() {
+        let now = kernel::syscall::enosys_count();
+        let last = LAST_COUNT.swap(now, Ordering::SeqCst);
+        let row = ROW.load(Ordering::SeqCst) as usize;
+        if now > last && (1..=3).contains(&row) {
+            let nr = LAST_NR.load(Ordering::SeqCst);
+            let i = if nr < NRS as u64 { nr as usize } else { BIG };
+            COUNTS[row - 1][i].fetch_add(now - last, Ordering::SeqCst);
+        }
+    }
+
+    extern "C" fn record(nr: u64) {
+        settle();
+        LAST_NR.store(nr, Ordering::SeqCst);
+    }
+
+    /// Row `r`'s programs start (0: none run): the call before is settled
+    /// first, under the row it ran in.
+    pub fn row(r: u64) {
+        super::quiet(|| {
+            settle();
+            LAST_NR.store(u64::MAX, Ordering::SeqCst);
+            ROW.store(r, Ordering::SeqCst);
+        });
+    }
+
+    /// Row `r`'s numbers that reached the no-arm path, each with its count;
+    /// `u64::MAX` stands for any number of 512 or more.
+    pub fn seen(r: usize) -> Vec<(u64, u64)> {
+        let mut out = Vec::new();
+        if (1..=3).contains(&r) {
+            for (i, c) in COUNTS[r - 1].iter().enumerate() {
+                let k = c.load(Ordering::SeqCst);
+                if k != 0 {
+                    out.push((if i == BIG { u64::MAX } else { i as u64 }, k));
+                }
+            }
+        }
+        out
+    }
+
+    /// `LSTAR`'s target: on its own stack, `record(rax)` with every
+    /// register the call carries saved, then the learner's entry with the
+    /// machine as `syscall` left it (rsp the caller's, rcx and r11 its rip
+    /// and rflags, IF as `SFMASK` left it). Interrupts stay off from its
+    /// first instruction to its jump, so nothing can enter it twice.
+    #[unsafe(naked)]
+    extern "C" fn trace_entry() {
+        naked_asm!(
+            "cli",
+            "mov [rip + {saved}], rsp",
+            "mov rsp, [rip + {top}]",
+            "push rax",
+            "push rcx",
+            "push rdx",
+            "push rsi",
+            "push rdi",
+            "push r8",
+            "push r9",
+            "push r10",
+            "push r11",
+            "sub rsp, 8",
+            "mov rdi, rax",
+            "call {record}",
+            "add rsp, 8",
+            "pop r11",
+            "pop r10",
+            "pop r9",
+            "pop r8",
+            "pop rdi",
+            "pop rsi",
+            "pop rdx",
+            "pop rcx",
+            "pop rax",
+            "mov rsp, [rip + {saved}]",
+            "cmp qword ptr [rip + {if_on}], 0",
+            "je 2f",
+            "sti",
+            "2:",
+            "jmp qword ptr [rip + {entry}]",
+            saved = sym SAVED_RSP,
+            if_on = sym IF_ON,
+            top = sym STACK_TOP,
+            record = sym record,
+            entry = sym ENTRY,
+        )
+    }
 }
 
 #[no_mangle]
@@ -1206,17 +1575,22 @@ unsafe extern "C" fn _start() -> ! {
     serial::init();
     ktap::begin(PLAN);
     prelude();
+    noarm::install();
     // Step 1, before anything runs: the VMA cut.
     let carve = carve_check();
     match mount_root() {
         Err(why) => not_run(&format!("the root file system did not mount: {why}")),
         Ok(()) => {
+            noarm::row(1);
             let e0 = syscall::enosys_count();
             let hello = hello_row(1);
+            noarm::row(2);
             let e1 = syscall::enosys_count();
             let tls = tls_row(2);
+            noarm::row(3);
             let e2 = syscall::enosys_count();
             let mem = mem_row(3, &carve);
+            noarm::row(0);
             let e3 = syscall::enosys_count();
             let moved = [("hello", e1 - e0), ("tls", e2 - e1), ("mem", e3 - e2)];
             let mut ends: Vec<(&str, Option<i32>)> = Vec::new();

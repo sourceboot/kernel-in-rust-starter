@@ -10,13 +10,16 @@
 //! `/dev/hda2`, the boot archive at `/boot`, a `ProcFs::new()` at `/proc`
 //! and a `DevFs::new()` at `/dev` — and keeps each root, so every
 //! expectation about where a path lands is one of those roots' own
-//! `lookup`s, never the walk under test. Row 8 adds a fifth mount through
-//! syscall 165 from a program. Programs are the course's own off ext2's
-//! `/bin` (`cat`, `mounts`, `ls`) or assembled here (a straight run of
-//! syscalls whose results the program writes back), written to `/tmp` and
-//! run through the learner's exec with a pipe as fds 1 and 2. Eight rows;
-//! row 1 is printed LAST, after its `getdents64` part, so a `todo!` there
-//! costs only row 1 (rows 2–8 have printed by then):
+//! `lookup`s, never the walk under test. Row 8 adds four more mounts (one
+//! proc, three devfs) through syscall 165 from a program. Programs are the
+//! course's own off ext2's `/bin` (`cat`, `mounts`, `ls`) or assembled here
+//! (a straight run of syscalls whose results the program writes back),
+//! written to `/tmp` and run through the learner's exec with a pipe as fds
+//! 1 and 2. Nine rows (row 9 is a `serial` row, judged off the transcript,
+//! and printed inside row 6's run); row 1 runs LAST, its walks and then its `getdents64`
+//! part (the walks moved after row 8 on 2026-11-04, W3 fix wave), so every
+//! line it prints lands in its own window and a `todo!` there costs only
+//! row 1 (rows 2–8 have printed by then):
 //!
 //!   1 `mount.cross.walk` (plain) — `vfs::walk` lands where the roots say,
 //!     by `(st_dev, st_ino, st_mode)`: `/boot/init`, `boot/init` from `/`,
@@ -117,11 +120,22 @@
 //!     `-EAGAIN` and `ioctl(TIOCGWINSZ)` is 0 with fd 0's 8 bytes, no
 //!     literal size (slice 5b fix round 1). Then this file opens each
 //!     through devfs's `lookup` and `FileRef::open_inode(.., O_WRONLY)`: the
-//!     open file's object must be `FileObj::CONSOLE`, and a `# t<8 hex>`
-//!     line written to it must come back over COM1's loopback (rounds 1b, 2).
+//!     open file's object must be `FileObj::CONSOLE`, and a write of
+//!     `k22 tty` (`k22 console`) to it must return its length (rounds 1b,
+//!     2). That the bytes reach the serial line is row 9's.
 //!   7 `proc.sboot.nonce` (plain) — `/bin/cat /proc/sboot/nonce` prints the
 //!     run's nonce as this file reads it from `ktap::nonce()`, then a
 //!     newline.
+//!   9 `dev.console.wire` (`serial`, plain; 2026-11-06, sprint 7 #79,
+//!     `G2077`) — row 6's two writes, each between two marks this file
+//!     prints through the learner's `serial::write_str`: `[wire>`, then
+//!     `f.write("k22 tty")`, then `WIRE_MS` by the PM timer, then `<wire]`
+//!     and a newline, all with interrupts off. The row is
+//!     `has_all = ["[wire>k22 tty<wire]", "[wire>k22 console<wire]"]` and
+//!     `lacks = "[wire><wire]"`: a console that sends nothing, or keeps the
+//!     bytes, leaves the two marks touching, and printing the literal at
+//!     boot cannot remove a pair this file prints later. This file never
+//!     reads COM1 (CONTRACT §B.2-22 (c), "Built 2026-11-06").
 //!   8 `mount.syscall` (U, plain) — a program: `mount("proc", "/tmp/k22
 //!     proc", "proc", 0, 0)` is 0, `/tmp/k22 proc/meminfo` then opens and
 //!     reads as `/proc/meminfo` does, and `stat` of the mount point gives a
@@ -423,15 +437,63 @@ struct Row {
     id: &'static str,
     failed: bool,
     used_nonce: bool,
+    /// Rows 1 and 6 (W3 Q3): when the row fails, its last `#` line is a
+    /// summary — how many of its lines are failures, and the first of them —
+    /// because the engine shows a failed row only its last eight.
+    summary: bool,
+    wrong: usize,
+    first: Option<String>,
+    /// Every failure line, for row 6's tally by device.
+    seen: Vec<String>,
+    /// What the summary says before the first failure; by default the count.
+    lead: Option<String>,
 }
+
+/// A summary line's longest first-failure text, in chars: with its lead it
+/// stays inside the engine's 400 runes per `#` line.
+const FIRST_MAX: usize = 240;
 
 impl Row {
     fn new(id: &'static str) -> Row {
-        Row { id, failed: false, used_nonce: false }
+        Row { id, failed: false, used_nonce: false, summary: false, wrong: 0, first: None, seen: Vec::new(), lead: None }
+    }
+    fn summarised(id: &'static str) -> Row {
+        Row { summary: true, ..Row::new(id) }
     }
     fn fail(&mut self, why: core::fmt::Arguments) {
         self.failed = true;
-        note(why);
+        if !self.summary {
+            return note(why);
+        }
+        let line = format!("{why}");
+        note(format_args!("{line}"));
+        self.wrong += 1;
+        if self.first.is_none() {
+            let id = self.id;
+            let text = line.strip_prefix(id).and_then(|t| t.strip_prefix(": ")).unwrap_or(&line);
+            let mut first: String = text.chars().take(FIRST_MAX).collect();
+            if text.chars().count() > FIRST_MAX {
+                first.push('…');
+            }
+            self.first = Some(first);
+        }
+        self.seen.push(line);
+    }
+    /// Row 6's lead: the count, and how many name each device.
+    fn dev_tally(&self) -> String {
+        const DEVS: [&str; 4] = ["/dev/null", "/dev/zero", "/dev/tty", "/dev/console"];
+        let mut by: Vec<String> = Vec::new();
+        for d in DEVS {
+            let n = self.seen.iter().filter(|l| l.contains(d)).count();
+            if n > 0 {
+                by.push(format!("{d} {n}"));
+            }
+        }
+        let rest = self.seen.iter().filter(|l| !DEVS.iter().any(|d| l.contains(d))).count();
+        if rest > 0 {
+            by.push(format!("{rest} naming no device"));
+        }
+        format!("{} wrong: {}", self.wrong, by.join(", "))
     }
     fn expect(&mut self, cond: bool, what: &str) {
         if !cond {
@@ -460,6 +522,14 @@ impl Row {
         if self.used_nonce && ktap::nonce().is_none() {
             self.failed = true;
             note(format_args!("{}: derived from the run's nonce, and this run has none", self.id));
+        }
+        if self.failed && self.summary {
+            let id = self.id;
+            let lead = self.lead.take().unwrap_or_else(|| format!("{} wrong", self.wrong));
+            match &self.first {
+                Some(first) => note(format_args!("{id}: {lead}; the first: {first}")),
+                None => note(format_args!("{id}: {lead}")),
+            }
         }
         quiet(|| {
             if self.failed {
@@ -895,9 +965,10 @@ fn unmounted(mut r: Row, n: usize) {
 
 // ── Row 1: mount.cross.walk ──────────────────────────────────────────────
 
-/// The walks; the row is finished by `dents_check`, last in this file.
+/// The walks, after row 8 (W3 Q3: before, their failure lines fell into
+/// row 2's window); the row is finished by `dents_check`, last in this file.
 fn cross_row(fs: Option<&Fs>) -> Row {
-    let mut r = Row::new(CROSS_ID);
+    let mut r = Row::summarised(CROSS_ID);
     let Some(fs) = fs else {
         r.fail(format_args!("{CROSS_ID}: not run: the four mounts did not all succeed"));
         return r;
@@ -1759,7 +1830,7 @@ fn stdev_row(fs: Option<&Fs>) {
 // ── Row 6: dev.null.zero ─────────────────────────────────────────────────
 
 fn dev_row(fs: Option<&Fs>) {
-    let r = Row::new(DEV_ID);
+    let r = Row::summarised(DEV_ID);
     let Some(fs) = fs else { return unmounted(r, 6) };
     let mut r = r;
     let mut p = Probe::new();
@@ -1851,73 +1922,31 @@ fn dev_row(fs: Option<&Fs>) {
     }
     drop(console);
     console_writes(fs, &mut r);
+    r.lead = Some(r.dev_tally());
     r.finish(6);
 }
 
-/// COM1, the serial line every console in the course writes to (lab 02).
-const COM1: u16 = 0x3f8;
+/// Row 9's marks (`dev.console.wire`), printed through the learner's
+/// `serial::write_str` around each console write.
+const WIRE_OPEN: &str = "[wire>";
+const WIRE_CLOSE: &str = "<wire]";
+/// How long row 9 waits after a console write returns before it prints the
+/// closing mark: the committed floor (CONTRACT §B.2-22 (c), "Built
+/// 2026-11-06"). The write is synchronous on the spine, so the bytes are on
+/// the serial line before it returns; the wait covers a console that hands
+/// them to the UART a little later.
+const WIRE_MS: u64 = 50;
 
-fn port_in(port: u16) -> u8 {
-    let v: u8;
-    // SAFETY: a port read touches no memory.
-    unsafe { asm!("in al, dx", out("al") v, in("dx") port, options(nomem, nostack, preserves_flags)) };
-    v
-}
-
-fn port_out(port: u16, v: u8) {
-    // SAFETY: a port write touches no memory; COM1 is the serial line.
-    unsafe { asm!("out dx, al", in("dx") port, in("al") v, options(nomem, nostack, preserves_flags)) };
-}
-
-/// Spin until `done` or a bounded number of tries.
-fn port_wait(done: impl Fn() -> bool) {
-    let mut n = 0u32;
-    while !done() && n < 1_000_000 {
-        n += 1;
-        core::hint::spin_loop();
-    }
-}
-
-/// `f.write(line)` with COM1 in loopback (MCR bit 4), interrupts off and
-/// COM1's received-data interrupt off (IER bit 0, restored after, as the MCR
-/// is): the bytes the write puts on the serial line come back in the UART's
-/// receive FIFO (16 bytes) instead of leaving the machine; with interrupts
-/// off nothing else in the kernel runs to take them unless its own write
-/// lets an interrupt in. The IER clear is
-/// defensive and unpinned: 8350b9fff's window, without it, already scored
-/// an IRQ 4 receive 10/10, also one whose write lets an interrupt in
-/// (CONTRACT §B.2-22 row 6). Its answer, and those bytes.
-fn looped(f: &FileRef, line: &[u8]) -> (Result<usize, Errno>, Vec<u8>) {
-    quiet(|| {
-        let mut back = Vec::with_capacity(32);
-        let ier = port_in(COM1 + 1);
-        port_out(COM1 + 1, ier & !1);
-        port_wait(|| port_in(COM1 + 5) & 0x40 != 0);
-        let mcr = port_in(COM1 + 4);
-        port_out(COM1 + 2, 0xC7);
-        while port_in(COM1 + 5) & 1 != 0 && back.len() < 32 {
-            back.push(port_in(COM1));
-        }
-        back.clear();
-        port_out(COM1 + 4, mcr | 0x10);
-        let w = f.write(line);
-        port_wait(|| port_in(COM1 + 5) & 0x40 != 0);
-        while port_in(COM1 + 5) & 1 != 0 && back.len() < 32 {
-            back.push(port_in(COM1));
-        }
-        port_out(COM1 + 4, mcr);
-        port_out(COM1 + 1, ier);
-        (w, back)
-    })
-}
-
-/// Row 6's last part: `/dev/tty` and `/dev/console`, opened here through
-/// devfs, each write a `# t<word>` line with a word from no published
-/// source (§A.1-5); the serial line must carry it (a CR before the LF, or
-/// not).
+/// Row 6's last part and row 9: `/dev/tty` and `/dev/console`, opened here
+/// through devfs, are the console object, and each takes a write of
+/// `k22 <name>` between row 9's marks (see the module doc). The marks go
+/// through the learner's `serial::write_str`, the path the console's own
+/// write takes on the spine, so a mark queues behind bytes the console has
+/// already written; everything from the first mark to the newline runs with
+/// interrupts off, so nothing else in the kernel prints between them.
 fn console_writes(fs: &Fs, r: &mut Row) {
     for name in ["tty", "console"] {
-        let line = format!("# t{:08x}\n", unpublished() & 0xffff_ffff);
+        let line = format!("k22 {name}");
         let f = match quiet(|| fs.devfs.lookup(name)).and_then(|ino| FileRef::open_inode(ino, O_WRONLY as u32)) {
             Ok(f) => f,
             Err(e) => {
@@ -1933,17 +1962,26 @@ fn console_writes(fs: &Fs, r: &mut Row) {
             };
             r.fail(format_args!("{DEV_ID}: FileRef::open_inode on /dev/{name} gave an open file on {what}, not the console object"));
         }
-        let (w, back) = looped(&f, line.as_bytes());
+        let w = quiet(|| {
+            serial::write_str(WIRE_OPEN);
+            let w = f.write(line.as_bytes());
+            let mut c = Clock::new();
+            while c.ms() < WIRE_MS {
+                core::hint::spin_loop();
+            }
+            serial::write_str(WIRE_CLOSE);
+            serial::write_str("\n");
+            w
+        });
         drop(f);
-        let got: Vec<u8> = back.iter().copied().filter(|&c| c != b'\r').collect();
-        if w != Ok(line.len()) || got != line.as_bytes() {
+        if w != Ok(line.len()) {
             r.fail(format_args!(
-                "{DEV_ID}: a write of {line:?} to /dev/{name} returned {} and the console's serial line carried {:?}; expected the line itself",
+                "{DEV_ID}: a write of {line:?} to /dev/{name} returned {}; expected {}",
                 match w {
                     Ok(n) => format!("{n}"),
                     Err(e) => errno_text(e),
                 },
-                String::from_utf8_lossy(&back)
+                line.len()
             ));
         }
     }
@@ -2202,6 +2240,7 @@ fn syscall_row(fs: Option<&Fs>) {
 
 fn dents_check(fs: Option<&Fs>, mut r: Row) {
     if fs.is_some() {
+        let walks = r.wrong;
         let (lr, lw) = match out_pipe("ls /proc") {
             Ok(p) => p,
             Err(why) => {
@@ -2245,6 +2284,7 @@ fn dents_check(fs: Option<&Fs>, mut r: Row) {
             }
             Err(why) => r.fail(format_args!("{CROSS_ID}: {why}")),
         }
+        let proc_ok = r.wrong == walks;
         match run("ls /dev", "/bin/ls", &["ls", "/dev"]) {
             Ok(ran) => {
                 let want = "console\nnull\ntty\nzero\n";
@@ -2260,6 +2300,9 @@ fn dents_check(fs: Option<&Fs>, mut r: Row) {
             }
             Err(why) => r.fail(format_args!("{CROSS_ID}: {why}")),
         }
+        let dev_ok = r.wrong == walks + usize::from(!proc_ok);
+        let ls = |ok: bool| if ok { "right" } else { "wrong" };
+        r.lead = Some(format!("{walks} of 13 walks wrong, ls /proc {}, ls /dev {}", ls(proc_ok), ls(dev_ok)));
     }
     r.finish(1);
 }
@@ -2321,7 +2364,6 @@ unsafe extern "C" fn _start() -> ! {
     ktap::begin(PLAN);
     prelude();
     let fs = setup();
-    let walks = cross_row(fs.as_ref());
     cmdline_row(fs.as_ref());
     meminfo_row(fs.as_ref());
     mounts_row(fs.as_ref());
@@ -2329,6 +2371,9 @@ unsafe extern "C" fn _start() -> ! {
     dev_row(fs.as_ref());
     nonce_row(fs.as_ref());
     syscall_row(fs.as_ref());
+    // Row 1 runs last, walks then listings, so every line it prints (and
+    // any a walk prints) comes after row 8's result: in its own window.
+    let walks = cross_row(fs.as_ref());
     dents_check(fs.as_ref(), walks);
     sched::yield_now();
     quiet(ktap::end);

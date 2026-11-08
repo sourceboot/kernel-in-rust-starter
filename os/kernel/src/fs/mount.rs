@@ -19,8 +19,8 @@
 //!   but not listed.
 //! - **syscall 165**, `mount(source, target, fstype, flags, data)`: the types
 //!   a kernel can make from nothing — `"proc"` and `"devfs"`. `"ext2"` and
-//!   `"archive"` need a drive or the archive's bytes, which only whoever
-//!   booted the kernel holds, so they are mounted through `mount` and the
+//!   `"archive"` need a drive or the archive's bytes, which only the boot
+//!   code holds, so they are mounted through `mount` and the
 //!   syscall answers `-ENODEV` for them, as for any other type.
 //!
 //! The records are touched with interrupts off, like every shared table.
@@ -59,12 +59,12 @@ pub fn anon_dev() -> u64 {
 /// refusals (`-EBUSY`, `-ENOMEM`); `-EINVAL` for a relative target.
 pub fn mount(source: &str, target: &str, fstype: &str, root: InodeRef) -> Result<(), Errno> {
     let _ = (source, target, fstype, root);
-    todo!("lab 22 step 3 — mount: check the mount point, vfs::mount the root, record the line")
+    todo!("lab 22 task 2 — mount: check the mount point, vfs::mount the root, record the line")
 }
 
 /// Every mount `mount` recorded, in mount order.
 pub fn table() -> Vec<Mount> {
-    todo!("lab 22 step 8 — table: the mount records, in mount order")
+    todo!("lab 22 task 6 — table: the mount records, in mount order")
 }
 
 /// Syscall 165's work (the strings already copied in; `flags` and `data`
@@ -72,5 +72,5 @@ pub fn table() -> Vec<Mount> {
 /// `-ENODEV` for any other type; then `mount`'s checks.
 pub fn sys_mount(source: &str, target: &str, fstype: &str) -> Result<(), Errno> {
     let _ = (source, target, fstype);
-    todo!("lab 22 step 9 — sys_mount: make a /proc or a /dev for the type, then mount it")
+    todo!("lab 22 task 7 — sys_mount: make a /proc or a /dev for the type, then mount it")
 }

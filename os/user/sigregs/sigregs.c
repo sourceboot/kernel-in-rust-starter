@@ -52,14 +52,20 @@
  * handler that forges one thing rt_sigreturn returns to: (1) rsp in the
  * kernel half, with rip on a user-mode routine that exits without touching
  * the stack, so a kernel that returns to it shows as that exit; (2) rip in
- * the kernel half (a kernel that returns there takes a fault in ring 3,
- * which the vehicle sees as mm::last_kill); (3) cs and ss of ring 0 in the
- * frame's csgsfs. (1) and (2) must end with SIGSEGV; (3) must go on in
- * ring 3 with its own cs and ss, or end with SIGSEGV. Fix round 1
- * (2026-10-29) adds: (4) and (5), (1) and (2) at 0x0000800000000000, the
- * first address past the user half (non-canonical: QEMU takes the #GP for
- * (5) in ring 3, which the vehicle watches for); (6) fpstate in the kernel
- * half; (7) rt_sigreturn made by hand, no handler run, with rsp in the
+ * the kernel half (a kernel that returns there takes a #PF in ring 3 at
+ * that rip); (3) cs and ss of ring 0 in the frame's csgsfs. (1) and (2)
+ * must end with SIGSEGV; (3) must go on in ring 3 with its own cs and ss,
+ * or end with SIGSEGV. Fix round 1 (2026-10-29) adds: (4) and (5), (1)
+ * and (2) at 0x0000800000000000, the first address past the user half
+ * (non-canonical: the ring-3 fetch (5) makes there is a #GP on QEMU 10.2.1
+ * and 11.1.1 and a #PF on 8.2.2). The program cannot tell a SIGSEGV that
+ * rt_sigreturn sent from one a fault at the forged rip caused, so the
+ * vehicle watches: since 2026-10-31 (G1928) it loads, for this mode, a
+ * copy of the kernel's IDT whose #GP and #PF gates note any fault taken
+ * in ring 3 at a rip at or past 0x0000800000000000 and then go on to the
+ * kernel's own entries (ktest-32.rs, `watch`). It no longer reads
+ * mm::last_kill, which a later fault in the mode overwrote. (6) fpstate
+ * in the kernel half; (7) rt_sigreturn made by hand, no handler run, with rsp in the
  * kernel half; all four must end with SIGSEGV; (8) a reserved MXCSR bit
  * (31) in the frame's FXSAVE area: the program must go on with it clear,
  * or end with SIGSEGV; (9) SIGKILL and SIGSTOP in uc_sigmask: the SIGKILL

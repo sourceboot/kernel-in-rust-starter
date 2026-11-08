@@ -18,6 +18,9 @@
 //! (2026-10-21 17:45): `pit.ticks` has no count floor (0 ticks, or 1 with
 //! IRQ 0 still in service, is all it refuses), and `clock.monotonic`'s wait
 //! ends when the CPU has taken the chosen ticks, the PM timer only its guard.
+//! Sprint 7 #82 (2026-11-06, G2142): a refused count names the missing EOI
+//! whenever IRQ 0 is still in service with TICKS at 1 or more, so a tick that
+//! landed before the window (0 counted) reads the same cause as one inside it.
 
 #![no_std]
 #![no_main]
@@ -180,8 +183,17 @@ ktest!("pit.ticks", fn pit_ticks(t: &mut TestCtx) {
     // reload reads back above 1193 on every boot. CONTRACT appendix (10) has
     // the measurements.
     let (imr, isr, ifl) = pic_state();
-    if n == 1 && isr & 1 != 0 {
-        t.fail(format_args!("a tick arrives and is acknowledged: counted 1 in 100 ms — the first tick arrived and no other, and IRQ 0 is still in service (master ISR {isr:#04x}): the PIC is waiting for an EOI that never came"));
+    // The missing EOI is named from the PIC and TICKS, never from the window
+    // alone (2026-11-06, sprint 7 #82, G2142): a kernel without eoi(0) takes
+    // its one tick as soon as `sti` runs, so when anything delays the first
+    // row (the ladder's own bisect spin), the tick lands before the window and
+    // the window counts 0. IRQ 0 still in service with TICKS at 1 or more is
+    // that kernel, whichever side of the window its tick fell on; the count's
+    // verdict (0, or 1 in service, refused) is unchanged, only its cause.
+    let total = ticks();
+    if n <= 1 && total >= 1 && isr & 1 != 0 {
+        let stopped = if total == 1 { "the first tick arrived and no other" } else { "ticks arrived, then stopped" };
+        t.fail(format_args!("a tick arrives and is acknowledged: counted {n} in 100 ms and {total} since irq::init — {stopped}, and IRQ 0 is still in service (master ISR {isr:#04x}): the PIC is waiting for an EOI that never came (the tick handler returns without eoi(0), or eoi writes the slave's command port instead of the master's)"));
     } else if n == 0 {
         // No tick: RFLAGS.IF, the master IMR and the read-back say which part
         // is missing. The peak is read before the handler is blamed, so a

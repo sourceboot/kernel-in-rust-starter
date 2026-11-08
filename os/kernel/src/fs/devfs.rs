@@ -6,12 +6,12 @@
 //! ```text
 //! /dev/null      1:3   reads end at once (0 bytes); writes take every byte
 //! /dev/zero      1:5   reads fill the whole buffer with zeros; writes take every byte
-//! /dev/tty       5:0   the console (interface 18)
+//! /dev/tty       5:0   the console lab 09 opened
 //! /dev/console   5:1   the console
 //! ```
 //!
 //! `null` and `zero` are served here, through `read_at`/`write_at`. `tty`
-//! and `console` are not: `open` on either gives an open file on the console
+//! and `console` are not read or written through devfs: `open` on either gives an open file on the console
 //! object itself (`console::FileRef::open_inode` knows them by their device
 //! numbers), so a write through `/dev/console` and one through fd 1 are the
 //! same object's, with its `O_NONBLOCK` and its `ioctl`. Lab 26 adds `fb0`
@@ -34,7 +34,7 @@ pub struct DevFs {}
 impl DevFs {
     /// A new `/dev`, with a device number of its own (`mount::anon_dev`).
     pub fn new() -> DevFs {
-        todo!("lab 22 step 2 — DevFs::new: a /dev with a device number of its own")
+        todo!("lab 22 task 1 — DevFs::new: a /dev with a device number of its own")
     }
 }
 
@@ -47,17 +47,17 @@ impl Default for DevFs {
 impl Inode for DevFs {
     fn lookup(&self, name: &str) -> Result<InodeRef, Errno> {
         let _ = name;
-        todo!("lab 22 step 6 — DevFs::lookup: null, zero, tty, console, each a character device")
+        todo!("lab 22 task 4 — DevFs::lookup: null, zero, tty, console, each a character device")
     }
     fn read_at(&self, _off: u64, _buf: &mut [u8]) -> Result<usize, Errno> {
         Err(EISDIR)
     }
     fn getdents(&self, index: u64) -> Result<Option<DirEntry>, Errno> {
         let _ = index;
-        todo!("lab 22 step 11 — DevFs::getdents: the four devices, in order")
+        todo!("lab 22 task 8 — DevFs::getdents: the four devices, in order")
     }
     fn stat(&self) -> Stat {
-        todo!("lab 22 step 5 — DevFs::stat: a directory, 0755, on this /dev's device")
+        todo!("lab 22 task 3 — DevFs::stat: a directory, 0755, on this /dev's device")
     }
 }
 
@@ -66,7 +66,7 @@ impl Inode for DevFs {
 /// once at boot. A `/dev` lists them, and `lookup` finds them, only after
 /// this.
 pub fn probe() {
-    todo!("lab 26 step 2 — probe: which of fb0 and the input device this machine has")
+    todo!("lab 26 task 2 — probe: which of fb0 and the input device this machine has")
 }
 
 /// Lab 26: `kbd::push` hands every scancode here first, in the keyboard
@@ -75,5 +75,5 @@ pub fn probe() {
 /// the device grabbed (`EVIOCGRAB`), so the console never sees the key.
 pub fn feed(sc: u8) -> bool {
     let _ = sc;
-    todo!("lab 26 step 8 — feed: the scancode as input events; whether the device is grabbed")
+    todo!("lab 26 task 8 — feed: the scancode as input events; whether the device is grabbed")
 }

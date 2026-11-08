@@ -65,8 +65,8 @@
 //! The kernel keeps no calendar: a time written to an inode is `EPOCH`
 //! plus whole seconds of `time::now_ns()`.
 //!
-//! Fill in the bodies; keep the signatures — later labs and the course's
-//! tests use them. Add private fields and helpers as you need them.
+//! Fill in the bodies; keep the signatures — later labs use them.
+//! Add private fields and helpers as you need them.
 
 extern crate alloc;
 
@@ -135,7 +135,7 @@ impl Superblock {
     /// beyond the ones in `feature`. `-EINVAL` for anything else.
     pub fn parse(b: &[u8]) -> Result<Superblock, Errno> {
         let _ = b;
-        todo!("lab 17 step 2 — Superblock::parse: the fields at their offsets, then -EINVAL for anything this file cannot serve")
+        todo!("lab 17 task 1 — Superblock::parse: the fields at their offsets, then -EINVAL for anything this file cannot serve")
     }
 }
 
@@ -151,7 +151,7 @@ impl GroupDesc {
     /// The descriptor in the first 32 bytes of `b` (block 1).
     pub fn parse(b: &[u8]) -> GroupDesc {
         let _ = b;
-        todo!("lab 17 step 3 — GroupDesc::parse: the bitmaps' and the inode table's block numbers")
+        todo!("lab 17 task 1 — GroupDesc::parse: the bitmaps' and the inode table's block numbers")
     }
 }
 
@@ -168,42 +168,42 @@ impl Ext2 {
     /// `-EINVAL`; a failed read is the device's errno.
     pub fn mount(p: Partition) -> Result<Ext2, Errno> {
         let _ = p;
-        todo!("lab 17 step 1 — Ext2::mount: a cache over the partition, block 0's superblock checked before any other read, then block 1")
+        todo!("lab 17 task 1 — Ext2::mount: a cache over the partition, block 0's superblock checked before any other read, then block 1")
     }
 
     /// The superblock `mount` read.
     pub fn superblock(&self) -> &Superblock {
-        todo!("lab 17 step 4 — Ext2::superblock: the one mount read")
+        todo!("lab 17 task 1 — Ext2::superblock: the one mount read")
     }
 
     /// The group descriptor `mount` read.
     pub fn group(&self) -> &GroupDesc {
-        todo!("lab 17 step 5 — Ext2::group: the one mount read")
+        todo!("lab 17 task 1 — Ext2::group: the one mount read")
     }
 
     /// The root directory (inode 2), for `vfs::mount`.
     pub fn root(self: &Arc<Self>) -> Result<InodeRef, Errno> {
-        todo!("lab 17 step 6 — Ext2::root: inode 2, as an InodeRef")
+        todo!("lab 17 task 2 — Ext2::root: inode 2, as an InodeRef")
     }
 
     /// Inode `ino`, read from the inode table. `-EINVAL` for 0 or a number
     /// past `s_inodes_count`.
     pub fn inode(self: &Arc<Self>, ino: u32) -> Result<Ext2Inode, Errno> {
         let _ = ino;
-        todo!("lab 17 step 7 — Ext2::inode: entry ino - 1 of the inode table, its 128 bytes kept")
+        todo!("lab 17 task 2 — Ext2::inode: entry ino - 1 of the inode table, its 128 bytes kept")
     }
 
     /// Lab 18: `/.sboot-log`'s inode number, as `mount` found it in the
     /// root; 0 when there is none. Lab 18 grows `mount`: it finds the log's
     /// file, and hands its cache to the log (`log::attach`).
     pub fn log_inode(&self) -> u32 {
-        todo!("lab 18 step 6 — Ext2::log_inode: /.sboot-log's number, found in the root by mount (which also hands its cache to log::attach)")
+        todo!("lab 18 task 2 — Ext2::log_inode: /.sboot-log's number, found in the root by mount (which also hands its cache to log::attach)")
     }
 
     /// Lab 18, with `mount`'s cache (one line, given on the page): every
     /// change made so far, on the disk (`Cache::sync`).
     pub fn sync(&self) -> Result<(), Errno> {
-        todo!("lab 18 step 6 — Ext2::sync: every dirty buffer of the cache to the disk (one line, given on the page)")
+        todo!("lab 18 task 2 — Ext2::sync: every dirty buffer of the cache to the disk (one line, given on the page)")
     }
 }
 
@@ -216,7 +216,7 @@ pub struct Ext2Inode {}
 impl Ext2Inode {
     /// This inode's number.
     pub fn ino(&self) -> u32 {
-        todo!("lab 17 step 13 — Ext2Inode::ino: the number it was read as")
+        todo!("lab 17 task 7 — Ext2Inode::ino: the number it was read as")
     }
 
     /// The file system block that holds file block `i`: a direct pointer,
@@ -225,7 +225,7 @@ impl Ext2Inode {
     /// what a double indirect block maps.
     pub fn bmap(&self, i: u64) -> Result<u32, Errno> {
         let _ = i;
-        todo!("lab 17 step 10 — Ext2Inode::bmap: 12 direct, then the indirect block, then the double indirect")
+        todo!("lab 17 task 3 — Ext2Inode::bmap: 12 direct, then the indirect block, then the double indirect")
     }
 }
 
@@ -235,62 +235,62 @@ impl Ext2Inode {
 /// block's end.
 pub fn dir_records(block: &[u8]) -> Result<Vec<DirEntry>, Errno> {
     let _ = block;
-    todo!("lab 17 step 11 — dir_records: step by rec_len, skip inode 0, file_type as DT_*")
+    todo!("lab 17 task 3 — dir_records: step by rec_len, skip inode 0, file_type as DT_*")
 }
 
 impl Inode for Ext2Inode {
     fn lookup(&self, name: &str) -> Result<InodeRef, Errno> {
         let _ = name;
-        todo!("lab 17 step 9 — lookup: the record named `name` in this directory's blocks (-ENOTDIR, -ENOENT)")
+        todo!("lab 17 task 3 — lookup: the record named `name` in this directory's blocks (-ENOTDIR, -ENOENT)")
     }
 
     fn read_at(&self, off: u64, buf: &mut [u8]) -> Result<usize, Errno> {
         let _ = (off, buf);
-        todo!("lab 17 step 12 — read_at: block by block through bmap, up to the size; -EISDIR for a directory")
+        todo!("lab 17 task 4 — read_at: block by block through bmap, up to the size; -EISDIR for a directory")
     }
 
     fn getdents(&self, index: u64) -> Result<Option<DirEntry>, Errno> {
         let _ = index;
-        todo!("lab 20 step 1 — getdents: live record `index` of the directory, Ok(None) past the last; -ENOTDIR")
+        todo!("lab 20 task 1 — getdents: live record `index` of the directory, Ok(None) past the last; -ENOTDIR")
     }
 
     fn stat(&self) -> Stat {
-        todo!("lab 17 step 8 — stat: the inode's fields; st_blocks is i_blocks, in 512-byte units")
+        todo!("lab 17 task 2 — stat: the inode's fields; st_blocks is i_blocks, in 512-byte units")
     }
 
     fn write_at(&self, off: u64, buf: &[u8]) -> Result<usize, Errno> {
         let _ = (off, buf);
-        todo!("lab 18 step 8 — write_at: blocks allocated through direct, indirect and double indirect pointers, at most WRITE_CHUNK an operation; -EPERM for the log, -EFBIG past MAX_SIZE")
+        todo!("lab 18 task 6 — write_at: blocks allocated through direct, indirect and double indirect pointers, at most WRITE_CHUNK an operation; -EPERM for the log, -EFBIG past MAX_SIZE")
     }
 
     fn create(&self, name: &str, mode: u32) -> Result<InodeRef, Errno> {
         let _ = (name, mode);
-        todo!("lab 18 step 7 — create: a free inode (the first from s_first_ino) and a record in this directory, in one operation; -EEXIST")
+        todo!("lab 18 task 5 — create: a free inode (the first from s_first_ino) and a record in this directory, in one operation; -EEXIST")
     }
 
     fn unlink(&self, name: &str) -> Result<(), Errno> {
         let _ = name;
-        todo!("lab 19 step 2 — unlink: the record removed; at 0 links the blocks and the inode freed; -EISDIR, -EPERM for the log")
+        todo!("lab 19 task 6 — unlink: the record removed; at 0 links the blocks and the inode freed; -EISDIR, -EPERM for the log")
     }
 
     fn mkdir(&self, name: &str, mode: u32) -> Result<InodeRef, Errno> {
         let _ = (name, mode);
-        todo!("lab 20 step 2 — mkdir: . and .., 2 links and one more for this directory, the descriptor's directory count; -EEXIST")
+        todo!("lab 20 task 4 — mkdir: . and .., 2 links and one more for this directory, the descriptor's directory count; -EEXIST")
     }
 
     fn rmdir(&self, name: &str) -> Result<(), Errno> {
         let _ = name;
-        todo!("lab 20 step 3 — rmdir: only . and .. left (-ENOTEMPTY), then this directory's link and the directory count given back")
+        todo!("lab 20 task 5 — rmdir: only . and .. left (-ENOTEMPTY), then this directory's link and the directory count given back")
     }
 
     fn rename(&self, old: &str, new_dir: &dyn Inode, new: &str) -> Result<(), Errno> {
         let _ = (old, new_dir, new);
-        todo!("lab 20 step 4 — rename: within this file system (-EXDEV); a replaced target freed; a moved directory's .. and both parents' links")
+        todo!("lab 20 task 6 — rename: within this file system (-EXDEV); a replaced target freed; a moved directory's .. and both parents' links")
     }
 
     fn truncate(&self, len: u64) -> Result<(), Errno> {
         let _ = len;
-        todo!("lab 19 step 1 — truncate: the blocks past len freed, the rest of the last one zeroed; -EPERM for the log")
+        todo!("lab 19 task 3 — truncate: the blocks past len freed, the rest of the last one zeroed; -EPERM for the log")
     }
 }
 
@@ -298,6 +298,6 @@ impl Inode for Ext2Inode {
 impl ReadAt for Ext2Inode {
     fn read_at(&self, off: u64, buf: &mut [u8]) -> Result<usize, Errno> {
         let _ = (off, buf);
-        todo!("lab 17 step 14 — ReadAt::read_at: the same bytes as Inode::read_at")
+        todo!("lab 17 task 7 — ReadAt::read_at: the same bytes as Inode::read_at")
     }
 }

@@ -11,7 +11,7 @@
 //! counted, never a kill.
 //!
 //! Fill in the bodies; keep the signatures, the types and the constants —
-//! later labs and the course's tests use them.
+//! later labs use them.
 
 use crate::addr::VirtAddr;
 

@@ -5,8 +5,7 @@
 //! code32 placeholder (never loaded) · `0x20` user data (DPL 3) · `0x28` user
 //! code64 (DPL 3) · `0x30` the TSS (a 16-byte descriptor).
 //!
-//! Fill in the bodies; keep the signatures — later labs and the course's
-//! tests call them.
+//! Fill in the bodies; keep the signatures — later labs call them.
 
 use crate::addr::VirtAddr;
 

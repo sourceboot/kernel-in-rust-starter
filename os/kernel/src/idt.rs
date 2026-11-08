@@ -8,8 +8,7 @@
 //! instead of the default; the default for `int3` reports and resumes, and
 //! for everything else reports and halts.
 //!
-//! Fill in the bodies; keep the signatures — later labs and the course's
-//! tests call them.
+//! Fill in the bodies; keep the signatures — later labs call them.
 
 /// What the trampolines leave on the stack, lowest address first.
 /// `regs[0]` = r15 … `regs[14]` = rax

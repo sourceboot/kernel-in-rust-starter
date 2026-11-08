@@ -323,14 +323,32 @@ struct Row {
     id: &'static str,
     failed: bool,
     used_nonce: bool,
+    /// The W3 window rule (#74 Q3 (b)): a row whose failure lines outrun
+    /// the 8 the grader shows ends, only when it fails, on one line that
+    /// names its first wrong check and how many were wrong.
+    summed: bool,
+    wrong: usize,
+    first: Option<String>,
 }
+
+/// How much of the first wrong check's line the summary carries: the
+/// grader cuts a `#` line at 400 characters.
+const SUMMARY_CHARS: usize = 300;
 
 impl Row {
     fn new(id: &'static str) -> Row {
-        Row { id, failed: false, used_nonce: false }
+        Row { id, failed: false, used_nonce: false, summed: false, wrong: 0, first: None }
+    }
+    /// A row that ends on its summary line when it fails.
+    fn summed(id: &'static str) -> Row {
+        Row { summed: true, ..Row::new(id) }
     }
     fn fail(&mut self, why: core::fmt::Arguments) {
         self.failed = true;
+        self.wrong += 1;
+        if self.summed && self.first.is_none() {
+            self.first = Some(format!("{why}"));
+        }
         note(why);
     }
     fn expect(&mut self, cond: bool, what: &str) {
@@ -369,8 +387,19 @@ impl Row {
     }
     fn finish(mut self, n: usize) {
         if self.used_nonce && ktap::nonce().is_none() {
-            self.failed = true;
-            note(format_args!("{}: derived from the run's nonce, and this run has none", self.id));
+            let id = self.id;
+            self.fail(format_args!("{id}: derived from the run's nonce, and this run has none"));
+        }
+        if self.summed && self.failed {
+            let id = self.id;
+            let first = self.first.take().unwrap_or_default();
+            let line = first.strip_prefix(id).and_then(|l| l.strip_prefix(": ")).unwrap_or(&first);
+            let cut = match line.char_indices().nth(SUMMARY_CHARS) {
+                Some((at, _)) => format!("{}…", &line[..at]),
+                None => String::from(line),
+            };
+            let (k, s) = (self.wrong, if self.wrong == 1 { "" } else { "s" });
+            note(format_args!("{id}: first wrong: {cut}; {k} check{s} wrong in all"));
         }
         quiet(|| {
             if self.failed {
@@ -1710,7 +1739,7 @@ fn create_row(raw: &Raw, log_ino: u32) -> Second {
 // ── Row 2: txn.every.metadata.write ──────────────────────────────────────
 
 fn txn_row(raw: &Raw, control: Vec<String>, snap: &Result<BTreeMap<u64, u64>, String>) {
-    let mut r = Row::new(TXN_ID);
+    let mut r = Row::summed(TXN_ID);
     for why in control {
         r.fail(format_args!("{TXN_ID}: the log's control: {why}"));
     }
@@ -1978,7 +2007,7 @@ unsafe extern "C" fn _start() -> ! {
     let pre = pre_scan.as_ref().map_err(|e| e.clone()).and_then(|s| agree(&raw, s));
     // What every metadata block holds before the mount: row 2's last check.
     let snap = pre_scan.as_ref().map_err(|e| e.clone()).and_then(|s| snapshot(&raw, s, &prep));
-    // The log, before any mount (row 2's control): steps 1–5.
+    // The log, before any mount (row 2's control): task 1's five stubs.
     let control = log_control();
     let drive: Arc<dyn BlockDevice> = match quiet(Ata::probe) {
         Ok(a) => Arc::new(a),
