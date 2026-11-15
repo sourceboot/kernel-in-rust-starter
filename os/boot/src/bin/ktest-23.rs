@@ -28,11 +28,12 @@
 //! (letters and digits, some shifted with either shift key, a wrong key and
 //! a backspace inside it), Enter. The shell must print the word: a console
 //! that does not edit typed keys into lines fails every row but row 7. The
-//! five keys of `echo ` go in one at a time: this file prints `[key]` on the
-//! serial line before the first and after each, through the learner's own
-//! `serial::write_str` (so behind anything the console's echo has queued
-//! there), once `KEY_MS` and `KEY_TURNS` turns of its loop have passed since
-//! the key went in. A console that echoes each key as the shell's `read`
+//! five keys of `echo ` go in one at a time: this file writes `[key]` on the
+//! serial line before the first and after each, to COM1 itself through its
+//! own port I/O (never the learner's `serial::write_str`, which could drop a
+//! mark it recognised: G2076, built 2026-11-08), once `KEY_MS` and
+//! `KEY_TURNS` turns of its loop have passed since the key went in (so
+//! after anything the console's echo has queued has left). A console that echoes each key as the shell's `read`
 //! takes it puts every echo between two marks,
 //! `[key]e[key]c[key]h[key]o[key] [key]`; a key not echoed by then leaves
 //! two marks side by side. The rest of the line goes in one scancode per
@@ -206,12 +207,28 @@ const SH_MS: u64 = 100_000;
 /// §B.2-23, measured 2026-10-19); this is several times that.
 const STALL_MS: u64 = 30_000;
 
-/// What this file prints on the serial line before the first key of
-/// `echo ` and after each of its five keys, through the learner's own
-/// `serial::write_str`. No shell output, program, prompt or typed key holds
-/// it: `[`, `]` are in neither the drawn word's alphabet nor the nonce's
-/// hex, and the script types neither.
+/// What this file writes on the serial line before the first key of
+/// `echo ` and after each of its five keys — to COM1 itself, through its
+/// own port I/O (`mark`), never through the learner's `serial::write_str`
+/// (G2076, built 2026-11-08: a `write_str` that recognised the mark could
+/// drop it, and with no mark on the wire the row's `lacks` never fired). No
+/// shell output, program, prompt or typed key holds it: `[`, `]` are in
+/// neither the drawn word's alphabet nor the nonce's hex, and the script
+/// types neither.
 const KEY_MARK: &str = "[key]";
+
+/// COM1's registers, as `mark` uses them: THR (offset 0, DLAB clear), LCR
+/// (3), MCR (4), LSR (5).
+const COM1: u16 = 0x3F8;
+const LCR: u16 = COM1 + 3;
+const MCR: u16 = COM1 + 4;
+const LSR: u16 = COM1 + 5;
+
+/// How long `mark` waits, by the PM timer, for the UART to take one byte
+/// (LSR bit 5) and to finish sending the mark (LSR bit 6). QEMU's 16550
+/// sets both at once; a UART that holds either this long has stopped, and
+/// the row is failed, not passed (`mark`'s fallback).
+const UART_MS: u64 = 50;
 
 /// How long after each key of `echo ` the next mark waits, by the PM timer,
 /// and how many turns of the session's loop (each a `sched::yield_now`) it
@@ -808,7 +825,8 @@ impl Tee {
 /// `[key]` again; then the rest of the line one scancode at a time. The
 /// console's echo goes out on the serial line as the console writes it, so
 /// each key's echo is between two marks unless it came late (G1342, built
-/// 2026-11-04). Nothing here reads COM1.
+/// 2026-11-04). The marks are this file's own writes to COM1 (`mark`,
+/// G2076, built 2026-11-08); nothing here reads COM1's receive side.
 struct Typist {
     /// Scancodes pushed so far.
     typed: usize,
@@ -833,7 +851,7 @@ impl Typist {
             if self.marks > 0 && (now - self.since < KEY_MS || self.turns < KEY_TURNS) {
                 return;
             }
-            forward(KEY_MARK.as_bytes());
+            mark();
             self.marks += 1;
             if self.typed < marked {
                 // A key's make code and its break code, together.
@@ -870,6 +888,82 @@ fn forward(bytes: &[u8]) {
             }
         }
     });
+}
+
+// ── The marks, through this file's own port I/O, never the learner's ─────
+
+fn uart_in(port: u16) -> u8 {
+    let v: u8;
+    // SAFETY: an 8-bit read of a COM1 register; no memory is touched.
+    unsafe { asm!("in al, dx", out("al") v, in("dx") port, options(nomem, nostack, preserves_flags)) };
+    v
+}
+
+fn uart_out(port: u16, v: u8) {
+    // SAFETY: an 8-bit write of a COM1 register; no memory is touched.
+    unsafe { asm!("out dx, al", in("dx") port, in("al") v, options(nomem, nostack, preserves_flags)) };
+}
+
+/// Whether LSR shows `bit` within `UART_MS` by the PM timer.
+fn lsr_within(bit: u8) -> bool {
+    let start = pm();
+    let limit = UART_MS * PM_HZ / 1000;
+    loop {
+        if uart_in(LSR) & bit != 0 {
+            return true;
+        }
+        if (pm().wrapping_sub(start) & 0xff_ffff) as u64 > limit {
+            return false;
+        }
+    }
+}
+
+/// `[key]` on the serial line, written to COM1 by this file (G2076, built
+/// 2026-11-08). With interrupts off, it saves LCR and MCR, sets LCR to 8n1
+/// with the divisor latch closed and clears MCR's loopback bit (so a kernel
+/// that opened the latch or looped COM1 back while the line was typed
+/// cannot swallow the mark), writes each byte once LSR bit 5 shows the
+/// holding register empty, waits for LSR bit 6 (the transmitter empty),
+/// and puts both registers back. Nothing reads the receive side.
+///
+/// A UART that takes no byte, or does not finish, within `UART_MS` fails
+/// the row rather than skipping the mark: this file writes `[key][key]`
+/// with no wait (two marks touching are what the row `lacks`) and notes
+/// why (CONTRACT §B.2-23, "Built 2026-11-08").
+fn mark() {
+    let stuck = quiet(|| {
+        let lcr = uart_in(LCR);
+        let mcr = uart_in(MCR);
+        uart_out(LCR, 0x03);
+        uart_out(MCR, mcr & !0x10);
+        let mut stuck = None;
+        for &b in KEY_MARK.as_bytes() {
+            if !lsr_within(0x20) {
+                stuck = Some("take a byte (LSR bit 5)");
+                break;
+            }
+            uart_out(COM1, b);
+        }
+        if stuck.is_none() && !lsr_within(0x40) {
+            stuck = Some("finish sending (LSR bit 6)");
+        }
+        if stuck.is_some() {
+            for _ in 0..2 {
+                for &b in KEY_MARK.as_bytes() {
+                    uart_out(COM1, b);
+                }
+            }
+        }
+        uart_out(MCR, mcr);
+        uart_out(LCR, lcr);
+        stuck.map(|s| (s, lcr, mcr))
+    });
+    if let Some((what, lcr, mcr)) = stuck {
+        note(format_args!(
+            "{PROMPT_ID}: COM1 did not {what} within {UART_MS} ms of the test's mark (LCR 0x{lcr:02x}, MCR 0x{mcr:02x}, LSR 0x{:02x}), so the test wrote two marks side by side",
+            uart_in(LSR)
+        ));
+    }
 }
 
 /// What the shell did.

@@ -1,4 +1,4 @@
-//! `ulib` — the course's user-mode Rust crate (CONTRACT §A.8; LADDER §1).
+//! `ulib` — the course's user-mode Rust crate.
 //!
 //! Course-owned: the user-mode twin of `user/sys.h` and `user/crt0.c`, for the
 //! programs you write in `userland/` (lab 28's `init.rs`, lab 29's `sh.rs`).
@@ -27,7 +27,7 @@
 //! Every wrapper returns `Result<_, Errno>`: the kernel's `-errno` becomes
 //! `Err(Errno(n))`, whose `Display` is the name (`ENOENT`) the course's C
 //! programs print. Each syscall number carries, in a comment, the lab whose
-//! kernel arms it (§A.4); before that lab it answers `-ENOSYS` (`Errno::ENOSYS`).
+//! kernel arms it; before that lab it answers `-ENOSYS` (`Errno::ENOSYS`).
 #![no_std]
 
 use core::arch::asm;
@@ -35,9 +35,9 @@ use core::ffi::{c_char, CStr};
 use core::fmt;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-// ---- syscall numbers: x86-64 Linux, = CONTRACT §A.4 (the lab that arms each) ----
+// ---- syscall numbers: x86-64 Linux's (the lab that arms each) ----
 
-/// The syscall numbers this crate wraps (Linux's, which are §A.4's), each with
+/// The syscall numbers this crate wraps (Linux's), each with
 /// the lab whose kernel arms it. Never renumbered; later programs add rows.
 pub mod nr {
     pub const READ: usize = 0; // 09: the console returns 0 (EOF) until 23; pipes 15; files 17
@@ -50,7 +50,7 @@ pub mod nr {
     pub const LSEEK: usize = 8; // 17
     pub const MMAP: usize = 9; // 25
     pub const MUNMAP: usize = 11; // 25
-    pub const BRK: usize = 12; // 25: answers the current break; never grows (§A.4 row 12)
+    pub const BRK: usize = 12; // 25: answers the current break; never grows
     pub const RT_SIGACTION: usize = 13; // 25: stored; acted on from 31, handlers run from 32
     pub const RT_SIGPROCMASK: usize = 14; // 25
     pub const IOCTL: usize = 16; // 09: TIOCGWINSZ; TCGETS/TCSETS at 33
@@ -127,7 +127,7 @@ macro_rules! errnos {
     ($($name:ident = $n:expr),* $(,)?) => {
         impl Errno {
             $(pub const $name: Errno = Errno($n);)*
-            /// The errno's name (`"ENOENT"`), if it is one the course's refusals use (§A.6).
+            /// The errno's name (`"ENOENT"`), if it is one the course's refusals use.
             pub fn name(self) -> Option<&'static str> {
                 match self.0 { $($n => Some(stringify!($name)),)* _ => None }
             }
@@ -274,7 +274,7 @@ pub fn close(fd: i32) -> Result<()> {
     check(unsafe { syscall1(nr::CLOSE, fd as usize) }).map(drop)
 }
 
-/// x86-64 Linux's `struct stat` (§A.4: 144 bytes).
+/// x86-64 Linux's `struct stat` (144 bytes).
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
 pub struct Stat {
@@ -462,7 +462,7 @@ pub fn exit_group(code: i32) -> ! {
     }
 }
 
-/// A `wait4` status, Linux's encoding (§A.6): an exit is `code << 8`, a kill
+/// A `wait4` status, Linux's encoding: an exit is `code << 8`, a kill
 /// is the signal in the low 7 bits.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct WaitStatus(pub i32);
@@ -631,7 +631,7 @@ macro_rules! eprintln {
     ($($arg:tt)*) => { $crate::_print(2, format_args!("{}\n", format_args!($($arg)*))) };
 }
 
-// ---- derive (CONTRACT §A.2) ----
+// ---- derive ----
 // derive(nonce, id) = splitmix64(lo ^ hi ^ fnv1a64(id)): the nonce is 32 hex
 // characters = 16 bytes, lo/hi are bytes 0..8 and 8..16 read little-endian.
 // The same function as sys.h's derive() and the cockpit's ktap::derive.
@@ -662,7 +662,7 @@ pub fn splitmix64(x: u64) -> u64 {
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)
 }
-/// §A.2's derive. Check [`nonce_valid`] first: as in sys.h, a bad digit, or a
+/// The derive above. Check [`nonce_valid`] first: as in sys.h, a bad digit, or a
 /// nonce that ends early, counts as 0.
 pub fn derive(nonce: &[u8], id: &str) -> u64 {
     let (mut lo, mut hi) = (0u64, 0u64);
@@ -690,7 +690,7 @@ pub fn derive(nonce: &[u8], id: &str) -> u64 {
 
 // ---- the start: argc, argv, envp off the stack ----
 
-/// The program's arguments and environment, as `_start` found them (§A.5: rsp
+/// The program's arguments and environment, as `_start` found them (rsp
 /// points at argc, then argv[0..argc], a NULL, envp[..], a NULL).
 #[derive(Clone, Copy)]
 pub struct Args {

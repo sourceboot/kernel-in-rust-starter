@@ -1195,10 +1195,14 @@ fn uncatchable_row(sh: &mut Sh, w: [&str; 5], wp: [&str; 2]) {
             "{what} (pid {}) ended and was collected before its status could be read: SIGKILL ends it, killed by signal 9",
             p.0
         )),
-        s => r.fail(format_args!(
-            "{what} (pid {}) {} {KILL_MS} ms after `kill -9` sent it SIGKILL: no action and no mask keeps SIGKILL out (`rt_sigaction(9, <an action>)` is -EINVAL, and `rt_sigprocmask` never blocks it), so it ends the process, killed by signal 9 (status 137 to a shell)",
+        Some(s) => r.fail(format_args!(
+            "{what} (pid {}) ended as {} {dt} ticks of IRQ 0 after `kill -9` sent it SIGKILL: no action and no mask keeps SIGKILL out (`rt_sigaction(9, <an action>)` is -EINVAL, and `rt_sigprocmask` never blocks it), so it ends the process, killed by signal 9 (status 137 to a shell)",
             p.0,
-            status_text(s)
+            status_text(Some(s))
+        )),
+        None => r.fail(format_args!(
+            "{what} (pid {}) is still running {KILL_MS} ms after `kill -9` sent it SIGKILL: no action and no mask keeps SIGKILL out (`rt_sigaction(9, <an action>)` is -EINVAL, and `rt_sigprocmask` never blocks it), so it ends the process, killed by signal 9 (status 137 to a shell)",
+            p.0
         )),
     }
     // The third group: the raw calls, from `sigprobe uncatch`.
@@ -1334,10 +1338,14 @@ fn staged_row(sh: &mut Sh, n: usize, id: &'static str, job: &str, target: Target
             "{who} (pid {}), {doing}, ended and was collected before its status could be read: SIG{name}'s default action ends it, killed by signal {num}",
             p.0
         )),
-        s => r.fail(format_args!(
-            "{who} (pid {}), {doing}, {} {KILL_MS} ms after `kill -{num}` sent it SIG{name}: a signal ends {sleep} at once, and SIG{name}'s default action ends the process, killed by signal {num}",
+        Some(s) => r.fail(format_args!(
+            "{who} (pid {}), {doing}, ended as {} {dt} ticks of IRQ 0 after `kill -{num}` sent it SIG{name}: a signal ends {sleep} at once, and SIG{name}'s default action ends the process, killed by signal {num}",
             p.0,
-            status_text(s)
+            status_text(Some(s))
+        )),
+        None => r.fail(format_args!(
+            "{who} (pid {}), {doing}, is still running {KILL_MS} ms after `kill -{num}` sent it SIG{name}: a signal ends {sleep} at once, and SIG{name}'s default action ends the process, killed by signal {num}",
+            p.0
         )),
     }
     r.finish(n);

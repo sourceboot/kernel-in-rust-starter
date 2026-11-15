@@ -496,6 +496,20 @@ fn live_with(argv: &[&str]) -> Option<Pid> {
     out
 }
 
+/// The newest child of `parent` whose argv is exactly `argv`, ended or not,
+/// with how it ended.
+fn child_of(parent: Pid, argv: &[&str]) -> Option<(Pid, Option<i32>)> {
+    let mut out = None;
+    quiet(|| {
+        proc::each(|p| {
+            if p.ppid == parent && p.argv.len() == argv.len() && p.argv.iter().zip(argv).all(|(a, b)| a == b) {
+                out = Some((p.pid, p.exit));
+            }
+        })
+    });
+    out
+}
+
 /// The live child of `init` running `sh`: argv[0] `sh`, or a path ending in
 /// `/sh`, as ktest-28 counts it (CONTRACT §B.2-28).
 fn shell_of(init: Pid) -> Option<Pid> {
@@ -792,10 +806,18 @@ fn session(w: &Words) {
     let g = sh.group_ticks(2, &format!("sleep 1 & wait\necho \"{w2}=$?\"\n"), CHLD_MS, Some(CHLD_TICKS));
     let mut r = Row::new(CHLD_ID);
     if g.is_err() && sh.stopped.as_deref().is_some_and(|s| s.starts_with("group 2 printed no marker")) {
-        note(format_args!("wait did not return: no SIGCHLD, or its handler's return left the mask blocked"));
         r.fail(format_args!(
             "`sleep 1 & wait` did not return within {CHLD_TICKS} ticks of IRQ 0: ash's `wait` sleeps in rt_sigsuspend (130) until SIGCHLD, which the kernel sends a parent when its child ends, has run ash's handler, and that handler's rt_sigreturn has put back the mask its frame saved; the run ends here"
         ));
+        // What the vehicle saw, never a cause (W5 X-6): the process table
+        // shows whether the child ended, and nothing of the signal path, so
+        // a child that ended points at SIGCHLD, rt_sigsuspend or the mask,
+        // and one still running at its sleep. The last `#` line of the row.
+        match child_of(sh.pid, &["sleep", "1"]) {
+            Some((pid, Some(st))) => r.fail(format_args!("`sleep 1` (pid {}) has ended, {}, and ash's `wait` has not returned", pid.0, status_text(Some(st)))),
+            Some((pid, None)) => r.fail(format_args!("`sleep 1` (pid {}) is still running: its one-second sleep has not ended", pid.0)),
+            None => {}
+        }
         r.finish(2);
         return fail_rest(3, "not run: the session ended at row 2 (`sleep 1 & wait` did not return)");
     }

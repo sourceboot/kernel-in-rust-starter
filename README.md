@@ -7,7 +7,7 @@ pixels on the screen and a serial line you can trust, then the CPU's descriptor
 tables, its faults, the timer and the keyboard, your own frames and page tables,
 and a program running at ring 3 that talks to your kernel through Linux's own
 system-call interface. Processes, pipes, a disk, an ext2 file system that Linux's own checker, e2fsck, passes,
-and a shell come after that.
+and a shell come after that; then copy-on-write fork and unmodified Linux binaries, and last your own init, shell, signals and vi.
 
 This repo is exactly what a learner's workspace starts as: a Rust workspace that
 boots through a vendored, pinned [Limine](https://limine-bootloader.org) and hands

@@ -68,10 +68,19 @@
  * before its SYN_REPORT, and 0 after it. The first judged round that fails
  * ends the rounds. Each round prints
  *
- *   round <k> <ok|fail|early|gap|nocue> gap <us between the clock reads>
+ *   round <k> <ok|fail|early|gap|nocue> gap <us between the clock reads> wake <us> at <us>
  *
  * (`early`: F12 was in at poll(0); `gap`: over GAP_MAX_NS; `nocue`: the
- * line could not be written). `poll ok` needs at least one judged round
+ * line could not be written; `cap`: after poll(3000) returned, CLOCK_REALTIME did
+ * not move SPIN_NS in SPIN_CALLS reads, so the round is not judged, below). `wake`: in a judged round, how long after
+ * F12's press was stamped (the event's own time) poll(3000) returned, by
+ * CLOCK_REALTIME, the clock that stamps events; -1 when the round is not
+ * judged or the press was not the first event read. `at`: CLOCK_MONOTONIC,
+ * in us, when poll(3000) returned (0 when not judged). The lab 26 vehicle
+ * judges the wake (G2110): it puts the two instants on the PM timer too.
+ * Before its first read() a judged round spins until CLOCK_REALTIME is SPIN_NS
+ * past poll(3000)'s return (G2442), so a press stamped when it is read, not when
+ * it came in, reads a negative wake. `poll ok` needs at least one judged round
  * and every judged round passed. The line goes to the console, not to
  * stdout, because stdout is a pipe the test reads only when it gets the
  * CPU; the console write reaches the serial port from this program's own
@@ -111,11 +120,25 @@
 #endif
 /* How long an unjudged round waits for its F12's release. */
 #define DRAIN_MS 2000
+/* The spin (2026-11-08, sprint 8 #92c, G2442): a judged round reads no event until
+ * CLOCK_REALTIME is SPIN_NS past poll(3000)'s return. An event stamped when devfs::feed
+ * queued it is then stamped at or before the return; one stamped when it is read is
+ * stamped at least SPIN_NS after it, which the vehicle fails. A clock that has not moved
+ * SPIN_NS in SPIN_CALLS reads (about 1 s of them) leaves the round unjudged (`cap`).
+ * Measured 2026-11-08 on the mini (QEMU 11.1.1 TCG, the reference, load 4): 263330-276647
+ * reads in 100 ms of CLOCK_REALTIME, so 3000000 is about 1.1 s. */
+#define SPIN_NS 2000000LL
+#ifndef SPIN_CALLS
+#define SPIN_CALLS 3000000L
+#endif
 #define EVENTS 20
 
 static char bad[1024];
 
-static void add(char *to, size_t cap, const char *what, long got) {
+/* noinline (2026-11-08, sprint 8 #92): with the wake fields evtest grew past 9 blocks of
+ * 4 KiB; out of line, add and ns keep it at 9, so every later file of the lab 24-33
+ * images keeps its blocks (the W4/W5 window pins' linked digests, G2093-G2097). */
+__attribute__((noinline)) static void add(char *to, size_t cap, const char *what, long got) {
     size_t n = strlen(to);
     snprintf(to + n, cap - n, "%s%s %ld", n ? "; " : "", what, got);
 }
@@ -124,7 +147,7 @@ static void miss(const char *what, long got) {
     add(bad, sizeof bad, what, got);
 }
 
-static int64_t ns(clockid_t c) {
+__attribute__((noinline)) static int64_t ns(clockid_t c) {
     struct timespec t;
     clock_gettime(c, &t);
     return (int64_t)t.tv_sec * 1000000000 + t.tv_nsec;
@@ -367,7 +390,7 @@ int main(int argc, char **argv) {
         ssize_t w = write(con, cue, len);
         if (w != len) {
             miss("write to /dev/console returned", w);
-            printf("round %d nocue gap 0\n", k);
+            printf("round %d nocue gap 0 wake -1 at 0\n", k);
             break;
         }
         int64_t t1 = ns(CLOCK_MONOTONIC);
@@ -377,13 +400,25 @@ int main(int argc, char **argv) {
         if (pre != 0 || t2 - t1 > GAP_MAX_NS) {
             /* Not judged: F12 may have come before poll(3000) looked. */
             drain(fd);
-            printf("round %d %s gap %ld\n", k, pre != 0 ? "early" : "gap", gap);
+            printf("round %d %s gap %ld wake -1 at 0\n", k, pre != 0 ? "early" : "gap", gap);
             continue;
         }
         judged++;
         char rb[512] = "";
         r = ask(1, &fd, (short[]){POLLIN}, &rev, 3000);
-        int64_t waited = (ns(CLOCK_MONOTONIC) - t2) / 1000000;
+        int64_t back = ns(CLOCK_MONOTONIC), back_rt = ns(CLOCK_REALTIME);
+        long spins = 0;
+        while (ns(CLOCK_REALTIME) < back_rt + SPIN_NS)
+            if (++spins >= SPIN_CALLS) break;
+        if (spins >= SPIN_CALLS) {
+            /* Not judged: the clock did not move SPIN_NS. */
+            judged--;
+            drain(fd);
+            printf("round %d %s gap %ld wake -1 at 0\n", k, "cap", gap);
+            continue;
+        }
+        int64_t waited = (back - t2) / 1000000;
+        int64_t press = -1;
         if (r != 1 || rev != POLLIN) add(rb, sizeof rb, "poll(3000) as a key came in: revents", rev);
         if (waited >= 2000) add(rb, sizeof rb, "poll(3000) as a key came in returned after (ms)", waited);
         char in[96] = "", *ip = in;
@@ -392,7 +427,11 @@ int main(int argc, char **argv) {
             r = ask(1, &fd, (short[]){POLLIN}, &rev, i == 2 ? 1000 : 0);
             if (r != 1 || rev != POLLIN) add(rb, sizeof rb, i == 2 ? "poll(1000) as the key was released: revents" : "poll(0) before the key's next event: revents", rev);
             struct input_event e;
-            if (read(fd, &e, sizeof e) == (ssize_t)sizeof e) ip = show(ip, &e);
+            if (read(fd, &e, sizeof e) == (ssize_t)sizeof e) {
+                if (i == 0 && e.type == EV_KEY && e.code == KEY_F12 && e.value == 1)
+                    press = (int64_t)e.input_event_sec * 1000000 + e.input_event_usec;
+                ip = show(ip, &e);
+            }
         }
         if (strcmp(in, " 88+ . 88- .") != 0) {
             size_t n = strlen(rb);
@@ -400,7 +439,8 @@ int main(int argc, char **argv) {
         }
         r = ask(1, &fd, (short[]){POLLIN}, &rev, 0);
         if (r != 0) add(rb, sizeof rb, "poll(0) after F12's events: revents", rev);
-        printf("round %d %s gap %ld\n", k, rb[0] ? "fail" : "ok", gap);
+        long wake = press < 0 ? -1 : (long)(back_rt / 1000 - press);
+        printf("round %d %s gap %ld wake %ld at %ld\n", k, rb[0] ? "fail" : "ok", gap, wake, (long)(back / 1000));
         if (rb[0]) {
             size_t n = strlen(bad);
             snprintf(bad + n, sizeof bad - n, "%sround %d/%d: %s", n ? "; " : "", k, ROUNDS, rb);

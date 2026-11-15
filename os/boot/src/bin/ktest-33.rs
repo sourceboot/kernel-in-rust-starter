@@ -1172,7 +1172,7 @@ fn interactive(sh: &mut Sh, w: &Words) {
         forward(&sh.out[from..]);
         let why = if count(&sh.out[from..], p) >= 1 {
             format!(
-                "the interactive shell on the console (`exec sh -i +m` with stdin /dev/console) printed its prompt {:?} and then ended: its line editor waits for each key with poll(-1), and a poll that returns at once with nothing ready reads as the end of its input",
+                "the interactive shell on the console (`exec sh -i +m` with stdin /dev/console) printed its prompt {:?} and then ended, before any key was typed: its line editor waits for each key with poll(-1), then reads it, and a poll that answers 0, or a read that answers 0 bytes or an error, with nothing typed, ends its input",
                 w.prompt
             )
         } else {

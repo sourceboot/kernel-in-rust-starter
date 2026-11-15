@@ -44,7 +44,13 @@
 //! late one), and `echo <w2>`. `w1`, `n1` and `w2` are drawn from the nonce. If init ends,
 //! or a step does not happen within its bound, the session stops there: the
 //! rows it did not reach say what did not happen, each on its own line, and
-//! the run ends as usual.
+//! the run ends as usual. Init's end is read on every pass of every wait,
+//! after the step's own test, and wins over it (a prompt from the shell an
+//! ended init left behind is init's end), and the stop it gives quotes the
+//! last line init or its children wrote on fd 2 since the session began (or,
+//! once a typed line has been answered, since the shell's last prompt, so
+//! `cat`'s own error is never quoted as init's), so a panic's line reaches
+//! every failing row, once (W5 fix wave, sprint 8 #89, 2026-11-07: C-28-2).
 //!
 //! The seven rows, printed after the session in this order:
 //!   1 `init.nonce.line` (derived) — OUT carries exactly one line `init: key
@@ -235,13 +241,17 @@ fn errno_text(e: Errno) -> String {
     let name = match e {
         2 => "ENOENT",
         5 => "EIO",
+        7 => "E2BIG",
         8 => "ENOEXEC",
         12 => "ENOMEM",
+        13 => "EACCES",
         14 => "EFAULT",
         16 => "EBUSY",
+        17 => "EEXIST",
         19 => "ENODEV",
         20 => "ENOTDIR",
         22 => "EINVAL",
+        23 => "ENFILE",
         38 => "ENOSYS",
         _ => "?",
     };
@@ -527,6 +537,10 @@ struct Session {
     hold: Option<FileRef>,
     /// The hold's read end, until it is installed in the first shell.
     hold_r: Option<FileRef>,
+    /// Where on ERR the shell's last answered prompt left it (0 until a
+    /// typed line has been answered): what came before is the answer to a
+    /// typed line (`cat /<n1>`'s error), not init's.
+    mark: usize,
 }
 
 impl Session {
@@ -535,21 +549,20 @@ impl Session {
         self.err.pump();
     }
     /// Pumps the tee and yields until `done` holds, init ends, or `ms` pass.
+    /// Init's end is read on every pass after `done` and wins over it: a
+    /// prompt that comes after pid 1 has ended (the shell it left behind
+    /// still prompts) is init's end, not the step done.
     fn wait(&mut self, ms: u64, what: &str, mut done: impl FnMut(&mut Session) -> bool) -> Result<(), String> {
         let mut c = Clock::new();
         let from = self.err.all.len();
         loop {
             self.pump();
-            if done(self) {
-                return Ok(());
-            }
+            let ok = done(self);
             if let Some(v) = find(self.init).and_then(|r| r.exit) {
-                self.pump();
-                let last = self.err.all[from..].split(|&b| b == b'\n').filter(|l| !l.is_empty()).last().map(String::from_utf8_lossy);
-                return Err(match last {
-                    Some(l) => format!("init (pid {}) ended with {} before {what}; the last line it or its children wrote on fd 2 meanwhile: {l}", self.init.0, status_text(v)),
-                    None => format!("init (pid {}) ended with {} before {what}, and nothing came on fd 2 meanwhile", self.init.0, status_text(v)),
-                });
+                return Err(self.ended(v, what));
+            }
+            if ok {
+                return Ok(());
             }
             if c.ms() >= ms {
                 // What came on fd 2 while waiting: a prompt (fd 1 pointed
@@ -567,6 +580,20 @@ impl Session {
             sched::yield_now();
         }
     }
+    /// Why the session stops when init has ended with status `v` before
+    /// `what`: the last line init or its children wrote on fd 2 since the
+    /// session began, or since the shell's last answered prompt once a typed
+    /// line has been answered (`mark`). A panic's line comes on fd 2 just
+    /// before the exit and may fall before this wait's own start, so it is
+    /// quoted on every row; a typed line's own answer never is.
+    fn ended(&mut self, v: i32, what: &str) -> String {
+        self.pump();
+        let since = if self.mark == 0 { "" } else { " since the shell's last prompt" };
+        match self.err_since(self.mark) {
+            Some(l) => format!("init (pid {}) ended with {} before {what}; the last line it or its children wrote on fd 2{since}: {l}", self.init.0, status_text(v)),
+            None => format!("init (pid {}) ended with {} before {what}, and nothing came on fd 2{since}", self.init.0, status_text(v)),
+        }
+    }
     /// Waits for the shell's next prompt.
     fn prompt(&mut self, what: &str) -> Result<(), String> {
         self.wait(STEP_MS, what, |s| s.out.take_prompt())
@@ -581,6 +608,7 @@ impl Session {
         let (o, e) = (self.out.all.len(), self.err.all.len());
         type_line(line);
         self.prompt(&format!("the prompt after `{line}`"))?;
+        self.mark = self.err.all.len();
         let out = self.out.all[o..].to_vec();
         let err = self.err.all[e..].to_vec();
         Ok((out, err))
@@ -638,7 +666,7 @@ fn session(w: &Words, seen: &mut Seen, out_all: &mut Vec<u8>, err_all: &mut Vec<
     if init != Pid(1) {
         note(format_args!("{CMDLINE_ID}: {INIT} started as pid {}, not 1: something was started before it", init.0));
     }
-    let mut s = Session { out, err, init, hold: Some(hold_w), hold_r: Some(hold_r) };
+    let mut s = Session { out, err, init, hold: Some(hold_w), hold_r: Some(hold_r), mark: 0 };
     let r = drive(&mut s, w, seen);
     s.pump();
     *out_all = core::mem::take(&mut s.out.all);
@@ -652,12 +680,19 @@ fn drive(s: &mut Session, w: &Words, seen: &mut Seen) -> Result<(), String> {
     let init = s.init;
     let nonce = nonce_text(w);
     s.prompt("the shell's first prompt")?;
-    let sh = shells().into_iter().find(|r| r.pid != init);
-    seen.shell = sh.as_ref().map(|r| (r.pid, r.ppid));
+    // One copy of the table: the shell's parent is read in the same copy
+    // that shows init alive. An init that ended between the prompt and this
+    // copy stops the session as init's end, so a shell it left behind
+    // (parent 0) is never read as a fork that went wrong.
+    let all = procs();
+    if let Some(v) = all.iter().find(|r| r.pid == init).and_then(|r| r.exit) {
+        return Err(s.ended(v, "the shell's first prompt"));
+    }
+    let sh = all.iter().find(|r| r.pid != init && r.exit.is_none() && is_sh(&r.argv));
+    seen.shell = sh.map(|r| (r.pid, r.ppid));
     match sh {
         Some(r) => note(format_args!("{SHELL_ID}: at the first prompt, pid {} runs sh; its parent is {}", r.pid.0, r.ppid.0)),
         None => {
-            let all = procs();
             let one_sh = all.iter().find(|r| r.pid == init).is_some_and(|p| is_sh(&p.argv));
             let one_argv = all.iter().find(|r| r.pid == init).map(|p| p.argv.clone()).unwrap_or_default();
             let kids: Vec<Rec> = all.into_iter().filter(|r| r.ppid == init && r.pid != init && r.exit.is_none()).collect();
@@ -1125,9 +1160,10 @@ unsafe extern "C" fn _start() -> ! {
             if let Err(why) = mount_disk() {
                 seen.stop = Some(format!("the file systems did not mount: {why}"));
             } else {
-                let r = session(&w, &mut seen, &mut out, &mut err);
-                if let Err(why) = r {
-                    note(format_args!("init: the session stopped: {why}"));
+                // The stop is printed by every failing row (`Row::finish`),
+                // not once here as well: a line here would put init's last
+                // fd-2 line in row 1's window a third time.
+                if let Err(why) = session(&w, &mut seen, &mut out, &mut err) {
                     seen.stop = Some(why);
                 }
             }

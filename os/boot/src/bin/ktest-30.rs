@@ -18,8 +18,9 @@
 //!
 //! Lab 30's kernel work is two tasks: `Stat::lstat` (1) and syscall 6's
 //! arm, `sys_lstat` (2), which hands busybox the 144-byte `struct stat` of
-//! task 1's answer. Without task 2 every `ls`, `cp`, `mv` and `rm` prints
-//! "Function not implemented" and rows 2 and 7-9 say so.
+//! task 1's answer. Without task 2 every `ls`, `cp` and `rm` prints
+//! "Function not implemented" (busybox's `mv` asks `stat`, not `lstat`)
+//! and rows 2 and 7-9 say so.
 //!
 //! Then it starts the learner's `/bin/init <nonce>` through the learner's
 //! exec, first, so it is pid 1. Its fd 0 is a pipe this file writes the
@@ -676,7 +677,7 @@ fn expect(r: &mut Row, n: usize, got: &Result<Vec<u8>, String>, want: &str) {
 fn enosys_hint(r: &mut Row, out: &[u8]) {
     if out.windows(24).any(|w| w == b"Function not implemented") {
         r.fail(format_args!(
-            "a call answered -ENOSYS (\"Function not implemented\"): `ls`, `cp`, `mv` and `rm` ask about every name with lstat, syscall 6 (lab 30 task 2, its arm)"
+            "a call answered -ENOSYS (\"Function not implemented\"): `ls`, `cp` and `rm` ask about every name with lstat, syscall 6 (lab 30 task 2, its arm)"
         ));
     }
 }
@@ -983,7 +984,17 @@ fn session(w: &Words, bb_size: u64, base: usize) -> Vec<Option<u64>> {
                 Some(('-', 1, s, "f1")) if s == f1_size => {}
                 _ => r.fail(format_args!("`ls -l f1 /bin/sh`'s last line should show f1 with 1 link and {f1_size} bytes: {:?}", ls.last())),
             }
-            note(format_args!("{LS_ID}: {} lines; init's pid {} and the shell's {} listed in /proc", ls.len(), sh.init.0, sh.pid.0));
+            // What was found, never the passing case's text (C-30-15): `want`
+            // still holds every name `ls -l /proc` did not list.
+            let seen = |p: &str| if want.iter().any(|(n, _)| *n == p) { "missing" } else { "listed" };
+            note(format_args!(
+                "{LS_ID}: {} lines; in `ls -l /proc`, init's pid {} {} and the shell's {} {}",
+                ls.len(),
+                sh.init.0,
+                seen(&init),
+                sh.pid.0,
+                seen(&shell)
+            ));
         }
     }
     mounted_names(&mut r);

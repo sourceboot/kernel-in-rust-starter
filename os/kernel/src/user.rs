@@ -56,26 +56,24 @@ pub fn copy_to_user(dst: VirtAddr, src: &[u8]) -> Result<(), Errno> {
 
 /// Lab 31 task 2: the way back from every syscall acts on what is pending
 /// (`proc::take_signal`), and a wait a signal ended (`-ERESTARTSYS`) starts
-/// again. Lab 32 step 2 grows it: after a handler that wait restarts or
-/// answers `-EINTR`, and a signal with a handler gets its frame below the
-/// program's stack, the frame `f` returning into the handler. `nr` is the
-/// syscall's number.
+/// again. Lab 32 grows it (the handler's frame, and a restart or `-EINTR`
+/// after a handler). `nr` is the syscall's number.
 pub fn signal_return(f: &mut crate::syscall::SyscallFrame, nr: u64) {
     let _ = (f, nr);
     todo!("lab 31 task 2 — signal_return: what is pending acted on, an interrupted wait started again (lab 32: the frame pushed and the handler entered)")
 }
 
-/// Lab 32 step 1: the same, on the way back from an interrupt that came
+/// Lab 32 task 5: the same, on the way back from an interrupt that came
 /// from ring 3.
 pub fn signal_trap(tf: &mut crate::idt::TrapFrame) {
     let _ = tf;
-    todo!("lab 32 step 1 — signal_trap: the frame pushed and the handler entered, from an interrupt")
+    todo!("lab 32 task 5 — signal_trap: the frame pushed and the handler entered, from an interrupt")
 }
 
-/// Lab 32 step 3: `rt_sigreturn` (15). The registers, flags, FPU state and
+/// Lab 32 task 2: `rt_sigreturn` (15). The registers, flags, FPU state and
 /// mask the frame saved come back, and the program carries on where the
 /// signal found it. Never returns.
 pub fn sigreturn(f: &crate::syscall::SyscallFrame) -> ! {
     let _ = f;
-    todo!("lab 32 step 3 — sigreturn: everything the frame saved restored, back through iretq")
+    todo!("lab 32 task 2 — sigreturn: everything the frame saved restored, back through iretq")
 }

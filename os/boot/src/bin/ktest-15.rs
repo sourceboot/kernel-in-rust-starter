@@ -49,7 +49,11 @@
 //! began with IRQ 0 pending or in service at the PIC or within
 //! `RELOAD_SLACK` counts of a reload, is not judged and is retried, and the
 //! row needs `MIN_CLEAN_READS`, `MIN_CLEAN_BYTES` and `MIN_CLEAN_DROPS` calls
-//! no tick touched (at most `READER_MAX` reader rounds). So a call that waits
+//! no tick touched (at most `READER_MAX` reader rounds). Each call a round
+//! can tally starts through a gate (sprint 8 #102, G2145): the vehicle waits,
+//! at most `GATE_US` by the PM timer, for a start with the sleeper asleep,
+//! IRQ 0 not waiting and the count in the middle of its period, and on expiry
+//! takes the start as it is, so the taint still decides. So a call that waits
 //! for the tick to wake its sleeper (`hlt` inside the read) never counts,
 //! and a sleeper that ran during a clean call is credited to the call.
 //! Channel 0 not as lab 06 leaves it (mode 2 or 3, low byte then high,
@@ -381,14 +385,18 @@ enum Taint {
     Near,
 }
 
-/// Right after a round's call: the count latched again and the sleeper
-/// looked at (`after_wake`), in one stretch with interrupts off, so no tick
-/// falls between the latch and the look.
-fn after(t: Tid, s: u64, b: &Before, span: u32) -> (Woke, Option<Taint>) {
+/// Right after a round's call: the count latched again and, when `tally`
+/// says the round is one the row counts, the sleeper looked at
+/// (`after_wake`), in one stretch with interrupts off, so no tick falls
+/// between the latch and the look. A round `tally` declines is not looked
+/// at (`None`): it adds no interrupts-off window to the timing the row
+/// measures (sprint 8 #102; bundle 13 review item 5). Its count is still
+/// latched, so a channel 0 read above 1193 is still seen.
+fn after(t: Tid, s: u64, b: &Before, span: u32, tally: impl FnOnce() -> bool) -> (Option<Woke>, Option<Taint>) {
     quiet(|| {
         let count = pit_latch();
         let el = pm().wrapping_sub(b.pm) & 0xff_ffff;
-        let woke = after_wake(t, s);
+        let woke = if tally() { Some(after_wake(t, s)) } else { None };
         if count > 1193 || b.count > 1193 {
             PIT_ABOVE.store(true, Ordering::SeqCst);
         }
@@ -401,6 +409,103 @@ fn after(t: Tid, s: u64, b: &Before, span: u32) -> (Woke, Option<Taint>) {
         };
         (woke, taint)
     })
+}
+
+// ── The clean-start gate (sprint 8 #102 Part B, G2145; class B 2026-11-08) ─
+//
+// On a loaded host the PIT's ticks arrive late, so a round started at an
+// arbitrary moment often begins with IRQ 0 already waiting or just after a
+// reload (Near) and is never judged: 10 of 12 one-byte writes on one boot
+// beside 24 busy loops, below the clean-byte floor (G2145). The Near taint
+// is decided entirely from `before()`, read before the call, so the vehicle
+// chooses when a tallied call begins instead of discarding the round. Each
+// try reads, one after the other, whether the sleeper is asleep (`off_cpu`),
+// its slice count and `before()`, and the call follows at once when the
+// start is in the gate's band; else the vehicle spins with interrupts on
+// (yields, if the sleeper is awake, so it can go back to sleep) and tries
+// again, for at most `GATE_US` by the PM timer. On expiry the round takes
+// the last try's start as it is and `after`'s taint decides, as before the
+// gate (a kernel that keeps every start unclean gets Near every round and
+// misses the floors). Nothing judged changes: `after`, the floors and the
+// tallies are the same; the gate only picks when a call begins.
+//
+// The band (`!waiting`, count in GATE_LOW..=GATE_HIGH) is stricter than the
+// taint's own clean start: a gate that retried from a Near start under the
+// taint's predicate would accept the first count just under
+// 1193 - RELOAD_SLACK, about 250 us after a reload, the edge of the named
+// residual (a host timer callback later than RELOAD_SLACK lends a no-wakeup
+// kernel a clean round). A start in the band is at least 2 x RELOAD_SLACK
+// counts after a reload and RELOAD_SLACK counts before the next.
+//
+// The slice count is read inside each try, never before the gate: the gate
+// runs with interrupts on, so a tick's sweep may run the sleeper during it,
+// and a run counted from an older slice count would read as Raced and be
+// credited to the call.
+
+/// The longest the gate waits for a start in its band (PM timer, us).
+const GATE_US: u64 = 5000;
+/// The gate's band of channel 0 counts at the start (with IRQ 0 not waiting).
+const GATE_LOW: u16 = RELOAD_SLACK;
+const GATE_HIGH: u16 = 1193 - 2 * RELOAD_SLACK;
+/// The spin between two tries with the sleeper asleep, in PM-timer counts
+/// (about 20 us; the band is about 245 us wide in mode 2).
+const GATE_SPIN_PM: u32 = 72;
+
+/// One kind of call's gate record: calls gated, tries, tries that found the
+/// sleeper awake (the vehicle yielded), expiries, and the longest wait. Its
+/// text is the five numbers in that order, so the `#` line that carries all
+/// three kinds stays under the 400 characters guidance keeps of a line
+/// (`ktapDiagMaxRunes`, grader/ktap.go) while each kind's calls and expiries
+/// have at most 2 digits, its tries and awake tries at most 5 and its longest
+/// wait at most 7 (µs): 382 characters then, 345-349 on the boots measured.
+/// At the counters' maximums (u32, u64) it would be 499 and guidance would
+/// cut its tail (sprint 8 #102 Part C).
+#[derive(Clone, Copy, Default)]
+struct Gate {
+    calls: u32,
+    tries: u32,
+    awake: u32,
+    expired: u32,
+    longest_us: u64,
+}
+
+impl Gate {
+    fn text(&self) -> String {
+        format!(
+            "{}, {}, {}, {}, {}",
+            self.calls, self.tries, self.awake, self.expired, self.longest_us
+        )
+    }
+}
+
+/// The start of a tallied round whose sleeper is `t`: its slice count and
+/// the `before()` read, taken right after the sleeper was seen asleep, in
+/// the band when one came within `GATE_US`, else the last try's (above).
+fn gate(t: Tid, g: &mut Gate) -> (u64, Before) {
+    g.calls += 1;
+    let p0 = pm();
+    loop {
+        g.tries += 1;
+        let asleep = off_cpu(t);
+        let s = sched::slices(t);
+        let b = before();
+        let waited = u64::from(b.pm.wrapping_sub(p0) & 0xff_ffff) * 1_000_000 / PM_HZ;
+        let clean = asleep && !b.waiting && (GATE_LOW..=GATE_HIGH).contains(&b.count);
+        if clean || waited >= GATE_US {
+            g.expired += u32::from(!clean);
+            g.longest_us = g.longest_us.max(waited);
+            return (s, b);
+        }
+        if asleep {
+            let p = pm();
+            while pm().wrapping_sub(p) & 0xff_ffff < GATE_SPIN_PM {
+                core::hint::spin_loop();
+            }
+        } else {
+            g.awake += 1;
+            sched::yield_now();
+        }
+    }
 }
 
 // ── Interrupts off around what must not be cut ───────────────────────────
@@ -736,6 +841,12 @@ fn probe_pipe() {
     // (u64::MAX: not within ASLEEP_MS).
     let mut waits: Vec<u64> = Vec::new();
     let mut on_read = Tally::default();
+    let mut g_read = Gate::default();
+    // Tallied read rounds whose writer's write had returned by the round's
+    // end, by what the look at the latch saw: raced, queued, not queued,
+    // tainted (sprint 8 #102: the WROTE test moved to the latch; this is the
+    // record of how rare that round is and what it looks like).
+    let mut done_by_end = [0u32; 4];
     let mut sleeping = asleep;
     let mut c = Clock::new();
     // The PM time of the last byte read (or of the start).
@@ -751,11 +862,19 @@ fn probe_pipe() {
             break 'probe;
         }
         // One read: with the writer asleep on the full ring, it makes room.
-        let s_d = sched::slices(t);
-        let b = before();
+        // Through the start gate when the round can be tallied (G2145).
+        let late = waits.last().is_some_and(|&k| k > WAKE_BOUND);
+        let (s_d, b) = if sleeping && !late && WROTE.load(Ordering::SeqCst) == u64::MAX {
+            gate(t, &mut g_read)
+        } else {
+            (sched::slices(t), before())
+        };
         let res = r.read(&mut buf);
-        let (woke, taint) = after(t, s_d, &b, span);
-        let mut freed = false;
+        // Tallied: a read that made room while the writer slept inside its
+        // write, after a round whose writer ran within the bound. Decided
+        // inside `after`'s interrupts-off stretch, right after the latch.
+        let freed = matches!(res, Ok(n) if n > 0);
+        let (woke, taint) = after(t, s_d, &b, span, || sleeping && freed && !late && WROTE.load(Ordering::SeqCst) == u64::MAX);
         match res {
             Ok(0) => {
                 end = Some(0);
@@ -763,7 +882,6 @@ fn probe_pipe() {
             }
             Ok(n) => {
                 reads += 1;
-                freed = true;
                 last = c.ms();
                 for (k, &b) in buf[..n].iter().enumerate() {
                     if bad.is_none() && b != probe_byte(got + k) {
@@ -780,8 +898,15 @@ fn probe_pipe() {
                 }
             }
         }
-        let late = waits.last().is_some_and(|&k| k > WAKE_BOUND);
-        if sleeping && freed && !late && WROTE.load(Ordering::SeqCst) == u64::MAX {
+        if let Some(woke) = woke {
+            if WROTE.load(Ordering::SeqCst) != u64::MAX {
+                done_by_end[match (taint, woke) {
+                    (Some(_), _) => 3,
+                    (None, Woke::Raced) => 0,
+                    (None, Woke::Queued) => 1,
+                    (None, Woke::Unqueued) => 2,
+                }] += 1;
+            }
             on_read.add(woke, taint);
             if taint.is_none() && woke != Woke::Raced {
                 waits.push(yields_until_ran(t, s_d));
@@ -826,6 +951,21 @@ fn probe_pipe() {
             format!("{:?}", waits.iter().map(|&k| if k == u64::MAX { -1 } else { k as i64 }).collect::<Vec<_>>())
         },
     ));
+    // Printed only when such a round happened (it is rare; no line = 0 of
+    // each), so the usual boot prints as many `#` lines before row 7's
+    // result as before the start gate's line was added: guidance keeps the
+    // last 8 (`ktapDiagMaxLines`), and a failing boot's own lines come last
+    // (sprint 8 #102 Part C).
+    if done_by_end.iter().any(|&k| k > 0) {
+        note(format_args!(
+            "pipe probe: of the reads counted with the writer asleep inside its write when the test looked, {} ended with the write already returned ({} the writer ran during, {} in the run queue, {} not in it, {} a PIT tick touched)",
+            done_by_end.iter().sum::<u32>(),
+            done_by_end[0],
+            done_by_end[1],
+            done_by_end[2],
+            done_by_end[3],
+        ));
+    }
     if !prompt && !waits.iter().all(|&k| k <= WAKE_BOUND) {
         note(format_args!(
             "{SLEEP_ID}: a writer asleep on a full pipe did not run within {WAKE_BOUND} yields of a read making room: a read that frees space wakes the writers asleep on the pipe, so the writer runs on the next turn"
@@ -846,6 +986,8 @@ fn probe_pipe() {
     let mut ends: Vec<String> = Vec::new();
     let mut on_byte = Tally::default();
     let mut on_drop = Tally::default();
+    let mut g_byte = Gate::default();
+    let mut g_drop = Gate::default();
     while rounds < READER_MAX && (on_byte.clean() < MIN_CLEAN_BYTES || on_drop.clean() < MIN_CLEAN_DROPS) {
         let (r3, w3) = match pipe::open(0) {
             Ok(p) => p,
@@ -864,24 +1006,22 @@ fn probe_pipe() {
         if a1 {
             rq.push(quiet_window(rt));
         }
-        let s1 = sched::slices(rt);
-        let b1 = before();
+        let (s1, b1) = if a1 { gate(rt, &mut g_byte) } else { (sched::slices(rt), before()) };
         let wr = w3.write(b"x");
-        let (woke_w, taint_w) = after(rt, s1, &b1, span);
-        if a1 {
-            on_byte.add(woke_w, taint_w);
+        let (woke_w, taint_w) = after(rt, s1, &b1, span, || a1);
+        if let Some(w) = woke_w {
+            on_byte.add(w, taint_w);
         }
         let k1 = if a1 { yields_until_ran(rt, s1) } else { u64::MAX };
         let a2 = yield_until(ASLEEP_MS, || RDR_GOT.load(Ordering::SeqCst) == 1 && off_cpu(rt));
         if a2 {
             rq.push(quiet_window(rt));
         }
-        let s2 = sched::slices(rt);
-        let b2 = before();
+        let (s2, b2) = if a2 { gate(rt, &mut g_drop) } else { (sched::slices(rt), before()) };
         drop(w3);
-        let (woke_d, taint_d) = after(rt, s2, &b2, span);
-        if a2 {
-            on_drop.add(woke_d, taint_d);
+        let (woke_d, taint_d) = after(rt, s2, &b2, span, || a2);
+        if let Some(w) = woke_d {
+            on_drop.add(w, taint_d);
         }
         let k2 = if a2 { yields_until_ran(rt, s2) } else { u64::MAX };
         let _ = yield_until(100, || RDR_END.load(Ordering::SeqCst) != u64::MAX);
@@ -920,6 +1060,13 @@ fn probe_pipe() {
         fmt_t(&on_read),
         fmt_t(&on_byte),
         fmt_t(&on_drop),
+    ));
+    note(format_args!(
+        "pipe probe: the start gate before each of those calls (the sleeper asleep, IRQ 0 not waiting, channel 0's count in {GATE_LOW}..={GATE_HIGH}; at most {} ms, then the start as it was), as calls, tries, tries that found the sleeper awake, expired, longest wait in us: reads making room {}; one-byte writes {}; drops {}",
+        GATE_US / 1000,
+        g_read.text(),
+        g_byte.text(),
+        g_drop.text(),
     ));
     let woke_line = |what: &str, who: &str, t: &Tally| {
         if t.missed() > 0 {

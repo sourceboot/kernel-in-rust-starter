@@ -623,7 +623,8 @@ struct Seen {
     oracle: Pass,
     ush: Pass,
     /// `exit` in the learner's shell: it ended and the course shell's
-    /// `echo $?` printed 0, or why not.
+    /// `echo $?` printed the status its own `echo $?` showed after `x*` in
+    /// group 3, or why not.
     exit: Option<Result<(), String>>,
     /// Init's `sh` was not /bin/sh, or init ran nothing as `sh`: the whole
     /// note, init named first, then what was measured. Every row then opens

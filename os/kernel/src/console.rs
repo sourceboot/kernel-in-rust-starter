@@ -209,20 +209,30 @@ pub fn with_fds<R>(f: impl FnOnce(&mut FdTable) -> R) -> R {
     todo!("lab 09 task 3 — with_fds: one table behind a SpinLock, for now")
 }
 
-/// Lab 32 step 5: ctrl+c, from the keyboard interrupt. Every process
+/// Lab 32 task 4: ctrl+c, from the keyboard interrupt. Every process
 /// holding the console open but init (pid 1) is sent SIGINT, the input
 /// waiting is thrown away and `^C` is echoed; `true`. With no process
 /// holding the console, nothing, and `false` (ctrl+c is then a key).
 pub fn interrupt() -> bool {
-    todo!("lab 32 step 5 — interrupt: the input discarded, SIGINT to every process with the console open but pid 1")
+    todo!("lab 32 task 4 — interrupt: the input discarded, SIGINT to every process with the console open but pid 1")
 }
 
 impl Console {
     /// Lab 33 task 1: the termios `TCGETS` writes — Linux's 36-byte
     /// `struct termios` (`c_iflag`, `c_oflag`, `c_cflag`, `c_lflag`,
     /// `c_line`, `c_cc[19]`), `tc::COOKED` until a `TCSETS` replaced it.
+    /// The termios is read from the keyboard interrupt too, so take its lock
+    /// with interrupts off, as the line's (lab 23).
     pub fn tcgets(&self) -> [u8; 36] {
         todo!("lab 33 task 1 — Console::tcgets: the console's termios, Linux's 36 bytes, cooked until TCSETS changed it")
+    }
+
+    /// Lab 33 task 3: the termios's flag words and c_cc — c_iflag, c_oflag,
+    /// c_cflag, c_lflag (each little-endian, as x86 stores a u32), then
+    /// c_cc[19].
+    #[allow(dead_code)]
+    fn flags(&self) -> (u32, u32, u32, u32, [u8; 19]) {
+        todo!("lab 33 task 3 — Console::flags: tcgets() split at the figure's offsets")
     }
 
     /// Lab 33 task 2: `TCSETS` — the console's termios is now `t`, for
@@ -233,9 +243,11 @@ impl Console {
     }
 
     /// Lab 33 task 3: `read` with `ICANON` off — keys as they come, no line
-    /// and no editing: until `VMIN` bytes are there (what there is when it
-    /// is 0), CR made NL under `ICRNL`, echoed under `ECHO`; keys typed
-    /// beyond what the read takes stay in the ring.
+    /// and no editing: CR made NL under `ICRNL`, echoed under `ECHO`; keys
+    /// are taken only until `VMIN` bytes are there; with `VMIN` 0 the read
+    /// returns one key's bytes if a key was typed, 0 if not. The
+    /// keys behind them stay in the ring, and a key's bytes that do not fit
+    /// `buf` wait for the next read.
     pub fn read_raw(&self, of: &OpenFile, buf: &mut [u8]) -> Result<usize, Errno> {
         let _ = (of, buf);
         todo!("lab 33 task 3 — Console::read_raw: keys as they come, until VMIN bytes; ICRNL, ECHO; the rest stays in the ring")

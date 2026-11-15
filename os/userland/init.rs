@@ -11,7 +11,7 @@
 //!    `derive(nonce, "init.nonce.line")`;
 //! 2. mounts the two file systems the kernel only makes when asked —
 //!    `/proc` ("proc") and `/dev` ("devfs") — with `mount` (165);
-//! 3. starts the shell: `fork`, and in the child `execve("/bin/sh")`;
+//! 3. starts the shell: `fork`, and in the child exec `/bin/sh`;
 //! 4. reaps: `wait4(-1)` collects ANY child that has ended. The shell is
 //!    one; the others are orphans — a process whose parent ended before it
 //!    is handed to pid 1, and until pid 1 waits for it, it stays a zombie;
@@ -28,6 +28,9 @@
 #![no_std]
 #![no_main]
 
+// `args.get(n)` is an `Option<&CStr>`, and `ulib` does not export the type.
+#[allow(unused_imports)]
+use core::ffi::CStr;
 use ulib::*;
 
 entry!(main);
@@ -42,7 +45,7 @@ fn main(args: Args) -> i32 {
     }
 }
 
-/// Task 1: print `init: key <16 hex digits>`, `derive(argv[1], "init.nonce.line")`.
+/// Task 1: print `init: key <16 hex digits>`, `derive(<argv[1]'s bytes>, "init.nonce.line")`.
 fn hello(args: &Args) {
     let _ = args;
     todo!("lab 28 task 1 — hello: print the key line derived from the nonce in argv[1]")

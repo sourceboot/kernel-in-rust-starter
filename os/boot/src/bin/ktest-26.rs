@@ -117,8 +117,13 @@
 //!     across it, is not judged: the key may have come before the poll
 //!     looked. In a judged round `poll(3000)` must wake for the press
 //!     within 2 s with `POLLIN`, and `POLLIN` must come before each of the
-//!     four events, 0 after them. `poll ok` needs at least one judged round
-//!     and every judged round passed. The key comes through the real
+//!     four events, 0 after them. Before its first read a judged round
+//!     spins until `CLOCK_REALTIME` is 2 ms past `poll(3000)`'s return
+//!     (G2442, 2026-11-08), so a press stamped when it is read, not when it
+//!     came in, is stamped after the return; a round whose clock does not
+//!     move 2 ms in the spin's cap (about 1 s of reads, `cap`) is not
+//!     judged either. `poll ok` needs at least one judged round
+//!     and every judged round passed; this file checks the first again. The key comes through the real
 //!     interrupt, as the script's five do, so the wake is graded whether
 //!     or not this file gets the CPU while `evtest` polls (G1820). Every
 //!     round's line `evtest` did not report having written, this file
@@ -140,7 +145,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::arch::asm;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use kernel::addr::VirtAddr;
 use kernel::blk::ata::{self, Ata, BlockDevice};
@@ -958,6 +963,7 @@ fn drive(run: &mut Run) -> (u64, bool, bool) {
     let mut c = Clock::new();
     let (mut ready, mut woke, mut woke_late) = (false, false, false);
     let mut poll_at: Option<u64> = None;
+    let mut last_t = u64::MAX;
     loop {
         match run.r.read(&mut buf) {
             Ok(0) => run.open = false,
@@ -969,6 +975,11 @@ fn drive(run: &mut Run) -> (u64, bool, bool) {
             }
         }
         let has = |w: &str| has_line(&run.out, w);
+        let t = time::now_ns() / 1000;
+        if t != last_t && has("keys") {
+            last_t = t;
+            log_clock(t, c.us());
+        }
         if !ready && (has("ready") || !run.open) {
             ready = true;
             quiet(|| kernel::kprintln!("# sboot keys-ready"));
@@ -991,22 +1002,114 @@ fn drive(run: &mut Run) -> (u64, bool, bool) {
     (ms, woke, woke_late)
 }
 
+/// How long after F12's press was stamped a judged round's `poll(3000)` may
+/// return, by the smaller of the guest clock and the PM timer (G2110, class
+/// B (a), 2026-11-08): max(50 ms, 20 x the largest wake of a poll that yields
+/// and looks again, 0-1 ms), lab 22's `WIRE_MS` rule. Measured on the mini
+/// at load 6.7-192, 10 boots of each (CONTRACT §B.2-26): every honest case
+/// 0-1 ms, a poll that looks again every tick 0-3 ms, every 10 ms 0-11 ms,
+/// every 40 ms 1-39 ms (`poll-rescan-40ms`, G2361); G2110's poll that first
+/// looks 150 ms after entry 61 ms and up (`poll-delay-150-before-look`,
+/// G2360), at 400 ms 314 ms and up.
+const WAKE_MAX_MS: u64 = 50;
+
+/// The guest clock against the PM timer while `evtest` runs its F12 rounds:
+/// one (`time::now_ns` in us, PM us) pair each time this file sees the guest
+/// clock move, from the `keys` line on, so a guest-clock instant `evtest`
+/// reports can be put on the PM timer.
+const CLOCK_LOG: usize = 8192;
+static LOG_T: [AtomicU64; CLOCK_LOG] = [const { AtomicU64::new(0) }; CLOCK_LOG];
+static LOG_P: [AtomicU64; CLOCK_LOG] = [const { AtomicU64::new(0) }; CLOCK_LOG];
+static LOG_N: AtomicUsize = AtomicUsize::new(0);
+
+fn log_clock(t: u64, p: u64) {
+    let n = LOG_N.load(Ordering::Relaxed);
+    if n < CLOCK_LOG {
+        LOG_T[n].store(t, Ordering::Relaxed);
+        LOG_P[n].store(p, Ordering::Relaxed);
+        LOG_N.store(n + 1, Ordering::Relaxed);
+    }
+}
+
+/// The PM time (us) at which this file first saw the guest clock at or past
+/// `t` (us), or None when the log does not reach it.
+fn pm_at(t: u64) -> Option<u64> {
+    let n = LOG_N.load(Ordering::Relaxed);
+    (0..n).find(|&i| LOG_T[i].load(Ordering::Relaxed) >= t).map(|i| LOG_P[i].load(Ordering::Relaxed))
+}
+
 /// Round `k`'s cue, the line the script waits on before its `k`th F12.
 fn cue(k: usize) {
     quiet(|| kernel::kprintln!("# sboot poll-ready {k}/{ROUNDS}"));
 }
 
-/// `evtest`'s `round <k> <verdict> gap <us>` lines, as (k, verdict, us).
-fn rounds_of(out: &str) -> Vec<(usize, &str, u64)> {
+/// `evtest`'s `round <k> <verdict> gap <us> wake <us> at <us>` lines, as
+/// (k, verdict, gap us, wake us, at us).
+fn rounds_of(out: &str) -> Vec<(usize, &str, u64, i64, u64)> {
     out.lines()
         .filter_map(|l| {
             let w: Vec<&str> = l.split(' ').collect();
             match w.as_slice() {
-                ["round", k, v, "gap", us] => Some((k.parse().ok()?, *v, us.parse().ok()?)),
+                ["round", k, v, "gap", us, "wake", wk, "at", at] => Some((k.parse().ok()?, *v, us.parse().ok()?, wk.parse().ok()?, at.parse().ok()?)),
                 _ => None,
             }
         })
         .collect()
+}
+
+/// Each judged round's wake: how long after F12's press was stamped (the
+/// event's own time, from the learner's `devfs::feed`) `poll(3000)` returned,
+/// as (k, by the guest clock in us, by the PM timer in us). The guest clock
+/// is `evtest`'s own reading (`CLOCK_REALTIME`, the tick clock lab 06 holds
+/// to `TICKS`); the PM span is the same two guest-clock instants put on the
+/// PM timer through `CLOCK_LOG`, None when the log does not reach them.
+fn wakes_of(out: &str) -> Vec<(usize, i64, Option<i64>)> {
+    rounds_of(out)
+        .iter()
+        .filter(|r| r.1 == "ok")
+        .map(|&(k, _, _, wake, at)| {
+            let pm = (wake >= 0).then(|| pm_at(at.saturating_sub(wake as u64)).zip(pm_at(at)).map(|(a, b)| b as i64 - a as i64)).flatten();
+            (k, wake, pm)
+        })
+        .collect()
+}
+
+/// The wake each round is judged on (G2110), in us: the smaller of the guest
+/// clock's span and the PM timer's (lab 11's G1964 form). TCG under load
+/// loses ticks and never adds them, so a host that deschedules the guest
+/// shrinks the guest span; the PM half is for a burst of ticks caught up
+/// at once.
+fn judged_wake(guest: i64, pm: Option<i64>) -> i64 {
+    pm.map_or(guest, |p| guest.min(p))
+}
+
+/// Why `input.poll` fails on the wakes, or None: no round judged (a
+/// `cap` round, whose clock did not move 2 ms in evtest's spin, is
+/// inconclusive and never judged: G2442, ruled 2026-11-08 05:44), a judged
+/// round whose `poll(3000)` returned more than `WAKE_MAX_MS` after F12's
+/// press was stamped, or a press stamped after `poll` had returned, which
+/// evtest's spin makes of a press stamped when it is read.
+fn late_wake(out: &str) -> Option<String> {
+    if !rounds_of(out).iter().any(|r| r.1 == "ok") {
+        return Some(String::from("no F12 round was judged, and poll ok needs at least one"));
+    }
+    for (k, guest, pm) in wakes_of(out) {
+        let pm_text = pm.map_or(String::from("not on the PM timer's log"), |p| format!("{} ms by the PM timer", p / 1000));
+        if guest < 0 {
+            return Some(format!(
+                "round {k}/{ROUNDS}: F12's press was stamped {} ms after poll(3000) returned; an event's time is when the key came",
+                -guest / 1000
+            ));
+        }
+        if judged_wake(guest, pm) > WAKE_MAX_MS as i64 * 1000 {
+            return Some(format!(
+                "round {k}/{ROUNDS}: poll(3000) returned {} ms after F12's press was stamped ({} ms by the guest clock, {pm_text}); poll must return within {WAKE_MAX_MS} ms of a key coming in",
+                judged_wake(guest, pm) / 1000,
+                guest / 1000
+            ));
+        }
+    }
+    None
 }
 
 /// Every round's cue `evtest` did not say it wrote: a round it never
@@ -1015,7 +1118,7 @@ fn rounds_of(out: &str) -> Vec<(usize, &str, u64)> {
 fn missing_cues(out: &str) {
     let rounds = rounds_of(out);
     for k in 1..=ROUNDS {
-        if !rounds.iter().any(|&(n, v, _)| n == k && v != "nocue") {
+        if !rounds.iter().any(|&(n, v, ..)| n == k && v != "nocue") {
             cue(k);
         }
     }
@@ -1029,7 +1132,7 @@ fn rounds_fact(out: &str) -> String {
         return format!("none of the {ROUNDS} F12 rounds ran");
     }
     let n = |v: &str| rounds.iter().filter(|r| r.1 == v).count();
-    let (ok, fail, early, gap) = (n("ok"), n("fail"), n("early"), n("gap"));
+    let (ok, fail, early, gap, cap) = (n("ok"), n("fail"), n("early"), n("gap"), n("cap"));
     let mut s = format!("F12 rounds: {} of {ROUNDS} judged, {ok} passed", ok + fail);
     if early > 0 {
         s += &format!("; {early} not judged as poll(0) on event0 did not return 0");
@@ -1037,6 +1140,9 @@ fn rounds_fact(out: &str) -> String {
     if gap > 0 {
         let most = rounds.iter().filter(|r| r.1 == "gap").map(|r| r.2).max().unwrap_or(0);
         s += &format!("; {gap} not judged as CLOCK_MONOTONIC moved up to {} us across poll(0)", most);
+    }
+    if cap > 0 {
+        s += &format!("; {cap} not judged as CLOCK_REALTIME did not move 2 ms past poll(3000)'s return in about 1 s of reads");
     }
     s
 }
@@ -1157,6 +1263,16 @@ fn input_rows() {
             }
             if let Some(why) = expect_line(&run, "poll", "poll ok") {
                 poll.fail(format_args!("{POLL_ID}: {}; {why}", rounds_fact(&out)));
+            }
+            let wakes = wakes_of(&out);
+            if !wakes.is_empty() {
+                let each: Vec<String> = wakes.iter().map(|&(k, g, p)| format!("round {k} {}/{}", g / 1000, p.map_or(String::from("?"), |p| format!("{}", p / 1000)))).collect();
+                poll.info(format_args!("{POLL_ID}: F12 wakes, ms after the press was stamped (guest clock/PM timer): {}", each.join(", ")));
+            }
+            if line_of(&out, "poll") == Some("poll ok") {
+                if let Some(why) = late_wake(&out) {
+                    poll.fail(format_args!("{POLL_ID}: {}; {why}", rounds_fact(&out)));
+                }
             }
             keys.info(format_args!("{KEYS_ID}: {}", ended(&run).unwrap_or_else(|| String::from("/bin/evtest exited 0"))));
             // evtest writes each round's cue itself, just before its poll; a
