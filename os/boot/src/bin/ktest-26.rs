@@ -125,7 +125,15 @@
 //!     judged either. `poll ok` needs at least one judged round
 //!     and every judged round passed; this file checks the first again. The key comes through the real
 //!     interrupt, as the script's five do, so the wake is graded whether
-//!     or not this file gets the CPU while `evtest` polls (G1820). Every
+//!     or not this file gets the CPU while `evtest` polls (G1820). The wake
+//!     is judged twice: from the press's own stamp, and from the moment the
+//!     CPU took F12's keyboard interrupt, which this file stamps itself on a
+//!     borrowed IDT before the kernel's handler runs (2026-11-17, sprint 10
+//!     #147, G2363: an arrival time the learner's code does not produce), so
+//!     a kernel that feeds or stamps the key late, while the CPU takes its
+//!     interrupt on time, cannot hide a late poll. Not closed: a kernel that
+//!     holds the interrupt back (IRQ 1 masked at the PIC until its late look,
+//!     G2570), which moves when the CPU takes it. Every
 //!     round's line `evtest` did not report having written, this file
 //!     prints itself, last, so the script runs out.
 //!
@@ -144,7 +152,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::arch::asm;
+use core::arch::{asm, naked_asm};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use kernel::addr::VirtAddr;
@@ -262,6 +270,150 @@ impl Clock {
 
 fn ticks() -> u64 {
     time::TICKS.load(Ordering::Relaxed)
+}
+
+// ── IRQ 1's arrivals, stamped by this file (2026-11-17, #147, G2363) ─────
+// While `evtest` runs, the vehicle borrows the IDT (as ktest-06's `pic.eoi`
+// probe does: every gate of the kernel's loaded table copied, the copy
+// loaded, the kernel's table only read) and points IRQ 1's gate at
+// `key_entry`: the PM timer and `TICKS` are recorded, then the CPU continues
+// at the kernel's own IRQ 1 entry with its frame and every general register
+// as the CPU left them (`key_entry` clears DF for the call, as the SysV ABI
+// asks, and does not set it back: the kernel's handler starts with DF clear,
+// and its iretq restores the interrupted code's RFLAGS). Each F12 round's
+// press is then dated by when the CPU took its interrupt, not by the stamp
+// the kernel's `feed` gives it: a kernel that buffers the scancode and feeds
+// it at its poll's late look stamps the press at that look, and so does a
+// stamp dated late on purpose; neither moves this one (lazy-feed-at-late-look:
+// 323-393 ms after the interrupt, measured 2026-11-17 at load 5.6-8.8). What
+// it does not see is a kernel that delays the interrupt itself: IRQ 1 masked
+// at the PIC until the late look has the CPU take it then (G2570, open).
+
+/// IRQ 1 deliveries recorded (at most `ARRIVALS`; the script's keys make 18).
+const ARRIVALS: usize = 64;
+static ARR_N: AtomicUsize = AtomicUsize::new(0);
+/// The PM timer's raw 24-bit count at each delivery.
+static ARR_PM: [AtomicU64; ARRIVALS] = [const { AtomicU64::new(0) }; ARRIVALS];
+/// The kernel's `TICKS` at each delivery.
+static ARR_TK: [AtomicU64; ARRIVALS] = [const { AtomicU64::new(0) }; ARRIVALS];
+/// Each delivery on `drive`'s clock (us), once `drive` has seen it.
+static ARR_US: [AtomicU64; ARRIVALS] = [const { AtomicU64::new(0) }; ARRIVALS];
+/// The kernel's own IRQ 1 entry, from its gate: where `key_entry` goes.
+static KEY_CHAIN: AtomicU64 = AtomicU64::new(0);
+/// The borrowed table.
+static KEY_IDT: [[AtomicU64; 2]; 256] = [const { [const { AtomicU64::new(0) }; 2] }; 256];
+/// IRQ 1 deliveries the rubric's `[[script]]` makes before F12's first round:
+/// `k`, `e`, `y` and `esc` two each (a make and a break, one byte, one
+/// interrupt each), `up` four (`E0 48`, `E0 C8`). Every byte is its own
+/// delivery: QEMU's i8042 raises IRQ 1 again for each byte left after a read,
+/// and its 8259 keeps an edge latched until it is delivered, so a handler
+/// that drains the controller in one interrupt still gets one per byte. Round
+/// k's F12 is then deliveries `KEYS_IRQS + 2(k-1)` (the make) and the one
+/// after it (the break, QMP's 50 ms hold later). Picked by order, no
+/// scheduling moves it (G2571). The guest owns the IRQ stream, though: an
+/// added delivery (`int`, or the i8042's 0xD2 command) moves the pick
+/// earlier, and a removed one (a masked IRQ 1 merging two bytes into one
+/// delivery) moves it later, onto the break (G2570's class).
+const KEYS_IRQS: usize = 12;
+
+#[repr(C, packed)]
+struct Dtr {
+    limit: u16,
+    base: u64,
+}
+
+/// Called from `key_entry` with interrupts off (an interrupt gate).
+extern "C" fn key_arrived() {
+    let n = ARR_N.load(Ordering::Relaxed);
+    if n < ARRIVALS {
+        ARR_PM[n].store(pm() as u64, Ordering::Relaxed);
+        ARR_TK[n].store(ticks(), Ordering::Relaxed);
+        ARR_N.store(n + 1, Ordering::Release);
+    }
+}
+
+/// The recording gate: saves the registers a call may clobber, calls
+/// `key_arrived`, restores them and jumps to the kernel's IRQ 1 entry. On
+/// entry rsp is 8 mod 16 (the CPU's five words); nine pushes align the call.
+#[unsafe(naked)]
+extern "C" fn key_entry() {
+    naked_asm!(
+        "push rax", "push rcx", "push rdx", "push rsi", "push rdi",
+        "push r8", "push r9", "push r10", "push r11",
+        "cld",
+        "call {f}",
+        "pop r11", "pop r10", "pop r9", "pop r8",
+        "pop rdi", "pop rsi", "pop rdx", "pop rcx", "pop rax",
+        "jmp qword ptr [rip + {c}]",
+        f = sym key_arrived,
+        c = sym KEY_CHAIN,
+    )
+}
+
+/// Load a copy of the kernel's IDT whose IRQ 1 gate is `key_entry`; the
+/// kernel's IDTR to give back, or None (nothing loaded) when the kernel's
+/// IRQ 1 gate is not present.
+fn hook_keys() -> Option<Dtr> {
+    let mut old = Dtr { limit: 0, base: 0 };
+    let mut hooked = false;
+    quiet(|| {
+        // SAFETY: sidt stores 10 bytes into `old`.
+        unsafe { asm!("sidt [{}]", in(reg) &mut old, options(nostack, preserves_flags)) };
+        let (base, limit) = (old.base, old.limit as usize);
+        for (v, g) in KEY_IDT.iter().enumerate() {
+            let (lo, hi) = if v * 16 + 15 <= limit {
+                // SAFETY: the gate lies inside the loaded IDT's limit; a read.
+                unsafe {
+                    let p = (base as *const u64).add(v * 2);
+                    (core::ptr::read_volatile(p), core::ptr::read_volatile(p.add(1)))
+                }
+            } else {
+                (0, 0)
+            };
+            g[0].store(lo, Ordering::Relaxed);
+            g[1].store(hi, Ordering::Relaxed);
+        }
+        let v = irq::IRQ_BASE as usize + 1;
+        let (lo, hi) = (KEY_IDT[v][0].load(Ordering::Relaxed), KEY_IDT[v][1].load(Ordering::Relaxed));
+        if lo >> 47 & 1 == 1 {
+            KEY_CHAIN.store((lo & 0xffff) | ((lo >> 48) & 0xffff) << 16 | hi << 32, Ordering::Relaxed);
+            let h = key_entry as extern "C" fn() as usize as u64;
+            KEY_IDT[v][0].store((h & 0xffff) | (lo & 0x0000_ffff_ffff_0000) | ((h >> 16) & 0xffff) << 48, Ordering::Relaxed);
+            KEY_IDT[v][1].store(h >> 32, Ordering::Relaxed);
+            let new = Dtr { limit: 256 * 16 - 1, base: KEY_IDT.as_ptr() as u64 };
+            // SAFETY: the copy holds every gate of the kernel's table, with
+            // IRQ 1's continuing at the kernel's own entry; interrupts are off
+            // until `quiet` returns.
+            unsafe { asm!("lidt [{}]", in(reg) &new, options(readonly, nostack, preserves_flags)) };
+            hooked = true;
+        }
+    });
+    hooked.then_some(old)
+}
+
+/// Load the kernel's own IDTR back, as `hook_keys` saved it.
+fn unhook_keys(old: &Dtr) {
+    // SAFETY: the kernel's own IDTR, as sidt stored it.
+    quiet(|| unsafe { asm!("lidt [{}]", in(reg) old, options(readonly, nostack, preserves_flags)) });
+}
+
+/// Put every delivery recorded since `seen` on `c` (the 24-bit count read
+/// back from `c`'s own last reading; `drive` calls this every pass, far more
+/// often than the 4.7 s the count takes to wrap).
+fn arrivals_on(c: &mut Clock, seen: &mut usize) {
+    let n = ARR_N.load(Ordering::Acquire).min(ARRIVALS);
+    while *seen < n {
+        let raw = ARR_PM[*seen].load(Ordering::Relaxed) as u32;
+        let now = c.us();
+        let back = (c.last.wrapping_sub(raw) & 0xff_ffff) as u64 * 1_000_000 / PM_HZ;
+        ARR_US[*seen].store(now.saturating_sub(back), Ordering::Relaxed);
+        *seen += 1;
+    }
+}
+
+/// `TICKS` as `time::now_ns` reads it, in us.
+fn tick_us(t: u64) -> i64 {
+    (t as u128 * irq::PIT_DIVISOR as u128 * 1_000_000 / irq::PIT_HZ as u128) as i64
 }
 
 // ── Interrupts off around what must not be cut ───────────────────────────
@@ -964,7 +1116,9 @@ fn drive(run: &mut Run) -> (u64, bool, bool) {
     let (mut ready, mut woke, mut woke_late) = (false, false, false);
     let mut poll_at: Option<u64> = None;
     let mut last_t = u64::MAX;
+    let mut seen = 0usize;
     loop {
+        arrivals_on(&mut c, &mut seen);
         match run.r.read(&mut buf) {
             Ok(0) => run.open = false,
             Ok(n) => run.out.extend_from_slice(&buf[..n]),
@@ -997,6 +1151,7 @@ fn drive(run: &mut Run) -> (u64, bool, bool) {
         }
         sched::yield_now();
     }
+    arrivals_on(&mut c, &mut seen);
     let ms = c.ms();
     let _ = yield_until(500, || exit_of(run.pid).is_some());
     (ms, woke, woke_late)
@@ -1074,6 +1229,36 @@ fn wakes_of(out: &str) -> Vec<(usize, i64, Option<i64>)> {
         .collect()
 }
 
+/// Each judged round's wake from F12's keyboard interrupt (G2363's closer,
+/// 2026-11-17): how long after the CPU took the round's key interrupt
+/// `poll(3000)` returned, as (k, by the guest clock in us, by the PM timer in
+/// us), or (k, None) when that interrupt did not come at or before the
+/// return. Round k's interrupt is delivery `KEYS_IRQS + 2(k-1)`, by order
+/// (G2571, 2026-11-17: until then the first delivery after this file saw
+/// `evtest`'s line before the round, which a kernel that keeps this file off
+/// the CPU moved onto F12's break). The guest span is `at` less the
+/// interrupt's `TICKS`; the PM span puts `at` on the PM timer as `wakes_of`
+/// does.
+fn key_wakes_of(out: &str) -> Vec<(usize, Option<(i64, Option<i64>)>)> {
+    let n = ARR_N.load(Ordering::Acquire).min(ARRIVALS);
+    rounds_of(out)
+        .iter()
+        .filter(|r| r.1 == "ok")
+        .map(|&(k, _, _, _, at)| {
+            let at = at as i64;
+            let i = KEYS_IRQS + 2 * (k.max(1) - 1);
+            let span = (i < n)
+                .then(|| tick_us(ARR_TK[i].load(Ordering::Relaxed)))
+                .filter(|&t| t <= at)
+                .map(|t| {
+                    let pm = pm_at(at as u64).map(|p| p as i64 - ARR_US[i].load(Ordering::Relaxed) as i64);
+                    (at - t, pm)
+                });
+            (k, span)
+        })
+        .collect()
+}
+
 /// The wake each round is judged on (G2110), in us: the smaller of the guest
 /// clock's span and the PM timer's (lab 11's G1964 form). TCG under load
 /// loses ticks and never adds them, so a host that deschedules the guest
@@ -1104,6 +1289,21 @@ fn late_wake(out: &str) -> Option<String> {
         if judged_wake(guest, pm) > WAKE_MAX_MS as i64 * 1000 {
             return Some(format!(
                 "round {k}/{ROUNDS}: poll(3000) returned {} ms after F12's press was stamped ({} ms by the guest clock, {pm_text}); poll must return within {WAKE_MAX_MS} ms of a key coming in",
+                judged_wake(guest, pm) / 1000,
+                guest / 1000
+            ));
+        }
+    }
+    for (k, span) in key_wakes_of(out) {
+        let Some((guest, pm)) = span else {
+            return Some(format!(
+                "round {k}/{ROUNDS}: F12's keyboard interrupt (IRQ 1, vector IRQ_BASE + 1, the round's make) had not reached the CPU when poll(3000) returned, yet it returned with F12"
+            ));
+        };
+        if judged_wake(guest, pm) > WAKE_MAX_MS as i64 * 1000 {
+            let pm_text = pm.map_or(String::from("not on the PM timer's log"), |p| format!("{} ms by the PM timer", p / 1000));
+            return Some(format!(
+                "round {k}/{ROUNDS}: poll(3000) returned {} ms after F12's keyboard interrupt came in ({} ms by the guest clock, {pm_text}), whenever the press was stamped; poll must return within {WAKE_MAX_MS} ms of a key coming in",
                 judged_wake(guest, pm) / 1000,
                 guest / 1000
             ));
@@ -1185,7 +1385,12 @@ fn input_rows() {
             }
         }
         Ok(mut run) => {
+            // IRQ 1's arrivals are recorded while evtest runs (G2363).
+            let hooked = hook_keys();
             let (_, woke, woke_late) = drive(&mut run);
+            if let Some(old) = &hooked {
+                unhook_keys(old);
+            }
             if let Some(why) = expect_line(&run, "keys", KEYS_LINE) {
                 keys.fail(format_args!("{KEYS_ID}: {why}"));
             }
@@ -1267,7 +1472,18 @@ fn input_rows() {
             let wakes = wakes_of(&out);
             if !wakes.is_empty() {
                 let each: Vec<String> = wakes.iter().map(|&(k, g, p)| format!("round {k} {}/{}", g / 1000, p.map_or(String::from("?"), |p| format!("{}", p / 1000)))).collect();
-                poll.info(format_args!("{POLL_ID}: F12 wakes, ms after the press was stamped (guest clock/PM timer): {}", each.join(", ")));
+                let keyed: Vec<String> = key_wakes_of(&out)
+                    .iter()
+                    .map(|&(k, s)| match s {
+                        Some((g, p)) => format!("round {k} {}/{}", g / 1000, p.map_or(String::from("?"), |p| format!("{}", p / 1000))),
+                        None => format!("round {k} none"),
+                    })
+                    .collect();
+                poll.info(format_args!(
+                    "{POLL_ID}: F12 wakes, ms after the press was stamped (guest clock/PM timer): {}; after its key interrupt: {}",
+                    each.join(", "),
+                    keyed.join(", ")
+                ));
             }
             if line_of(&out, "poll") == Some("poll ok") {
                 if let Some(why) = late_wake(&out) {
