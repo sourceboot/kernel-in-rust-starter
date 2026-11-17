@@ -58,7 +58,10 @@
 //! and a sleeper that ran during a clean call is credited to the call.
 //! Channel 0 not as lab 06 leaves it (mode 2 or 3, low byte then high,
 //! peaking in 1100..=1193), before the rounds or after them, or any latch
-//! above 1193, fails the row: it cannot tell then. Last, on a pipe of its
+//! above 1193, fails the row: it cannot tell then; so does a check the host
+//! kept off the CPU (no run of back-to-back latches over a whole period by
+//! 250 ms; sprint 9 #115, G2148), whose line says the host did not run it,
+//! never that the PIT is set up wrong. Last, on a pipe of its
 //! own with no task asleep on it, the vehicle has helper tasks fill it —
 //! 4096 bytes, then 512 at a time, as many as a first pipe of its own took
 //! before a write waited, whatever the ring's length (G2058, 2026-11-06) —
@@ -70,8 +73,10 @@
 //! (fix round 3): whenever a sleeper has nothing to wake it — the writer on a
 //! full ring the vehicle is not reading, a reader on an empty pipe no one
 //! writes — the vehicle yields `QUIET` times, and the sleeper may be given at
-//! most one slice plus one per PIT tick the window spans by the PM timer
-//! (G1166: no cap). A sweep that puts sleepers back on yields often enough
+//! most one slice per PIT tick the window crossed, counted from channel 0's
+//! latched count at its two ends and its PM-timer length, plus one for the
+//! tick whose reload fell just before the window and is handled inside it
+//! (G1166: no cap; G2401, sprint 9 #131: crossed, not spanned). A sweep that puts sleepers back on yields often enough
 //! to meet `WAKE_BOUND` runs the sleeper at least eight times in a window; a
 //! sweep on the tick, beside real wakeups, runs it at most once per tick and
 //! is accepted (B15). And right after each of those wake events (the read, the
@@ -234,7 +239,8 @@ const RELOAD_SLACK: u16 = 300;
 /// times in it, whatever its phase.
 const QUIET: u64 = 8 * (WAKE_BOUND + 1);
 /// The course's PIT rate (lab 06: 1,193,182 Hz input, reload 1193), the
-/// vehicle's own copy: a window's ticks come from its PM-timer length.
+/// vehicle's own copy: a window's ticks come from its PM-timer length and
+/// channel 0's latched count at its two ends.
 const PIT_INPUT_HZ: u64 = 1_193_182;
 const PIT_RELOAD: u64 = 1193;
 
@@ -321,17 +327,55 @@ fn irq0_waiting() -> bool {
 
 /// One PIT period (1193 input clocks) in PM-timer counts.
 const PIT_PM: u32 = (PM_HZ * PIT_RELOAD / PIT_INPUT_HZ) as u32;
+/// `pit_check`'s bounds by the PM timer (sprint 9 #115, G2148): it samples
+/// for at least `PIT_MIN_PM` (2 ms) and at most `PIT_CAP_PM` (250 ms; 50
+/// until 2026-11-15, which a loaded host's descheduled vCPU could use up with
+/// a handful of latches).
+const PIT_MIN_PM: u32 = 2 * PIT_PM;
+const PIT_CAP_PM: u32 = 250 * PIT_PM;
+/// Two latches are back to back when the PM timer moved at most this much
+/// from the start of the first to the end of the second (about 30 us): less
+/// than the time channel 0's count spends in 1100..=1193 each time round
+/// (about 79 us in mode 2, 39 us in mode 3, where it drops 2 a clock), so
+/// back-to-back latches cannot step over that band.
+const PIT_LINK_PM: u32 = (PM_HZ * 30 / 1_000_000) as u32;
+/// Back-to-back latches over this much PM time span a whole count cycle and
+/// the band's dwell after it (one period and an eighth), so channel 0 as lab
+/// 06 leaves it shows a count in 1100..=1193 among them.
+const PIT_SPAN_PM: u32 = PIT_PM + PIT_PM / 8;
+
+/// Why `pit_check` did not accept channel 0.
+enum PitFail {
+    /// The read-back or the latched counts show channel 0 not as lab 06
+    /// leaves it: back-to-back latches over a whole cycle missed the top band
+    /// or never moved, the mode or the access is another, or a count read
+    /// above 1193.
+    Setup(String),
+    /// Too few latches to tell: by the cap no run of back-to-back latches
+    /// spanned a cycle, and the ones taken never peaked in the band and moved.
+    /// The host kept the vCPU off its CPU between them; nothing here is the
+    /// kernel's.
+    Host(String),
+}
 
 /// Channel 0 as lab 06 leaves it, or what it reads instead: mode 2 or 3 by
-/// the read-back (command 0xe2), low byte then high, and a latched count
-/// that moves and peaks in 1100..=1193: sampled for at least 2 ms, and on
-/// until a sample lands in that top band or 50 ms have passed (a loaded
-/// host deschedules the guest between latches, so 2 ms can hold only a
-/// handful of samples; a reload below 1100 never reaches the band and
-/// fails at 50 ms, one above 1193 reads above it). Returns how long one
-/// reload interval lasts in PM counts: a period in mode 2, half of one in
-/// mode 3 (whose count reloads twice a period).
-fn pit_check() -> Result<u32, String> {
+/// the read-back (command 0xe2), low byte then high, and a latched count that
+/// moves and peaks in 1100..=1193. Each latch is taken with interrupts off
+/// and stamped by the PM timer just before and just after; between latches
+/// interrupts are as the caller has them (on: the vehicle's ticks run during
+/// the check, none is held back). It stops as soon as the latches have shown
+/// it, after at least 2 ms (a peak in the band and a lower count beside it:
+/// one latch is not a moving count, and a vCPU descheduled for 10 ms after
+/// its first latch showed only that one, G2148); or as soon as back-to-back
+/// latches have spanned a whole cycle with none in the band since the last
+/// one there (a reload below 1100, or a channel reprogrammed fast between
+/// short spells at 1193, shows it within about a millisecond at rest); or at
+/// 250 ms by the PM timer. At the cap, a check whose back-to-back latches
+/// never spanned a cycle was under-sampled: the host did not run it, and it
+/// says so (`PitFail::Host`), never that the PIT is set up wrong. Returns how
+/// long one reload interval lasts in PM counts: a period in mode 2, half of
+/// one in mode 3 (whose count reloads twice a period).
+fn pit_check() -> Result<u32, PitFail> {
     let status = quiet(|| {
         outb(0x43, 0xe2);
         inb(0x40)
@@ -339,26 +383,64 @@ fn pit_check() -> Result<u32, String> {
     let mode = (status >> 1) & 7;
     let access = (status >> 4) & 3;
     let (mut low, mut peak, mut above) = (u16::MAX, 0u16, false);
+    let mut latches = 0u32;
+    // The run of back-to-back latches: the previous latch's start, the end of
+    // the run's first latch, the end of its last latch in the band (or of its
+    // first), and the longest run's span.
+    let mut prev: Option<u32> = None;
+    let (mut first, mut since, mut longest) = (0u32, 0u32, 0u32);
+    let mut blind = false;
     let p0 = pm();
-    loop {
-        let el = pm().wrapping_sub(p0) & 0xff_ffff;
-        if el >= 50 * PIT_PM || (el >= 2 * PIT_PM && peak >= 1100) {
-            break;
-        }
-        let c = quiet(pit_latch);
+    let el = loop {
+        let (t, c, u) = quiet(|| {
+            let t = pm();
+            let c = pit_latch();
+            (t, c, pm())
+        });
+        latches += 1;
         low = low.min(c);
         peak = peak.max(c);
         above |= c > 1193;
-    }
-    let ms = (pm().wrapping_sub(p0) & 0xff_ffff) / PIT_PM;
-    if !(mode & 3 == 2 || mode & 3 == 3) || access != 3 || above || peak < 1100 || low == peak {
-        Err(format!("mode {mode}, access {access}, its latched count {low}..{peak} over {ms} ms"))
+        if prev.is_some_and(|p| u.wrapping_sub(p) & 0xff_ffff <= PIT_LINK_PM) {
+            longest = longest.max(t.wrapping_sub(first) & 0xff_ffff);
+            if c >= 1100 {
+                since = u;
+            } else if t.wrapping_sub(since) & 0xff_ffff >= PIT_SPAN_PM {
+                blind = true;
+            }
+        } else {
+            first = u;
+            since = u;
+        }
+        prev = Some(t);
+        let el = u.wrapping_sub(p0) & 0xff_ffff;
+        if blind || el >= PIT_CAP_PM || (el >= PIT_MIN_PM && peak >= 1100 && low < peak) {
+            break el;
+        }
+    };
+    let ms = el / PIT_PM;
+    let seen = format!("mode {mode}, access {access}, its latched count {low}..{peak} over {ms} ms");
+    if !(mode & 3 == 2 || mode & 3 == 3) || access != 3 || above || blind {
+        Err(PitFail::Setup(seen))
+    } else if peak < 1100 || low == peak {
+        if longest >= PIT_SPAN_PM {
+            Err(PitFail::Setup(seen))
+        } else {
+            Err(PitFail::Host(format!(
+                "in {ms} ms the test latched channel 0's count {latches} times, never back to back over a whole period ({} us at most), reading {low}..{peak}",
+                u64::from(longest) * 1_000_000 / PM_HZ
+            )))
+        }
     } else if mode & 3 == 3 {
         Ok(PIT_PM / 2)
     } else {
         Ok(PIT_PM)
     }
 }
+
+/// The tail of an under-sampled `pit_check`'s line (sprint 9 #115, G2148):
+/// what it says is the host's, never the kernel's PIT setup.
+const PIT_HOST: &str = "The machine running this kernel kept the test off the CPU between reads: that is the host's load, not your PIT setup, and this row cannot be judged on this run. Run it again on a less busy machine";
 
 /// Set when a latch reads above 1193: channel 0 was reprogrammed mid-probe.
 static PIT_ABOVE: AtomicBool = AtomicBool::new(false);
@@ -763,18 +845,77 @@ impl Tally {
     }
 }
 
+/// The most PM-timer counts between the two PM reads that bracket a quiet
+/// window's latch (100 us, a tenth of a PIT period): within it, the latched
+/// count and the PM time name the same moment closely enough that the two
+/// ends' error, at most a fifth of a period, cannot move the rounded count of
+/// reloads. Measured: 1-2 counts, except the first window's first look, 72-105
+/// counts on lab-linux01 (QEMU 10.2.1 TCG).
+const QW_SKEW_PM: u32 = 358;
+
+/// One end of a quiet window, read in one stretch with interrupts off: the
+/// sleeper's slice count, channel 0's latched count and the PM timer, the
+/// latch bracketed by two PM reads. Up to 4 tries, until the two reads lie
+/// within `QW_SKEW_PM` (the first run of this code may be slow under QEMU,
+/// and a loaded host may keep the guest off the CPU between them); `None`
+/// for the latch when no try did, or when it read above 1193.
+fn window_end(t: Tid) -> (u64, Option<u16>, u32) {
+    quiet(|| {
+        let mut last = (0, None, 0);
+        for _ in 0..4 {
+            let s = sched::slices(t);
+            let a = pm();
+            let c = pit_latch();
+            let b = pm();
+            if c > 1193 {
+                PIT_ABOVE.store(true, Ordering::SeqCst);
+                return (s, None, b);
+            }
+            last = (s, None, b);
+            if b.wrapping_sub(a) & 0xff_ffff <= QW_SKEW_PM {
+                return (s, Some(c), b);
+            }
+        }
+        last
+    })
+}
+
 /// A quiet window: `QUIET` of the vehicle's yields while `t` sleeps with
 /// nothing to wake it. Returns the slices `t` was given and the most it may
-/// be given: 1 plus the PIT ticks the window spans by the PM timer.
-fn quiet_window(t: Tid) -> (u64, u64) {
-    let s0 = sched::slices(t);
-    let mut c = Clock::new();
+/// be given (G2401, sprint 9 #131): one per PIT tick the window crossed, plus
+/// one. The ticks crossed are channel 0's reloads between the window's two
+/// ends, from the PM-timer length and the latched count at each end, so a
+/// window of 10.6 periods crosses 10 or 11 by its phase, never "1 plus the
+/// whole periods it spans" whatever the phase (`span` says the mode: in mode 3
+/// the count reloads twice a period and raises IRQ 0 once, so the crossings
+/// are halved, rounding up). The one more is the tick whose reload fell just
+/// before the window: QEMU raises IRQ 0 from a host timer callback that may
+/// run after the count has reloaded, so that tick is handled, and its slice
+/// given, inside the window (measured on lab-linux01: 86 of 2,400 honest
+/// windows, each starting 50-227 counts after a reload, IRQ 0 waiting in 58).
+/// With either end's latch unreadable, the length alone bounds the crossings:
+/// the whole periods it spans, plus one; so the most is then `2 + spans`.
+fn quiet_window(t: Tid, span: u32) -> (u64, u64) {
+    let (s0, c0, p0) = window_end(t);
     for _ in 0..QUIET {
         sched::yield_now();
     }
-    let n = sched::slices(t).saturating_sub(s0);
-    let spans = c.us() * PIT_INPUT_HZ / PIT_RELOAD / 1_000_000;
-    (n, 1 + spans)
+    let (s1, c1, p1) = window_end(t);
+    let n = s1.saturating_sub(s0);
+    let len = u64::from(p1.wrapping_sub(p0) & 0xff_ffff);
+    let crossed = match (c0, c1) {
+        (Some(c0), Some(c1)) => {
+            // Input clocks in the window, times the count's step per clock
+            // (1 in mode 2, 2 in mode 3), plus the count it lost before the
+            // start, less the count it had lost at the end: whole reloads.
+            let step = if span < PIT_PM { 2 } else { 1 };
+            let moved = (len * PIT_INPUT_HZ / PM_HZ * step + u64::from(c1)).saturating_sub(u64::from(c0));
+            let reloads = (moved + PIT_RELOAD / 2) / PIT_RELOAD;
+            if step == 2 { reloads.div_ceil(2) } else { reloads }
+        }
+        _ => 1 + len * PIT_INPUT_HZ / PM_HZ / PIT_RELOAD,
+    };
+    (n, crossed + 1)
 }
 
 fn yield_until(ms: u64, mut done: impl FnMut() -> bool) -> bool {
@@ -803,10 +944,14 @@ fn probe_pipe() {
     // closed: a count this row cannot read judges nothing).
     let span = match pit_check() {
         Ok(s) => Some(s),
-        Err(why) => {
+        Err(PitFail::Setup(why)) => {
             note(format_args!(
                 "{SLEEP_ID}: channel 0 of the PIT reads {why} (lab 06 leaves it in mode 2, low byte then high, reloading from 1193): this row tells a pipe call's own wakeup from the tick's by that count, and cannot"
             ));
+            None
+        }
+        Err(PitFail::Host(why)) => {
+            note(format_args!("{SLEEP_ID}: before the probe's rounds, {why}. {PIT_HOST}"));
             None
         }
     };
@@ -829,7 +974,7 @@ fn probe_pipe() {
     let mut wq: Vec<(u64, u64)> = Vec::new();
     let mut rq: Vec<(u64, u64)> = Vec::new();
     if asleep && early == u64::MAX {
-        wq.push(quiet_window(t));
+        wq.push(quiet_window(t, span));
     }
     let mut got = 0usize;
     let mut bad: Option<usize> = None;
@@ -918,7 +1063,7 @@ fn probe_pipe() {
         sleeping = yield_until(ASLEEP_MS, || WROTE.load(Ordering::SeqCst) != u64::MAX || off_cpu(t))
             && WROTE.load(Ordering::SeqCst) == u64::MAX;
         if sleeping {
-            wq.push(quiet_window(t));
+            wq.push(quiet_window(t, span));
         }
     }
     let probe_ms = c.ms();
@@ -1004,7 +1149,7 @@ fn probe_pipe() {
         let rt = task::spawn(reader);
         let a1 = yield_until(ASLEEP_MS, || off_cpu(rt));
         if a1 {
-            rq.push(quiet_window(rt));
+            rq.push(quiet_window(rt, span));
         }
         let (s1, b1) = if a1 { gate(rt, &mut g_byte) } else { (sched::slices(rt), before()) };
         let wr = w3.write(b"x");
@@ -1015,7 +1160,7 @@ fn probe_pipe() {
         let k1 = if a1 { yields_until_ran(rt, s1) } else { u64::MAX };
         let a2 = yield_until(ASLEEP_MS, || RDR_GOT.load(Ordering::SeqCst) == 1 && off_cpu(rt));
         if a2 {
-            rq.push(quiet_window(rt));
+            rq.push(quiet_window(rt, span));
         }
         let (s2, b2) = if a2 { gate(rt, &mut g_drop) } else { (sched::slices(rt), before()) };
         drop(w3);
@@ -1115,10 +1260,12 @@ fn probe_pipe() {
     // so a round whose count stood still (a call shorter than one PIT input
     // clock) was clean, not a stopped channel.
     let pit_after = pit_check();
-    if let (true, Err(why)) = (pit_sane, &pit_after) {
-        note(format_args!(
+    match (pit_sane, &pit_after) {
+        (true, Err(PitFail::Setup(why))) => note(format_args!(
             "{SLEEP_ID}: after the probe's rounds, channel 0 of the PIT reads {why}; it read as lab 06 leaves it before them: it was reprogrammed while the pipe calls ran, and this row cannot tell a call's own wakeup from the tick's"
-        ));
+        )),
+        (true, Err(PitFail::Host(why))) => note(format_args!("{SLEEP_ID}: after the probe's rounds, {why}. {PIT_HOST}")),
+        _ => {}
     }
     let pit_ok = pit_sane && pit_after.is_ok() && !PIT_ABOVE.load(Ordering::SeqCst);
     if PIT_ABOVE.load(Ordering::SeqCst) {
@@ -1131,13 +1278,13 @@ fn probe_pipe() {
     let held = |v: &[(u64, u64)]| v.iter().all(|&(n, a)| n <= a);
     let quiet_ok = !wq.is_empty() && rq.len() == 2 * rounds as usize && held(&wq) && held(&rq);
     note(format_args!(
-        "pipe probe: with nothing to wake it, over {QUIET} of the test's yields each time, the writer asleep on the full ring was given {} slices, and the readers asleep on empty pipes {} (given/most: 1 plus one per PIT tick the window spanned by the PM timer)",
+        "pipe probe: with nothing to wake it, over {QUIET} of the test's yields each time, the writer asleep on the full ring was given {} slices, and the readers asleep on empty pipes {} (given/most: one per PIT tick the window crossed by channel 0's latched count, plus one)",
         fmt_q(&wq),
         fmt_q(&rq),
     ));
     if !(held(&wq) && held(&rq)) {
         note(format_args!(
-            "{SLEEP_ID}: in one of the test's quiet windows ({QUIET} of its yields, with nothing to wake the sleeper) a sleeper was given more slices than the window allows: 1 plus one per PIT tick the window spanned (given/most above). A sleeper runs again when the read, write or release it waits for happens; a kernel that puts sleepers back in the run queue on its own, more often than the tick, gives them slices here"
+            "{SLEEP_ID}: in one of the test's quiet windows ({QUIET} of its yields, nothing to wake the sleeper) a sleeper was given more slices than it allows: one per PIT tick it crossed, plus one (given/most above). A sleeper runs again when the read, write or release it waits for happens; a kernel that puts sleepers back in the run queue itself, more often than the tick, gives them slices here"
         ));
     }
     // The ring reuses the room a read frees before it empties (G1972).

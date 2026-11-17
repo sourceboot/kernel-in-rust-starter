@@ -8,7 +8,7 @@
 //! §A.7): `/bin/init` is the learner's init (lab 28), `/bin/sh` the course's
 //! shell, and from lab 29 `/bin/ush` the learner's shell and `/bin/mark` the
 //! course program that ends each group of the script (`mark N` prints
-//! `mark N <cwd>`). The vehicle mounts ext2 at `/` and the boot archive at
+//! `mark N <cwd>`, then a `# ppid=` note). The vehicle mounts ext2 at `/` and the boot archive at
 //! `/boot` (init mounts `/proc` and `/dev`), then starts `/bin/init <nonce>`
 //! through the learner's exec as pid 1, with the console as fd 0 and two
 //! pipes this file drains as fds 1 and 2 — the TEE (OUT and ERR), forwarded
@@ -74,6 +74,26 @@
 //! segment through that process's page tables; otherwise the session stops
 //! there and every row says so.
 //!
+//! THE COMMAND IS THE SHELL'S OWN CHILD, AND THE SHELL FINDS IT (amended
+//! 2026-11-15, sprint 9 #127, G2210 and G2211). `mark` prints a note,
+//! `# ppid=<getppid>`, after its line; at `mark 2` the note must be the pid
+//! of the shell that ran it, in both runs (the course shell's wrong is the
+//! kernel's `getppid`, so row 2 and row 7 with the kernel named; the
+//! learner's wrong is row 2's alone): a shell whose every command runs under
+//! a helper process scored 13/13, since the process watch counts every
+//! descendant. And after the session — completed or stopped, so init keeps
+//! pid 1 — this file starts `/bin/mark -x mark` itself, at cwd `/`, bounded
+//! by its own `PROBE_MS`, not `STEP_MS` (so a run spends at most one
+//! `STEP_MS` bound and one `PROBE_MS`): the course program calls the
+//! `execve` syscall on `mark`, a name with no `/`. Any refusal is right (the errno is printed in its
+//! note); a kernel that finds the name under `/bin` runs `/bin/mark` as
+//! `mark -x`, which exits 3, and row 1 alone is red, naming the kernel: a
+//! shell that hands `execve` the bare name scored 13/13 on such a kernel.
+//! Residuals, name-keyed and narrower (catalog `G2486`, `G2487`): a shell
+//! that wraps every command but `mark`, and a kernel that looks up every
+//! bare name under `/bin` but `mark` with a shell that builds `/bin/mark`
+//! alone (the script runs `mark` itself).
+//!
 //! The rows, printed after the session in this order. Rows 1–6 compare what
 //! the learner's shell printed on OUT for each line of their group with what
 //! the course shell printed for the same line in the same run (programs'
@@ -81,9 +101,12 @@
 //! and, after `ls /proc`, the pid lines left out); ERR is not compared (each
 //! shell words its own messages), but a `panicked at` line on it is quoted.
 //!   1 `ush.command.runs` (plain): the prompt, a one-word command run from
-//!     `/bin` (fork, exec, wait), and one with an argument.
+//!     `/bin` (fork, exec, wait), and one with an argument; and, after the
+//!     session, the bare-name probe (below): the kernel's `execve` refuses a
+//!     name with no `/` that only `/bin` holds.
 //!   2 `ush.args.passed` (derived): `hi` gets the nonce and its index as
-//!     typed; `ls /proc` lists `/proc`.
+//!     typed; `ls /proc` lists `/proc`; `mark 2`'s parent is the shell that
+//!     ran it (below).
 //!   3 `ush.status.shown` (derived): `echo $?` prints 1 after a failing
 //!     command, 127 after a name not found, and 126 after a path that
 //!     names no program (`/tmp`, a directory: run as given, not looked up
@@ -161,6 +184,11 @@ const USH: &str = "ush";
 /// How long one typed line may take to come back to a prompt, and a shell
 /// to be back in its `read` after one, by the PM timer.
 const STEP_MS: u64 = 15_000;
+/// How long the bare-name probe may run after the session, by the PM timer.
+/// It is one short course program (it settles in milliseconds), so its bound
+/// is its own and shorter: a stopped session (`STEP_MS`) and a hung probe
+/// cost 15 + 5 s, not two `STEP_MS` (F-3 of #127's TL review, 2026-11-15).
+const PROBE_MS: u64 = 5_000;
 /// The most scancodes pushed before the console's reader has taken them
 /// (the ring holds 64).
 const CHUNK: usize = 32;
@@ -450,6 +478,9 @@ struct Line {
     want: Want,
     /// The line lists `/proc`: its pid lines are left out of the comparison.
     pids: bool,
+    /// The line runs `mark`, whose `# ppid=` note must be the typing shell's
+    /// pid: the shell's own child ran it (sprint 9 #127, G2210).
+    parent: bool,
 }
 
 /// A typed line as messages name it: in backquotes, or "an empty line".
@@ -462,7 +493,7 @@ fn quoted(text: &str) -> String {
 }
 
 fn line(text: &str, want: Want) -> Line {
-    Line { text: String::from(text), want, pids: false }
+    Line { text: String::from(text), want, pids: false, parent: false }
 }
 
 fn strs(v: &[&str]) -> Vec<String> {
@@ -519,7 +550,7 @@ fn script(w: &Words) -> Vec<Vec<Line>> {
                 ]),
             ),
             Line { pids: true, ..line("ls /proc", Want::Has(strs(&["1", "meminfo", "mounts", "sboot", "uptime"]))) },
-            mark(2, "/"),
+            Line { parent: true, ..mark(2, "/") },
         ],
         vec![
             line(&format!("cat {}", w.nofile), none()),
@@ -572,6 +603,34 @@ fn norm(out: &[u8], pids: bool) -> Vec<&[u8]> {
 fn shown(bytes: &[u8]) -> String {
     let b = bytes.strip_suffix(b"$ ").unwrap_or(bytes);
     format!("{:?}", String::from_utf8_lossy(b))
+}
+
+/// The value `mark` printed in its `# ppid=` note, if it printed one: a
+/// pid, or a negative errno when the kernel's `getppid` refused.
+fn ppid_note(out: &[u8]) -> Option<i64> {
+    let l = out.split(|&b| b == b'\n').find_map(|l| l.strip_prefix(b"# ppid="))?;
+    core::str::from_utf8(l).ok()?.parse().ok()
+}
+
+/// A `parent` line's `# ppid=` note against `sh`, the shell that ran it:
+/// `mark` is that shell's own child, or why not. `whose` names the shell.
+fn parent_of(l: &Line, out: &[u8], sh: Option<Pid>, whose: &str) -> Result<(), String> {
+    let Some(sh) = sh else { return Ok(()) };
+    match ppid_note(out) {
+        Some(p) if p == sh.0 as i64 => Ok(()),
+        Some(p) if p < 0 => Err(format!(
+            "{} printed `# ppid={p}`: the kernel's `getppid` refused ({}) where it must return the pid of the process that started it ({whose}, pid {})",
+            quoted(&l.text),
+            -p,
+            sh.0
+        )),
+        Some(p) => Err(format!(
+            "{} ran with parent pid {p}, not {whose} (pid {}): the process the shell forks must exec the command itself, so the command's parent is the shell, not a process the shell started",
+            quoted(&l.text),
+            sh.0
+        )),
+        None => Err(format!("{} printed {} on fd 1, with no `# ppid=<pid>` line", quoted(&l.text), shown(out))),
+    }
 }
 
 /// Whether the course shell's OUT for `l` is what it must be.
@@ -630,6 +689,13 @@ struct Seen {
     /// note, init named first, then what was measured. Every row then opens
     /// with it, not with the kernel (see `rows`).
     init_sh: Option<String>,
+    /// The course shell's pid and the learner's shell's, once each is found:
+    /// what `mark 2`'s `# ppid=` note must be in each run (G2210).
+    course_pid: Option<Pid>,
+    ush_pid: Option<Pid>,
+    /// The bare-name probe (`bare_probe`, after the session): `/bin/mark -x
+    /// mark`'s own `execve("mark")` was refused, or why not (G2211).
+    bare: Option<Result<(), String>>,
 }
 
 /// Every row's note when init's `sh` is not /bin/sh: the fault is lab 28's
@@ -1039,6 +1105,7 @@ fn session(w: &Words, script: &[Vec<Line>], seen: &mut Seen) {
         seen.init_sh = Some(format!("{INIT_SH}: {why}"));
         return fail(seen, why);
     }
+    seen.course_pid = Some(course.pid);
     match s.settle(course, "the course shell's first read") {
         Ok(true) => {}
         Ok(false) => return fail(seen, String::from("the course shell ended at its first prompt")),
@@ -1095,6 +1162,7 @@ fn session(w: &Words, script: &[Vec<Line>], seen: &mut Seen) {
             return;
         }
     }
+    seen.ush_pid = Some(ush.pid);
     s.watch = Some((course.pid, ush.pid, sh_img));
     if let Err(lost) = s.own(ush, &img, "at your shell's first prompt") {
         seen.ush.stop = Some((Some(0), lost.why()));
@@ -1134,6 +1202,46 @@ fn session(w: &Words, script: &[Vec<Line>], seen: &mut Seen) {
     });
 }
 
+// ── The bare-name probe (sprint 9 #127, G2211) ───────────────────────────
+
+/// The probe's program and the name it hands `execve` as given.
+const PROBE: &str = "/bin/mark";
+const BARE: &str = "mark";
+
+/// After the session (so init keeps pid 1), starts `/bin/mark -x mark`
+/// itself, at cwd `/`, with fds 1 and 2 on a pipe this drains: the course
+/// program calls the `execve` syscall on `mark`, a name with no `/`. The
+/// kernel resolves it against the cwd (lab 23), where nothing is called
+/// `mark`, so the call is refused and the probe exits 0; a kernel that finds
+/// the name under `/bin` itself runs `/bin/mark` as `mark -x`, which exits 3.
+/// Its verdict is `ush.command.runs`'s alone, never the session's: a shell
+/// that hands `execve` the bare name works only on such a kernel.
+fn bare_probe() -> Result<(), String> {
+    let what = format!("`{PROBE} -x {BARE}`, the course's probe of `execve(\"{BARE}\")`");
+    let (mut out, w) = Tee::new().map_err(|why| format!("{what} could not start: {why}"))?;
+    let pid = start_with(PROBE, || exec::spawn(PROBE, &["mark", "-x", BARE], &[]), &[(1, &w), (2, &w)]);
+    drop(w);
+    let pid = pid.map_err(|why| format!("{what} could not start: {why}"))?;
+    let mut c = Clock::new();
+    while !ended(pid) {
+        out.pump();
+        if c.ms() >= PROBE_MS {
+            return Err(format!("{what} (pid {}) had not ended {PROBE_MS} ms after it started", pid.0));
+        }
+        sched::yield_now();
+    }
+    out.pump();
+    match find(pid).and_then(|r| r.exit) {
+        Some(0) => Ok(()),
+        Some(0x300) => Err(format!(
+            "your kernel's execve found a bare name under /bin: a course program at cwd `/` called `execve(\"{BARE}\")`, a name with no `/`, and your kernel ran `/bin/{BARE}` (pid {}); a relative path resolves against the cwd (lab 23), never under `/bin`, and a one-word command's `/bin/<name>` is your shell's to build",
+            pid.0
+        )),
+        Some(v) => Err(format!("{what} (pid {}) ended with {}, not exit(0) or exit(3)", pid.0, status_text(v))),
+        None => Err(format!("{what} (pid {}) ended, and its record holds no status", pid.0)),
+    }
+}
+
 // ── The rows ─────────────────────────────────────────────────────────────
 
 struct Row {
@@ -1167,6 +1275,9 @@ fn oracle_group(script: &[Vec<Line>], seen: &Seen, g: usize) -> Result<(), Strin
     let segs = seen.oracle.segs.get(g).map_or(&[][..], Vec::as_slice);
     for (l, seg) in script[g].iter().zip(segs) {
         check(l, &seg.out)?;
+        if l.parent {
+            parent_of(l, &seg.out, seen.course_pid, "the course shell")?;
+        }
     }
     if segs.len() < script[g].len() {
         let why = seen.oracle.stop.as_ref().map_or(String::new(), |(_, w)| w.clone());
@@ -1212,6 +1323,11 @@ fn rows(script: &[Vec<Line>], seen: &Seen) {
                 };
                 r.fail(format!("{} printed {} on fd 1; the course shell printed {} for the same line{also}", quoted(&l.text), shown(&mine.out), shown(&theirs.out)));
             }
+            if l.parent {
+                if let Err(why) = parent_of(l, &mine.out, seen.ush_pid, "your shell") {
+                    r.fail(why);
+                }
+            }
             if l.text.contains(" | ") && theirs.together >= 2 && mine.together < 2 {
                 r.fail(format!(
                     "`{}`: at most {} of the processes your shell started was running at any one time, where the course shell's run of the same line had {} at once: the second command must start before the first ends, the two joined by one pipe",
@@ -1225,6 +1341,11 @@ fn rows(script: &[Vec<Line>], seen: &Seen) {
                 Some((Some(sg), _)) if sg == g => why,
                 _ => format!("the session did not get as far as this group: {why}"),
             });
+        }
+        if g == 0 {
+            if let Some(Err(why)) = &seen.bare {
+                r.fail(why.clone());
+            }
         }
         if g == GROUP_IDS.len() - 1 {
             match &seen.exit {
@@ -1332,7 +1453,10 @@ unsafe extern "C" fn _start() -> ! {
                     seen.oracle.stop = Some((None, why.clone()));
                     seen.ush.stop = Some((None, why));
                 }
-                Ok(()) => session(&w, &script, &mut seen),
+                Ok(()) => {
+                    session(&w, &script, &mut seen);
+                    seen.bare = Some(bare_probe());
+                }
             }
             irq_off();
             kernel::kprintln!();

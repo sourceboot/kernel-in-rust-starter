@@ -489,7 +489,13 @@ counter in a work copy of `syscall::dispatch` on 2026-10-22: `open` 6, `close` 3
 
 ### `mark` (lab 29; `mark/mark.c`)
 
-`mark <N>` prints `mark <N> <cwd>` in one write (usage error: exit 2; a refused `getcwd`: exit 1).
+`mark <N>` prints `mark <N> <cwd>` and then the note `# ppid=<getppid>` in one write (usage error:
+exit 2; a refused `getcwd`: exit 1). Two probes lab 29's vehicle reads (sprint 9 #127, 2026-11-15):
+the `# ppid=` note of `mark 2`, which must be the learner's shell's pid (a command the shell's own
+child runs, ledger G2210); and `mark -x <name>`, which the vehicle starts itself at cwd `/` and which
+calls the `execve` syscall on `<name>` exactly as given (`mark`, no `/`): a kernel that resolves it
+against the cwd refuses it, and the probe prints `# execve(mark) = -2 (ENOENT)` and exits 0; a kernel
+that finds the name under `/bin` itself runs `/bin/mark` as `mark -x`, which exits 3 (ledger G2211).
 Lab 29's script ends each group with it, in place of lab 23's `echo $? "q"N`, which needs quoting
 the learner's shell does not have, and its cwd stands in for `pwd`. ext2's `/bin` carries it from
 lab 29's image on (`SHELL_PROGRAMS`), never earlier, beside `/bin/ush`, the learner's shell.
@@ -550,24 +556,28 @@ carries it from lab 32's image on (`HANDLER_PROGRAMS`, `HANDLERS_LAB`), never ea
 
 `ttyprobe <mode> <16 hex digits>`, five modes, of which `tcgets`, `tcsets` and `raw` open
 `/dev/tty` (`access` and `trunc` never do), each printing, when it passes, lines that end with
-the nonce: one, or eight for `raw`.
+the nonce: one, or ten for `raw`.
 `tcgets`: TCGETS into a buffer whose tail holds bytes drawn from the
 nonce, of which exactly 36 (Linux's `struct termios`) may be written (`ttyprobe tcgets <the 36
 bytes in hex> <nonce>`). `tcsets`: a termios with every one of its 36 bytes changed (ICANON and
 ECHO off, ICRNL flipped, c_line and each c_cc byte, VMIN and VTIME among them, drawn from the
 nonce) is set with TCSETS and read back the same, through that file and through a second open of
 `/dev/tty`, then the first is set again and read back (`ttyprobe tcsets ok <nonce>`). `raw`: four
-reads in raw mode with no poll, each announced by a line before it and the last three answered by
-`= <answer> <hex>`: six typed bytes read 20 ms apart on an O_NONBLOCK file (50 tries), VMIN 0 with
-nothing typed (returns 0 at once, `vmin0`), a read that sleeps until ctrl+c's SIGINT ends it with
--EINTR (`isig`), and VMIN 21 while nine keys are typed (`keys`); the first termios is put back at
-the end. `access`: access(2) as root on files of mode 0 and 0644, a missing name, `/tmp`,
+reads in raw mode with no poll before them and two polls, each announced by a line before it and the
+last four answered by `= <answer> <hex>`: six typed bytes read 20 ms apart on an O_NONBLOCK file (50
+tries), VMIN 0 with nothing typed (returns 0 at once, `vmin0`; ktest-33 times it between its two
+lines), a read that sleeps until ctrl+c's SIGINT ends it with -EINTR (`isig`), a poll for POLLIN
+with a 10 s timeout and nothing typed that must answer 1 once ktest-33 types z, the key then taken
+by one O_NONBLOCK read, twice (`polla`, z typed at once; `pollb`, z typed late; added 2026-11-15,
+ledger G2218), and VMIN 21 while nine keys are
+typed (`keys`); the first termios is put back at the end. `access`: access(2) as root on files of mode 0 and 0644, a missing name, `/tmp`,
 `/bin/busybox`, a mode above 7, and X_OK on a group-only and an other-only executable and a
 mode-0 directory (`ttyprobe access ok <nonce>`). `trunc`: ftruncate(2) cuts a 12,411-byte file to
 100, grows it to 5000 (zeros), and refuses a negative length, a read-only file and a pipe with
 EINVAL (`ttyprobe trunc ok <nonce>`). A failed check prints `ttyprobe: <what>` and a wrong
 argument `ttyprobe: usage: …`; both exit 1. ext2's `/bin` carries it from lab 33's image on
-(`TERMIOS_PROGRAMS`, `TERMIOS_LAB`), never earlier; sha256 `2f9d1c06…1013`. The source's header
+(`TERMIOS_PROGRAMS`, `TERMIOS_LAB`), never earlier; sha256 `09e6c331…2f9b` (39,192 B, 2026-11-15, two polls;
+`0e8d0594…8475` with one, `2f9d1c06…1013` before the poll step). The source's header
 is the full statement of each mode; `ktest-33` drives it and types the keys.
 
 ## Native check on Linux

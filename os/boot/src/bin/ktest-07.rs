@@ -375,13 +375,18 @@ ktest!("frames.alloc.count", fn frames_alloc_count(t: &mut TestCtx) {
     t.expect_eq("frames this test held whose words changed while it took more", overwritten, 0);
 });
 
+// G2021 (2026-11-15, sprint 9 #118): the extra references are 255 + pick % 64,
+// so every run puts 256 to 319 on the frame, past any count narrower than 9 bits
+// (a u8 that saturates or wraps, a 4-bit field, a cap at 7). Before, 1 + pick % 6
+// never put more than 7, and a count that stopped at 7 scored the lab in full.
 ktest!("frames.free.drop", fn frames_free_drop(t: &mut TestCtx) {
-    let extra = 1 + t.pick("frames.free.drop", 6) as u32;
+    let extra = 255 + t.pick("frames.free.drop", 64) as u32;
     let before = frame::stats();
     let Some(f) = frame::alloc() else {
         t.fail(format_args!("alloc returned None with {} frames free", before.free));
         return;
     };
+    t.note(format_args!("frames.free.drop: {} references (chosen by this run's nonce), dropped one at a time", 1 + extra));
     for _ in 0..extra {
         frame::inc(f);
     }
@@ -392,7 +397,6 @@ ktest!("frames.free.drop", fn frames_free_drop(t: &mut TestCtx) {
         t.expect_eq("used while references remain", frame::stats().used as u64, before.used as u64 + 1);
     }
     frame::free(f);
-    t.note(format_args!("frames.free.drop: {} references (chosen by this run's nonce), dropped one at a time", 1 + extra));
     t.expect_eq("count after the last free", frame::refs(f) as u64, 0);
     t.expect_eq("free after the last free", frame::stats().free as u64, before.free as u64);
 });

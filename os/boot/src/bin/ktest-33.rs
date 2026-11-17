@@ -42,7 +42,17 @@
 //!     Backspace, 21 bytes, though x and Enter came first and alone, and
 //!     leaves the five keys pushed behind them in the ring. Afterwards the
 //!     termios is cooked again, and those five keys, a, b, Backspace, c,
-//!     Enter, read cooked as `ac\n`, nothing after.
+//!     Enter, read cooked as `ac\n`, nothing after. Amended 2026-11-15
+//!     (sprint 9 #128, ledger G2218, G2220): the VMIN 0 read is timed by
+//!     its two lines, the smaller of the guest's ticks and the PM timer's
+//!     milliseconds (lab 11's G1964 form), at most `VMIN0_MAX_MS`; and
+//!     before the VMIN 21 read ttyprobe polls twice (10 s timeout) with
+//!     nothing typed: for poll A the vehicle types z as soon as its line is
+//!     out, for poll B only once it has waited `POLL_WAIT_MS` by the PM
+//!     timer AND more than `POLL_TICKS` ticks; each answers 1, POLLIN, and
+//!     the key reads as `z`. A poll still waiting `POLL_LATE_MS` after z
+//!     (the same smaller-of-two reading), or `STEP_MS` by the PM timer, is
+//!     ended by a pushed ctrl+c, and the row fails.
 //!   4 `tty.access` (derived) — `ttyprobe access <hex>`: `access` (21) as
 //!     root: what is there is readable and writable whatever its mode, only
 //!     a file with an execute bit (or a directory) may be run (`-EACCES`
@@ -221,6 +231,62 @@ const ENTER: [u8; 2] = [0x1c, 0x9c];
 /// 300-tick gate took 8.5-9.1 s (20 s since 2026-10-29, slice 9 fix
 /// round 2; it was 10 s).
 const STEP_MS: u64 = 20_000;
+/// Row 3's VMIN 0 read (ledger G2220, 2026-11-15, sprint 9 #128): from the
+/// line ttyprobe prints before it to the answer it prints after, by the
+/// smaller of the learner's ticks (1 ms each at `PIT_DIVISOR`) and the PM
+/// timer's milliseconds, at most this. TCG under load loses ticks and never
+/// adds them, and the PM half caps a burst of lost ticks caught up at once
+/// (lab 11's G1964 form; lab 26's `WAKE_MAX_MS` is the same 50 ms). A read
+/// that answers at once spans a tick or two of the ttyprobe's own running.
+const VMIN0_MAX_MS: u64 = 50;
+/// Row 3's two poll steps (ledger G2218, 2026-11-15, sprint 9 #128; two
+/// polls since its fix round, class B ruled by the TPM with both blind picks
+/// agreeing). Poll A: z is typed as soon as the poll's line is out, and a
+/// poll that has not answered `POLL_LATE_MS` after it is rescued and red, so
+/// a poll whose first look comes later than that fails A. Poll B: z is typed
+/// only once the poll's line has been out `POLL_WAIT_MS` by the PM timer AND
+/// the learner's ticks have moved more than `POLL_TICKS` since, so a poll
+/// that looked once before then and never again does not see it and fails B
+/// at the same rescue. `POLL_TICKS` > `POLL_LATE_MS` + margin, so every first
+/// look fails one of the two (the TL's review measured a single look at 800
+/// ticks passing the one-poll step, whose wait was 450). Derivation: honest
+/// polls answer 0-1 ticks after z, and the slowest honest kernel, the case
+/// keys-typed-ahead (keys shown after a 300 ms quiet gap, G1889), 301 ticks,
+/// in every kept boot at rest, at load >= 5 and under background QoS; the
+/// rescue at 1000 is 3.3 times that; the overlap between A's catch (a first
+/// look later than about 1000 ticks after z, which A types within a few
+/// ticks of the poll's start) and B's (a first look before 1500) is 500
+/// ticks. B's wait is bounded by `KEYS_MS` by the PM timer: below 37.5 guest
+/// ticks a second (1500 in 40 s) it types z before 1500 ticks, which happens
+/// only under background QoS (18-33 a second measured there, a class the
+/// ruling leaves out, G1889). The info note prints the ticks z came at.
+const POLL_WAIT_MS: u64 = 600;
+const POLL_TICKS: u64 = 1_500;
+/// The two poll steps, in ttyprobe's order: A types z at once, B late.
+const POLL_STEPS: [&str; 2] = ["polla", "pollb"];
+/// Each poll's name in the notes, and when its z is typed.
+const POLL_NAMES: [&str; 2] = [
+    "poll A (z typed as soon as its line was out)",
+    "poll B (z typed once it had waited 600 ms by the PM timer and more than 1500 ticks)",
+];
+/// The key typed for the poll: z (make code; its break types nothing).
+const POLL_KEY: [u8; 1] = [0x2c];
+const POLL_KEY_HEX: &str = "7a";
+/// How long after z a poll that has not answered is given before ctrl+c
+/// ends it: until the smaller of the learner's ticks and the PM timer's
+/// milliseconds since z reaches this, or `STEP_MS` by the PM timer, on both
+/// polls. The honest case keys-typed-ahead shows a key 300 ticks after it
+/// came (301 measured after z on both polls).
+const POLL_LATE_MS: u64 = 1_000;
+/// ttyprobe's poll timeout, in ms (`poll(&pf, 1, 10000)`; named in the
+/// notes only). Chosen (2026-11-15, sprint 9 #128, class B ruled with the
+/// TL): positive, so the step asks nothing of task 7's negative timeout;
+/// counted in the same guest ticks as `POLL_TICKS` and the rescue, so at any
+/// tick rate it ends after poll B's rescue point (about 1500 + 1000 ticks,
+/// a quarter of it); short enough that a poll that sleeps to its deadline
+/// and only then looks comes back inside `timeout_secs` (79 s), answering
+/// 0, which fails the row (the case poll-sleeps-to-deadline).
+const POLL_TIMEOUT_MS: u64 = 10_000;
 
 // ── Time that does not depend on the learner's tick ──────────────────────
 
@@ -900,6 +966,15 @@ impl Answer {
     }
 }
 
+/// One poll's timings for the info note.
+fn poll_info(typed: Option<(u64, u64)>, wake: Option<(u64, u64)>, rescued: bool) -> String {
+    match (typed, wake) {
+        (Some((p, g)), Some((wg, wp))) => format!("z typed {p} ms by the PM timer and {g} ticks after its line, {} {wg} ticks, {wp} ms by the PM timer after z", if rescued { "ctrl+c pushed" } else { "answered" }),
+        (Some((p, g)), None) => format!("z typed {p} ms by the PM timer and {g} ticks after its line"),
+        _ => String::from("z not typed"),
+    }
+}
+
 fn answer_of(text: &str, step: &str, nonce: &str) -> Option<Answer> {
     let head = format!("ttyprobe raw {step} = ");
     let line = text.lines().find_map(|l| l.strip_prefix(head.as_str()))?;
@@ -922,10 +997,19 @@ fn has_line(seg: &[u8], line: &str) -> bool {
 ///
 /// 1. The script's q, Enter, left and ctrl+c, typed once the raw-ready
 ///    marker is out, read with O_NONBLOCK, ICRNL and ISIG off.
-/// 2. VMIN 0 with nothing typed: 0 bytes at once.
+/// 2. VMIN 0 with nothing typed: 0 bytes at once, timed by its two lines,
+///    at most `VMIN0_MAX_MS` by the smaller of the ticks and the PM timer
+///    (2026-11-15, sprint 9 #128, G2220).
 /// 3. ISIG on: once ttyprobe sleeps in its read, the vehicle pushes ctrl+c;
 ///    SIGINT ends the read, -EINTR, its handler run once.
-/// 4. VMIN 21, ICRNL on: once ttyprobe sleeps in its read the vehicle
+/// 4. Two polls with a 10 s timeout, ISIG on, nothing typed: z is pushed
+///    for poll A as soon as its line is out, and for poll B once it has
+///    waited `POLL_WAIT_MS` by the PM timer and more than `POLL_TICKS`
+///    ticks; each answers 1, POLLIN, and a non-blocking read takes `z`. A
+///    poll still waiting `POLL_LATE_MS` after z gets ctrl+c, and the row
+///    fails (2026-11-15, sprint 9 #128, G2218; two polls since its fix
+///    round).
+/// 5. VMIN 21, ICRNL on: once ttyprobe sleeps in its read the vehicle
 ///    pushes x and Enter, and once it sleeps again (2 bytes are fewer than
 ///    VMIN) the other seven keys and, behind them, a, b, Backspace, c,
 ///    Enter; one read returns the 21 bytes and leaves the last five keys in
@@ -971,10 +1055,24 @@ fn raw_row(sh: &mut Sh, w: &Words) -> bool {
     if !sh.until(KEYS_MS, |s| has_line(&s.out[from..], &start2) || end(s)) {
         stuck = true;
     }
-    // Step 2: nothing to push.
-    if !stuck && !end(sh) && !sh.until(STEP_MS, |s| find(&s.out[from..], b"ttyprobe raw vmin0 = ").is_some() || end(s)) {
-        push(&ENTER);
-        late.push("vmin0");
+    // Step 2: nothing to push. The read is timed from its line, seen just
+    // now, to its answer: (ticks, PM ms).
+    let mut vmin0: Option<(u64, u64)> = None;
+    if !stuck && !end(sh) {
+        let t0 = ticks();
+        let mut c = Clock::new();
+        let answered = |s: &Sh| find(&s.out[from..], b"ttyprobe raw vmin0 = ").is_some();
+        if sh.until(STEP_MS, |s| {
+            c.ms();
+            answered(s) || end(s)
+        }) {
+            if answered(sh) {
+                vmin0 = Some((ticks().saturating_sub(t0), c.ms()));
+            }
+        } else {
+            push(&ENTER);
+            late.push("vmin0");
+        }
     }
     // Step 3: ctrl+c once the read sleeps.
     let start3 = format!("ttyprobe raw isig {nonce}");
@@ -989,7 +1087,45 @@ fn raw_row(sh: &mut Sh, w: &Words) -> bool {
             }
         }
     }
-    // Step 4: x and Enter once the read sleeps, the rest once it sleeps again.
+    // Step 4: two polls (10 s each). Poll A: z as soon as its line is out;
+    // poll B: z once it has waited by both clocks. Either: ctrl+c if it has
+    // not answered `POLL_LATE_MS` after z. `poll_typed[i]`: (PM ms, ticks)
+    // from its line to z; `poll_wake[i]`: (ticks, PM ms) from z to its
+    // answer, or to the ctrl+c.
+    let mut poll_typed: [Option<(u64, u64)>; 2] = [None, None];
+    let mut poll_wake: [Option<(u64, u64)>; 2] = [None, None];
+    for (i, step) in POLL_STEPS.iter().enumerate() {
+        let start_poll = format!("ttyprobe raw {step} {nonce}");
+        let head = format!("ttyprobe raw {step} = ");
+        let poll_answered = |s: &Sh| find(&s.out[from..], head.as_bytes()).is_some();
+        if !stuck && sh.until(GROUP_MS, |s| has_line(&s.out[from..], &start_poll) || end(s)) && !end(sh) {
+            let t0 = ticks();
+            let mut c = Clock::new();
+            if i == 1 {
+                sh.until(KEYS_MS, |s| {
+                    let ms = c.ms();
+                    poll_answered(s) || end(s) || (ms >= POLL_WAIT_MS && ticks().saturating_sub(t0) > POLL_TICKS)
+                });
+            }
+            if !poll_answered(sh) && !end(sh) {
+                poll_typed[i] = Some((c.ms(), ticks().saturating_sub(t0)));
+                push(&POLL_KEY);
+                let t1 = ticks();
+                let mut c1 = Clock::new();
+                sh.until(STEP_MS, |s| {
+                    let ms = c1.ms();
+                    poll_answered(s) || end(s) || ms.min(ticks().saturating_sub(t1)) >= POLL_LATE_MS
+                });
+                poll_wake[i] = Some((ticks().saturating_sub(t1), c1.ms()));
+                if !poll_answered(sh) && !end(sh) {
+                    late.push(*step);
+                    push(&CTRL_C);
+                    sh.until(STEP_MS, |s| poll_answered(s) || end(s));
+                }
+            }
+        }
+    }
+    // Step 5: x and Enter once the read sleeps, the rest once it sleeps again.
     let start4 = format!("ttyprobe raw keys {nonce}");
     let keys_done = |s: &Sh| find(&s.out[from..], b"ttyprobe raw keys = ").is_some() || end(s);
     let mut after = false;
@@ -1019,6 +1155,17 @@ fn raw_row(sh: &mut Sh, w: &Words) -> bool {
             String::new()
         }
     };
+    // Every boot's two timings, before any failure (a failed row's last `#`
+    // line is its own).
+    note(format_args!(
+        "{RAW_ID}: VMIN 0 read {}; poll A {}; poll B {}",
+        match vmin0 {
+            Some((g, p)) => format!("{g} ticks, {p} ms by the PM timer (judged {} ms, at most {VMIN0_MAX_MS})", g.min(p)),
+            None => String::from("not timed"),
+        },
+        poll_info(poll_typed[0], poll_wake[0], late.contains(&POLL_STEPS[0])),
+        poll_info(poll_typed[1], poll_wake[1], late.contains(&POLL_STEPS[1])),
+    ));
     let pushed = |step: &str| if late.contains(&step) { format!(" only once Enter was typed for it, the read still asleep {STEP_MS} ms on by the PM timer") } else { String::new() };
 
     // Step 1.
@@ -1041,12 +1188,20 @@ fn raw_row(sh: &mut Sh, w: &Words) -> bool {
         r.fail(format_args!("the keys q, Enter, left, ctrl+c were typed and `ttyprobe raw` had not finished reading them within {KEYS_MS} ms by the PM timer"));
     }
     // Step 2.
+    let slow0 = vmin0.filter(|&(g, p)| g.min(p) > VMIN0_MAX_MS);
     match answer_of(&text, "vmin0", &nonce) {
-        Some(a) if a.ret == 0 && !late.contains(&"vmin0") => {}
+        Some(a) if a.ret == 0 && !late.contains(&"vmin0") && slow0.is_none() => {}
         Some(a) => r.fail(format_args!(
-            "with VMIN 0 and nothing typed, a raw read of 32 bytes on a file opened without O_NONBLOCK answered {}{}; VMIN 0 asks for no byte, so the read returns what is there, 0 bytes, at once",
+            "with VMIN 0 and nothing typed, a raw read of 32 bytes on a file opened without O_NONBLOCK answered {}{}{}; VMIN 0 asks for no byte, so the read returns what is there, 0 bytes, at once",
             a.text(),
-            pushed("vmin0")
+            pushed("vmin0"),
+            match slow0 {
+                Some((g, p)) if !late.contains(&"vmin0") => format!(
+                    " {} ms after it began ({g} ticks of the guest's clock, {p} ms by the PM timer, the smaller judged; at most {VMIN0_MAX_MS} ms)",
+                    g.min(p)
+                ),
+                _ => String::new(),
+            }
         )),
         None if keys.is_some() => r.fail(format_args!("group {n} printed {text:?}: ttyprobe ended before the answer of its VMIN 0 read")),
         None => {}
@@ -1081,7 +1236,57 @@ fn raw_row(sh: &mut Sh, w: &Words) -> bool {
         None if answer_of(&text, "vmin0", &nonce).is_some() => r.fail(format_args!("group {n} printed {text:?}: ttyprobe ended before the answer of its read with ISIG on")),
         None => {}
     }
-    // Step 4.
+    // Step 4: the two polls (10 s each).
+    for (i, step) in POLL_STEPS.iter().enumerate() {
+        let name = POLL_NAMES[i];
+        match answer_of(&text, step, &nonce) {
+            Some(a) => {
+                let revents = a.extra.first().map(String::as_str).unwrap_or("?");
+                let rd = a.extra.get(1).map(String::as_str).unwrap_or("?");
+                // poll's own answer (the line's hex is the read's bytes).
+                let pans = if a.ret < 0 { errno_text(-a.ret) } else { format!("{}", a.ret) };
+                let what = if late.contains(step) {
+                    let (p, g) = poll_typed[i].unwrap_or((0, 0));
+                    let (wg, wp) = poll_wake[i].unwrap_or((0, 0));
+                    let then = match a.ret {
+                        0 => "it then returned 0, its timeout: it slept through the key and looked only at its deadline",
+                        r if r < 0 => "ctrl+c's SIGINT ended it",
+                        _ => "it answered only after that",
+                    };
+                    Some(format!(
+                        "z was typed {p} ms by the PM timer and {g} ticks after the poll's line, and {} ms on ({wg} ticks, {wp} ms by the PM timer) the poll still had not answered, so ctrl+c was pushed; {then}. {}",
+                        wg.min(wp),
+                        if i == 0 {
+                            "z came as soon as poll A began, so it was there for the poll's first look: a poll looks at its files as soon as it begins, and this one first looked later than the rescue"
+                        } else {
+                            "z came only after poll B had waited, so this poll looked before it and not again: a poll looks again whenever a key comes, however long it has already waited"
+                        }
+                    ))
+                } else if poll_typed[i].is_none() && a.ret == 0 {
+                    Some(format!("it returned 0, a timeout, before any key was typed: z comes {} after the poll's line, and its timeout is {POLL_TIMEOUT_MS} ms", if i == 0 { String::from("at once") } else { format!("{POLL_WAIT_MS} ms by the PM timer and more than {POLL_TICKS} ticks") }))
+                } else if a.ret == 0 {
+                    let (wg, wp) = poll_wake[i].unwrap_or((0, 0));
+                    Some(format!("it returned 0, a timeout, {wg} ticks ({wp} ms by the PM timer) after z was typed: a key in the ring makes the console readable, POLLIN"))
+                } else if poll_typed[i].is_none() && a.ret > 0 {
+                    Some(format!("it said the console was ready (revents {revents}) before any key was typed: with ICANON off a console is readable once a byte is there"))
+                } else if poll_typed[i].is_none() {
+                    Some(String::from("it ended before any key was typed, and nothing sent a signal"))
+                } else if a.ret != 1 || revents != "1" {
+                    Some(format!("once z was typed it answered {pans} with revents {revents}: one file asked for POLLIN, readable, is 1 with revents POLLIN (1)"))
+                } else if rd != "1" || a.hex != POLL_KEY_HEX {
+                    Some(format!("after it said POLLIN, an O_NONBLOCK read of 8 bytes answered {rd} ({}): the key typed, z, is the one byte 0x7a", a.hex))
+                } else {
+                    None
+                };
+                if let Some(what) = what {
+                    r.fail(format_args!("with ICANON off, ISIG on and nothing typed, {name}, for POLLIN on the console with a {POLL_TIMEOUT_MS} ms timeout, answered {pans}: {what}"));
+                }
+            }
+            None if answer_of(&text, if i == 0 { "isig" } else { POLL_STEPS[0] }, &nonce).is_some() => r.fail(format_args!("group {n} printed {text:?}: ttyprobe ended before the answer of its {name}")),
+            None => {}
+        }
+    }
+    // Step 5.
     match answer_of(&text, "keys", &nonce) {
         Some(a) if a.ret == 21 && a.hex == KEYS_WANT && !late.contains(&"keys") => {}
         Some(a) => {
@@ -1102,14 +1307,14 @@ fn raw_row(sh: &mut Sh, w: &Words) -> bool {
                 if a.ret == 21 && a.hex == KEYS_WANT { pushed("keys") } else { String::new() }
             ));
         }
-        None if answer_of(&text, "isig", &nonce).is_some() => r.fail(format_args!("group {n} printed {text:?}: ttyprobe ended before the answer of its VMIN 21 read")),
+        None if answer_of(&text, POLL_STEPS[1], &nonce).is_some() => r.fail(format_args!("group {n} printed {text:?}: ttyprobe ended before the answer of its VMIN 21 read")),
         None => {}
     }
     // The whole group, line for line: nothing printed twice or between.
     if !r.failed && g.is_ok() {
         let isig = text.lines().find(|l| l.starts_with("ttyprobe raw isig = ")).unwrap_or("");
         let want = format!(
-            "{ready}ttyprobe raw {RAW_KEYS} {nonce}\n{start2}\nttyprobe raw vmin0 = 0 - {nonce}\n{start3}\n{isig}\n{start4}\nttyprobe raw keys = 21 {KEYS_WANT} {nonce}\n"
+            "{ready}ttyprobe raw {RAW_KEYS} {nonce}\n{start2}\nttyprobe raw vmin0 = 0 - {nonce}\n{start3}\n{isig}\nttyprobe raw polla {nonce}\nttyprobe raw polla = 1 {POLL_KEY_HEX} 1 1 {nonce}\nttyprobe raw pollb {nonce}\nttyprobe raw pollb = 1 {POLL_KEY_HEX} 1 1 {nonce}\n{start4}\nttyprobe raw keys = 21 {KEYS_WANT} {nonce}\n"
         );
         if text != want {
             r.fail(format_args!("group {n} printed {text:?}; on Linux the same program prints {want:?}"));
@@ -1159,6 +1364,17 @@ fn read_file(path: &str) -> Result<Vec<u8>, Errno> {
     }
 }
 
+/// Rows 6-8's note for an interactive shell that printed its prompt and
+/// ended with none of its first keys echoed. It says what was seen, not
+/// whether keys reached the ring (TL review of #128, 2026-11-15: a raw read
+/// that answers an error with bytes there gets this note too).
+fn ended_unread(w: &Words) -> String {
+    format!(
+        "the interactive shell on the console (`exec sh -i +m` with stdin /dev/console) printed its prompt {:?} and then ended without echoing any of the first keys (`cho`): its line editor waits for each key with poll(-1), then reads it, and a poll that answers 0, or a read that answers 0 bytes or an error, ends its input",
+        w.prompt
+    )
+}
+
 /// Rows 6-8: the interactive shell on the console.
 fn interactive(sh: &mut Sh, w: &Words) {
     let from = sh.out.len();
@@ -1171,10 +1387,7 @@ fn interactive(sh: &mut Sh, w: &Words) {
     if !up {
         forward(&sh.out[from..]);
         let why = if count(&sh.out[from..], p) >= 1 {
-            format!(
-                "the interactive shell on the console (`exec sh -i +m` with stdin /dev/console) printed its prompt {:?} and then ended, before any key was typed: its line editor waits for each key with poll(-1), then reads it, and a poll that answers 0, or a read that answers 0 bytes or an error, with nothing typed, ends its input",
-                w.prompt
-            )
+            ended_unread(w)
         } else {
             format!(
                 "the interactive shell on the console (`exec sh -i +m` with stdin /dev/console) showed no prompt {:?} within {KEYS_MS} ms by the PM timer: busybox's line editor reads TCGETS, sets its raw termios with TCSETS, then prints the prompt",
@@ -1191,14 +1404,24 @@ fn interactive(sh: &mut Sh, w: &Words) {
     let mut r = Row::new(EDIT_ID);
     let out6 = format!("{}-:yz\n", w.w);
     let mut at6 = 0;
-    let done = sh.until(KEYS_MS, |s| match find(&s.out[from..], out6.as_bytes()) {
+    // A shell that ends stops the wait: no key can make a dead shell print.
+    let six = |s: &Sh| match find(&s.out[from..], out6.as_bytes()) {
         Some(at) => count(&s.out[from + at..], p) >= 1,
         None => false,
-    });
+    };
+    sh.until(KEYS_MS, |s| six(s) || live_with(&["sh", "-i"]).is_none());
+    let done = six(sh);
     if let Some(at) = find(&sh.out[from..], out6.as_bytes()) {
         at6 = from + at;
     }
     forward(&sh.out[from..]);
+    // G2488 (2026-11-15, #128): the shell can end just after the check above saw it
+    // alive at its prompt, so the cause is judged again here: ended, and the line
+    // editor echoed none of the first key's `cho` after its prompt, is the same
+    // shell that ended before reading a key, and gets the same note on rows 6-8.
+    if !done && live_with(&["sh", "-i"]).is_none() && find(&sh.out[from..], b"cho").is_none() {
+        return fail_rest(6, &ended_unread(w));
+    }
     if !done {
         r.fail(format_args!(
             "the keys `cho $W:z`, Home, `e`, End, left, left, `-`, right, `y`, Enter did not make the shell print {out6:?} and a prompt within {KEYS_MS} ms: in raw mode each key reaches the line editor as it is typed, Home ESC [ 1 ~, End ESC [ 4 ~, left ESC [ D, right ESC [ C, and it waits for each with poll(-1)"

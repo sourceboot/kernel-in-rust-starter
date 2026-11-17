@@ -379,7 +379,7 @@ fn pingpong(me: u64) -> ! {
         }
         sched::yield_now();
         i += 1;
-        if i % 64 == 0 && clock.ms() > 4000 {
+        if i % 64 == 0 && clock.ms() > TOKEN_MS {
             PTIMEOUT.store(true, Ordering::SeqCst);
             PSTOP.store(true, Ordering::SeqCst);
         }
@@ -478,13 +478,36 @@ const LONE_TICKS: u64 = 20;
 /// trio catch the rest.
 const TICK_SLACK: u64 = 4;
 
+/// The token phase's time: the two token tasks give up TOKEN_MS after they
+/// start, read every 64 yields, and the boot task waits for them one second
+/// more. A yield that waits for the tick makes about 43 yields a task in that
+/// time, so its tasks never read the clock and the boot task's cutoff ends
+/// the phase at TOKEN_MS + 1,000 ms.
+const TOKEN_MS: u64 = 6000;
+/// The handoffs asked for: `derive(nonce) % TOKEN_SPAN + 500`, 500 to 1,000.
+/// With TOKEN_MS that budgets 6,000 us a handoff at the top of the range.
+/// A yield that waits for the tick makes two handoffs every three ticks (the
+/// tick moves the CPU round ping, the boot task and pong), about 85 in the
+/// 7 s to the cutoff (86 measured), under a fifth of the 500 at the bottom
+/// (tick_handoffs). 500 to 1,500 in 4 s
+/// (2,667 us at the top) until #124 (2026-11-15, G1906): a correct
+/// `yield_now` spinning 1.0 ms costs about 1,530 us a handoff at rest and
+/// up to 4,557 us beside a loaded host's busy loops, and was refused there
+/// at the top of the range.
+const TOKEN_SPAN: u64 = 501;
+/// The handoffs a yield that waits for the tick makes in `us` microseconds:
+/// two for every three ticks at 18.2 Hz, 2 x 18.2 / 3 = 364 / 30 a second.
+fn tick_handoffs(us: u64) -> u64 {
+    us * 364 / 30_000_000
+}
+
 // The whole row runs with the PIT slowed to 18.2 Hz: a handoff that rides a
-// tick instead of a yield then makes at most a few dozen in the time the
-// row allows, far under the 500 it asks for at least, so the row needs no
-// count of the learner's own to tell the two apart. The rate goes back to
-// the kernel's 1000 Hz before the row returns.
+// tick instead of a yield then makes at most about a hundred in the time
+// the row allows, far under the 500 it asks for at least, so the row needs
+// no count of the learner's own to tell the two apart. The rate goes back
+// to the kernel's 1000 Hz before the row returns.
 ktest!("task.1000.switches", fn thousand_switches(t: &mut TestCtx) {
-    let bound = t.derived("task.1000.switches") % 1001 + 500;
+    let bound = t.derived("task.1000.switches") % TOKEN_SPAN + 500;
     BOUND.store(bound, Ordering::SeqCst);
     pit(0);
     let s0 = sched::switches();
@@ -501,7 +524,7 @@ ktest!("task.1000.switches", fn thousand_switches(t: &mut TestCtx) {
             both = true;
             break;
         }
-        if c.ms() >= 5000 {
+        if c.ms() >= TOKEN_MS + 1000 {
             break;
         }
         sched::yield_now();
@@ -530,20 +553,25 @@ ktest!("task.1000.switches", fn thousand_switches(t: &mut TestCtx) {
     // of this task switched too, and so did every tick of that time.
     let lo = ip + iq + 2 + live;
     let hi = ip + iq + 2 + all + (wms * SLOW_HZ / 1000 + 2) + TICK_SLACK;
-    // (The PM timer wraps in 4.7 s, so the time is only read off it when the tasks finished.)
-    let took = if both { alloc::format!("{us} us") } else { String::from("over 5 s") };
+    // (The PM timer wraps in 4.7 s; Clock adds up every read, and each turn of the loop above
+    // reads it. Past the cutoff `us` is at least TOKEN_MS + 1,000 ms, so it is printed as that.)
+    let secs = alloc::format!("{}{}.{} s", if both { "" } else { "at least " }, us / 1_000_000, us / 100_000 % 10);
+    let took = if both { alloc::format!("{us} us") } else { alloc::format!("over {} s", TOKEN_MS / 1000 + 1) };
     t.note(format_args!(
         "task.1000.switches: at least {bound} handoffs asked, with the PIT at 18.2 Hz; two tasks passing a token through yield_now made {h} in {took} (sched::switches() moved {sw})"
     ));
     let mut fine = both && gone;
     if !both {
-        t.fail(format_args!("the two yielding tasks had not both finished 5 s after spawn ({h} handoffs made)"));
+        t.fail(format_args!(
+            "the two yielding tasks had not both finished {} s after spawn ({h} handoffs made)",
+            TOKEN_MS / 1000 + 1
+        ));
     }
     if PTIMEOUT.load(Ordering::SeqCst) || h < bound {
         fine = false;
         t.fail(format_args!(
-            "{h} handoffs in 4 s, {bound} asked: yield_now did not pass the CPU between two tasks often enough — with the clock at 18.2 ticks a second, a yield that waits for the tick makes about {}",
-            4 * SLOW_HZ
+            "{h} handoffs in {secs}, {bound} asked: yield_now did not pass the CPU between two tasks often enough — with the clock at 18.2 ticks a second, a yield that waits for the tick makes about {} in that time",
+            tick_handoffs(us)
         ));
     }
     t.note(format_args!(

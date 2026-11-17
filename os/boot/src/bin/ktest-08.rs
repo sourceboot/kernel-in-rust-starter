@@ -267,6 +267,50 @@ ktest!("map.user.readback", fn map_user_readback(t: &mut TestCtx) {
     } else {
         t.fail(format_args!("no frames for the huge pages"));
     }
+    // A kernel page at a kernel-half address this run picks (G2022, 2026-11-15):
+    // PML4 index 384 + pick(64), or the first index after it (wrapping inside
+    // 384..448) whose entry is empty in the running tables, and so in this
+    // space's copy of them. The tables map builds for it are then this space's
+    // own: the bootloader's (the HHDM at entry 256; the kernel image and lab
+    // 10's heap at 511) are never written. Every user-half entry this row uses
+    // is below 96, so a walk that drops the index's top bit lands on entry
+    // index - 256 (128..191), which this row never touches: the user half must
+    // come out of the map as it went in.
+    let pml4 = |root: u64, i: usize| -> u64 {
+        // SAFETY: a PML4 frame (the running one or `a`'s) read through the HHDM.
+        unsafe { hhdm::<u64>(root & ADDR).add(i).read_volatile() }
+    };
+    let start = t.pick("map.user.readback/kernel-half", 64) as usize;
+    let ki = (0..64).map(|d| 384 + (start + d) % 64).find(|&i| pml4(old, i) == 0 && pml4(a.root().0, i) == 0);
+    let hva = VirtAddr(0xffff_0000_0000_0000 | (ki.unwrap_or(384) as u64) << 39 | (t.derived("map.user.readback/kernel-half-page") & 0x7f_ffff_f000));
+    let hpattern = 0x5b00_7b00_4b00_0000 ^ hva.0 >> 12;
+    let mut hmapped = false;
+    if let Some(ki) = ki {
+        // SAFETY: `k` is ours (its PML4[3] mapping is gone), written through the HHDM.
+        unsafe { hhdm::<u64>(k.0 .0).add(5).write_volatile(hpattern) };
+        let mut user = [0u64; 4];
+        for (i, w) in (0..256).map(|i| (i, pml4(a.root().0, i))) {
+            user[i / 64] |= (w & flags::PRESENT) << (i % 64);
+        }
+        t.note(format_args!("map.user.readback: kernel page {:#x} (PML4 entry {ki}, chosen by this run's nonce) -> frame {:#x}", hva.0, k.0 .0));
+        t.expect(a.map(hva, k, flags::PRESENT | flags::WRITE).is_ok(), "map of a kernel-half page returns Ok");
+        if let Some(i) = (0..256).find(|&i| (pml4(a.root().0, i) & flags::PRESENT) << (i % 64) != (user[i / 64] & (1 << (i % 64)))) {
+            let (now, own) = (pml4(a.root().0, i), pml4(a.root().0, ki));
+            if now & flags::PRESENT != 0 {
+                t.fail(format_args!("mapping the kernel-half address {:#x} made user-half PML4 entry {i} present ({now:#x}); the address's own entry is {ki}, which reads {own:#x}", hva.0));
+            } else {
+                t.fail(format_args!("mapping the kernel-half address {:#x} cleared user-half PML4 entry {i}; the address's own entry is {ki}, which reads {own:#x}", hva.0));
+            }
+        }
+        let want = walk_in(a.root().0, hva.0).0;
+        hmapped = want == Some((k.0 .0, 4096));
+        if !hmapped {
+            t.fail(format_args!("after map, the page tables give {} for the kernel-half address {:#x}, not frame {:#x}", Shown(want), hva.0, k.0 .0));
+        }
+        t.expect(a.translate(hva) == Some((k.0, PageSize::Size4K)), "translate finds the kernel-half page's frame");
+    } else {
+        t.fail(format_args!("every PML4 entry from 384 to 447 is present in the running tables, so no kernel-half page could be placed"));
+    }
     t.expect(a.translate(va) == Some((f.0, PageSize::Size4K)), "translate finds the frame as a 4 KiB page");
     a.activate();
     let p = va.as_mut_ptr::<u64>();
@@ -277,9 +321,30 @@ ktest!("map.user.readback", fn map_user_readback(t: &mut TestCtx) {
         p.add(7).write_volatile(!pattern);
         (s, hhdm::<u64>(f.0 .0).add(7).read_volatile())
     };
+    // Only where the tables map it: through an address they do not map, the
+    // access would fault and end the run.
+    let hseen = hmapped.then(|| {
+        let p = hva.as_mut_ptr::<u64>();
+        // SAFETY: the vehicle's own walk found `hva` mapped to `k` in the live
+        // space, writable (the map asked for WRITE; a missing WRITE in a table
+        // entry would fault here as it would in lab 10).
+        unsafe {
+            let s = p.add(5).read_volatile();
+            p.add(9).write_volatile(!hpattern);
+            (s, hhdm::<u64>(k.0 .0).add(9).read_volatile())
+        }
+    });
     set_cr3(old);
     t.expect_eq("the word read through the new mapping", seen, pattern);
     t.expect_eq("a word written through the mapping, read through the HHDM", wrote, !pattern);
+    if let Some((s, w)) = hseen {
+        t.expect_eq("the word read through the kernel-half mapping", s, hpattern);
+        t.expect_eq("a word written through the kernel-half mapping, read through the HHDM", w, !hpattern);
+    }
+    if ki.is_some() {
+        t.expect(a.unmap(hva) == Some(k), "unmap of the kernel-half page returns its frame");
+        t.expect(a.translate(hva).is_none(), "translate after the kernel-half unmap returns None");
+    }
     t.expect(a.unmap(va) == Some(f), "unmap returns the mapped frame");
     t.expect(a.translate(va).is_none(), "translate after unmap returns None");
     frame::free(f);

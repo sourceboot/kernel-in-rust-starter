@@ -24,11 +24,12 @@
  *
  *   ttyprobe tcsets ok <the nonce>
  *
- * raw: four reads in raw mode, with no poll: what a raw read returns is
- * the read's own answer (busybox's line editor and vi poll first; rows 6
- * and 7 of ktest-33 take that path). Each step prints a line when it is
- * about to read, and the reads after the first print their answer (the
- * count, or minus the errno) and the bytes in hex (`-` for none):
+ * raw: four reads in raw mode with no poll before them, so what a raw read
+ * returns is the read's own answer (busybox's line editor and vi poll
+ * first; rows 6 and 7 of ktest-33 take that path), and two polls of its
+ * own. Each step prints a line when it is about to read (or poll),
+ * and the steps after the first print their answer (the count, or minus
+ * the errno) and the bytes in hex (`-` for none):
  *
  *   1. ICANON, ECHO, ISIG and ICRNL off, VMIN 1, VTIME 0, on an O_NONBLOCK
  *      file: `ttyprobe raw ready <the nonce>`, then the six bytes typed at
@@ -41,7 +42,19 @@
  *      one read of 8 bytes that sleeps, nothing typed, until ctrl+c sends
  *      SIGINT and the signal ends it, -EINTR (`isig`; the line adds how many
  *      times the handler ran, and 1 if it had run before the read began).
- *   4. ISIG off, ICRNL on, VMIN 21: one read of 21 bytes, while x, Enter, up,
+ *   4. ISIG and ICRNL on, VMIN 1, nothing typed: two polls for POLLIN on
+ *      the blocking file, each with a 10 s timeout, which answer 1 (POLLIN)
+ *      once a key comes, however long they have waited (a positive timeout,
+ *      so the step asks nothing of lab 33's negative-timeout task, and a poll
+ *      that looks only at its deadline still comes back inside the run);
+ *      after each, one O_NONBLOCK read of 8 bytes takes the key (`polla`,
+ *      `pollb`; the line gives poll's answer, the bytes read, revents in hex
+ *      and the read's answer). The vehicle types poll A's z as soon as its
+ *      line is out and poll B's only well after it began, and a poll that
+ *      does not answer in time is ended by ctrl+c's SIGINT (added
+ *      2026-11-15, sprint 9 #128, ledger G2218; two polls since its fix
+ *      round).
+ *   5. ISIG off, ICRNL on, VMIN 21: one read of 21 bytes, while x, Enter, up,
  *      down, right, Home, End, Esc and Backspace are typed, returns their
  *      21 bytes in one call, Enter a NL (`keys`). Keys typed after those
  *      stay for whatever reads the console next.
@@ -50,12 +63,18 @@
  *   ttyprobe raw vmin0 = <answer> <hex> <the nonce>
  *   ttyprobe raw isig <the nonce>
  *   ttyprobe raw isig = <answer> <hex> <runs> <early> <the nonce>
+ *   ttyprobe raw polla <the nonce>
+ *   ttyprobe raw polla = <answer> <hex> <revents> <read's answer> <the nonce>
+ *   ttyprobe raw pollb <the nonce>
+ *   ttyprobe raw pollb = <answer> <hex> <revents> <read's answer> <the nonce>
  *   ttyprobe raw keys <the nonce>
  *   ttyprobe raw keys = <answer> <hex> <the nonce>
  *
- * Steps 2-4 were added 2026-10-29 (slice 9 fix round 1). The keys of
- * steps 3 and 4 are the vehicle's, pushed into the keyboard's ring once the
- * line before the read is out. The first termios is put back at the end.
+ * Steps 2, 3 and 5 were added 2026-10-29 (slice 9 fix round 1), step 4
+ * 2026-11-15. The keys of steps 3-5 are the vehicle's, pushed into the
+ * keyboard's ring once the line before the read (or poll) is out; the
+ * vehicle also times step 2's read by its two lines. The first termios is
+ * put back at the end.
  *
  * access: access(2) as root on a file it makes with mode 0, one with mode
  * 0644, a name that is not there, /tmp and /bin/busybox (a mode above 7
@@ -83,6 +102,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -270,6 +290,26 @@ static void on_sigint(int sig) {
     sigints++;
 }
 
+/* One poll step (raw mode set by the caller): its line, poll for POLLIN
+ * with a 10 s timeout, one O_NONBLOCK read of 8 bytes, its answer line. */
+static void poll_once(int fd, int nb, const char *step) {
+    unsigned char got[8];
+    printf("ttyprobe raw %s %016" PRIx64 "\n", step, nonce);
+    struct pollfd pf = {fd, POLLIN, 0};
+    errno = 0;
+    int pr = poll(&pf, 1, 10000);
+    int perr = errno;
+    errno = 0;
+    ssize_t k = read(nb, got, 8);
+    int err = errno;
+    printf("ttyprobe raw %s = %ld ", step, pr < 0 ? -(long)perr : (long)pr);
+    if (k > 0)
+        hex(got, (size_t)k);
+    else
+        printf("-");
+    printf(" %x %ld %016" PRIx64 "\n", (unsigned)pf.revents, k < 0 ? -(long)err : (long)k, nonce);
+}
+
 static void raw(void) {
     unsigned char t0[36], got[32];
     size_t n = 0;
@@ -324,7 +364,18 @@ static void raw(void) {
     answer("isig", k, err, got);
     printf(" %d %d %016" PRIx64 "\n", (int)sigints, early, nonce);
 
-    /* 4: ISIG off, VMIN 21: one read takes the 21 bytes of the vehicle's
+    /* 4 and 5: two polls (10 s) with nothing typed, each answering once a
+     * key comes: for poll A the vehicle types z as soon as its line is out,
+     * for poll B only after the poll has waited a while (by the PM timer and
+     * by the guest's ticks), so a poll that looks late misses A's rescue and
+     * one that looked once, early, and never again does not see B's key;
+     * ctrl+c (ISIG on) then ends it, -EINTR. Each key is taken by one
+     * O_NONBLOCK read. */
+    raw_mode(fd, t0, 1, 1, 1);
+    poll_once(fd, nb, "polla");
+    poll_once(fd, nb, "pollb");
+
+    /* 5: ISIG off, VMIN 21: one read takes the 21 bytes of the vehicle's
      * keys, Enter a NL; the keys after them stay in the ring. */
     raw_mode(fd, t0, 0, 1, KEYS);
     printf("ttyprobe raw keys %016" PRIx64 "\n", nonce);
