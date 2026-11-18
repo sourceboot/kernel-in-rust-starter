@@ -102,7 +102,8 @@ pub struct DirEntry {
     pub name: String,
 }
 
-/// A file or a directory of some file system (interface 10).
+/// A file or a directory of some file system (lab 13's trait; ext2 implements
+/// it from lab 17).
 pub trait Inode: Send + Sync {
     /// The entry `name` of this directory. `-ENOENT` when there is none,
     /// `-ENOTDIR` when this is not a directory.

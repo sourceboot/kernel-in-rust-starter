@@ -367,8 +367,8 @@ each answers its own `st_dev`. It needs `/proc/mounts` in Linux's field order (`
 
 - **The loop:** prompt **`$ `** (dollar, space) on fd 1, no newline; then fd 0 is read **one
   byte per `read` call** up to `\n`, so a command that reads fd 0 gets the bytes after its own
-  line and never ones the shell took. On the console this means line mode must hand one line out
-  across several reads, as Linux's canonical mode does. `read` = 0 with nothing typed ends the
+  line and never ones the shell took. On the console this means its canonical-mode read must hand one
+  line out across several reads, as Linux's does. `read` = 0 with nothing typed ends the
   shell with the last status (a partial line before EOF runs first); a refused `read` prints
   `sh: <stdin>: <name>` and exits 1. An empty line keeps `$?`.
 - **A line:** words split on spaces and tabs (`\r` counts as a space); `>` (fd 1 to a file,

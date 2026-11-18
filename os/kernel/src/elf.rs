@@ -32,7 +32,8 @@ use crate::paging::AddressSpace;
 use crate::proc::VmaList;
 use crate::syscall::Errno;
 
-/// Something that can hand out its bytes by offset (interface 9).
+/// Something that can hand out its bytes by offset: lab 13's archive files,
+/// and from lab 17 ext2's.
 pub trait ReadAt {
     /// Up to `buf.len()` bytes from byte `off`; `Ok(0)` at or past the end.
     fn read_at(&self, off: u64, buf: &mut [u8]) -> Result<usize, Errno>;

@@ -56,7 +56,8 @@
  * going back, inside [ready, the last read] by CLOCK_REALTIME.
  * Then ROUNDS rounds of F12. Round k writes `# sboot poll-ready k/ROUNDS`
  * to /dev/console, the serial line: the grader reads that line there and
- * types F12 at the machine (a press, then its release 50 ms later). The
+ * types F12 at the machine (a press, then its release a key hold later:
+ * 150 ms when sboot's engine times the key). The
  * round reads CLOCK_MONOTONIC, asks poll(0), reads the clock again and
  * calls poll(3000). It is not judged (inconclusive) when poll(0) already
  * said POLLIN, F12 having come before poll(3000) was asked, or when more
@@ -81,7 +82,10 @@
  * Before its first read() a judged round spins until CLOCK_REALTIME is SPIN_NS
  * past poll(3000)'s return (G2442), so a press stamped when it is read, not when
  * it came in, reads a negative wake. `poll ok` needs at least one judged round
- * and every judged round passed. The line goes to the console, not to
+ * and every judged round passed. As each round's wait ends -- right after
+ * poll(3000) returns, or after the drain of a round not judged -- it writes
+ * `# sboot polled k/ROUNDS` to the console: the grader times that line on the
+ * host's clock from the moment it typed F12 (sprint 11 #159). The line goes to the console, not to
  * stdout, because stdout is a pipe the test reads only when it gets the
  * CPU; the console write reaches the serial port from this program's own
  * syscall. Last, a read of the empty device must be -1 with EAGAIN; then
@@ -107,6 +111,10 @@
  * round's line is a part of another's (the grader's wait matches anywhere
  * in the capture). */
 #define POLL_READY "# sboot poll-ready %d/%d\n"
+/* The line written to the console as soon as round k's wait ends (2026-11-17,
+ * sprint 11 #159; ledger G2569, G2570): the grader times it on the HOST clock from
+ * the moment it typed F12, and judges the middle of the three rounds. */
+#define POLLED "# sboot polled %d/%d\n"
 /* The rubric's [[script]] types one F12 per round (2026-11-06, G1834). */
 #ifndef ROUNDS
 #define ROUNDS 3
@@ -151,6 +159,13 @@ __attribute__((noinline)) static int64_t ns(clockid_t c) {
     struct timespec t;
     clock_gettime(c, &t);
     return (int64_t)t.tv_sec * 1000000000 + t.tv_nsec;
+}
+
+/* Round k's wait has ended: say so on the console at once (POLLED). */
+__attribute__((noinline)) static void polled(int con, int k) {
+    char line[32];
+    int len = snprintf(line, sizeof line, POLLED, k, ROUNDS);
+    (void)!write(con, line, len);
 }
 
 static int fail(const char *what) {
@@ -400,6 +415,7 @@ int main(int argc, char **argv) {
         if (pre != 0 || t2 - t1 > GAP_MAX_NS) {
             /* Not judged: F12 may have come before poll(3000) looked. */
             drain(fd);
+            polled(con, k);
             printf("round %d %s gap %ld wake -1 at 0\n", k, pre != 0 ? "early" : "gap", gap);
             continue;
         }
@@ -407,6 +423,7 @@ int main(int argc, char **argv) {
         char rb[512] = "";
         r = ask(1, &fd, (short[]){POLLIN}, &rev, 3000);
         int64_t back = ns(CLOCK_MONOTONIC), back_rt = ns(CLOCK_REALTIME);
+        polled(con, k);
         long spins = 0;
         while (ns(CLOCK_REALTIME) < back_rt + SPIN_NS)
             if (++spins >= SPIN_CALLS) break;

@@ -3,7 +3,7 @@
 //! and its directories listed, made, removed and renamed (lab 20). This
 //! file is yours.
 //!
-//! The course's disk carries ext2 revision 1 in partition 2 (CONTRACT §A.7):
+//! The course's disk carries ext2 revision 1 in partition 2:
 //! one block group, 4 KiB blocks, 128-byte inodes, directory records with a
 //! type byte (`INCOMPAT_FILETYPE`). Every number on the disk is
 //! little-endian; read each field out of the bytes with `from_le_bytes`.
@@ -52,7 +52,7 @@
 //!
 //! Every metadata change — a bitmap, the inode table, a directory block, a
 //! pointer block, the superblock, the descriptor — is made inside one log
-//! operation (`log::begin_op` … `log::end_op`, lab 18's interface 16) and
+//! operation (`log::begin_op` … `log::end_op`, from lab 18) and
 //! handed to `log::log_write` instead of `Cache::write`; a file's own data
 //! blocks go to `Cache::write`. No operation logs more than
 //! `log::MAXOPBLOCKS` blocks, so a long `write_at` is several operations of
@@ -88,7 +88,7 @@ pub const INODE_SIZE: usize = 128;
 pub const SUPERBLOCK_OFFSET: usize = 1024;
 /// Buffers in the cache an `Ext2` keeps.
 pub const NBUF: usize = 32;
-/// The log's own file, in the root directory (CONTRACT §A.7).
+/// The log's own file, in the root directory.
 pub const LOG_NAME: &str = ".sboot-log";
 /// The most file blocks one operation of `write_at` writes.
 pub const WRITE_CHUNK: u64 = 8;
@@ -294,7 +294,7 @@ impl Inode for Ext2Inode {
     }
 }
 
-/// The ELF loader reads a program off the disk through this (interface 9).
+/// The ELF loader reads a program off the disk through this.
 impl ReadAt for Ext2Inode {
     fn read_at(&self, off: u64, buf: &mut [u8]) -> Result<usize, Errno> {
         let _ = (off, buf);

@@ -309,7 +309,7 @@ static KEY_IDT: [[AtomicU64; 2]; 256] = [const { [const { AtomicU64::new(0) }; 2
 /// and its 8259 keeps an edge latched until it is delivered, so a handler
 /// that drains the controller in one interrupt still gets one per byte. Round
 /// k's F12 is then deliveries `KEYS_IRQS + 2(k-1)` (the make) and the one
-/// after it (the break, QMP's 50 ms hold later). Picked by order, no
+/// after it (the break, a key hold later). Picked by order, no
 /// scheduling moves it (G2571). The guest owns the IRQ stream, though: an
 /// added delivery (`int`, or the i8042's 0xD2 command) moves the pick
 /// earlier, and a removed one (a masked IRQ 1 merging two bytes into one

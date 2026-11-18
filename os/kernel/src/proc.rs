@@ -78,7 +78,8 @@ pub struct Vma {
     pub kind: VmaKind,
 }
 
-/// A process's VMAs, sorted by start, never overlapping (interface 19).
+/// A process's VMAs, sorted by start, never overlapping (lab 12's; lab 13's
+/// `exec` builds it from the ELF).
 #[derive(Clone, Default, Debug)]
 pub struct VmaList(Vec<Vma>);
 
@@ -165,8 +166,8 @@ pub fn with_current<R>(f: impl FnOnce(&mut Process) -> R) -> Option<R> {
     todo!("lab 12 task 5 — with_current: the running process's record, for exit")
 }
 
-/// Call `f` on every process, in spawn order (interface 17). Interrupts are
-/// off while it runs.
+/// Call `f` on every process, in spawn order; lab 22's `/proc` reads through
+/// it. Interrupts are off while it runs.
 pub fn each(f: impl FnMut(&Process)) {
     let _ = f;
     todo!("lab 12 task 3 — each: every record, in spawn order")

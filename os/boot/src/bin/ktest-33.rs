@@ -1013,7 +1013,7 @@ fn has_line(seg: &[u8], line: &str) -> bool {
 ///    pushes x and Enter, and once it sleeps again (2 bytes are fewer than
 ///    VMIN) the other seven keys and, behind them, a, b, Backspace, c,
 ///    Enter; one read returns the 21 bytes and leaves the last five keys in
-///    the ring, where line mode reads them as `ac\n` after the row.
+///    the ring, where the cooked read takes them as `ac\n` after the row.
 ///
 /// A step whose read is still asleep `STEP_MS` after its keys (step 2: after
 /// its line) gets Enter pushed, so the session goes on, and the row fails
@@ -1321,7 +1321,7 @@ fn raw_row(sh: &mut Sh, w: &Words) -> bool {
         }
     }
     cooked_check(&mut r, "after `ttyprobe raw` set its first termios back");
-    // The keys behind step 4's: still in the ring, read in line mode now.
+    // The keys behind step 4's: still in the ring, read cooked now.
     if after && late.is_empty() {
         match read_console_within(STEP_MS) {
             Ok(got) if got == AFTER_LINE => match read_console() {
@@ -1330,7 +1330,7 @@ fn raw_row(sh: &mut Sh, w: &Words) -> bool {
                 Err(e) => r.fail(format_args!("after row 3's line `ac`, a second non-blocking read of the console returned {e}; nothing else was typed, so -EAGAIN")),
             },
             Ok(got) => r.fail(format_args!(
-                "after row 3, the keys a, b, Backspace, c and Enter, pushed behind the 21 bytes ttyprobe's last raw read asked for, read cooked as {:?}: keys a raw read did not take stay in the ring for whatever reads next, so line mode edits them into {:?}",
+                "after row 3, the keys a, b, Backspace, c and Enter, pushed behind the 21 bytes ttyprobe's last raw read asked for, read cooked as {:?}: keys a raw read did not take stay in the ring for whatever reads next, so the cooked read edits them into {:?}",
                 String::from_utf8_lossy(&got),
                 String::from_utf8_lossy(AFTER_LINE)
             )),
@@ -1520,7 +1520,7 @@ fn interactive(sh: &mut Sh, w: &Words) {
         r.finish(8);
         return;
     }
-    // Line mode read by a reader that edits nothing itself (ash's `read`
+    // A cooked read by a reader that edits nothing itself (ash's `read`
     // edits on its own, so it cannot tell): the vehicle's keys, a cooked
     // line with an erase in it, in the first non-blocking read that is not
     // -EAGAIN.
@@ -1528,12 +1528,12 @@ fn interactive(sh: &mut Sh, w: &Words) {
     match read_console_within(STEP_MS) {
         Ok(got) if got == COOKED_LINE => {}
         Ok(got) => r.fail(format_args!(
-            "after the interactive shell exited, the keys a, b, x, Backspace, c, Enter read from the console by a non-blocking read as {:?}; line mode hands out the finished line in one read, the Backspace applied: {:?}",
+            "after the interactive shell exited, the keys a, b, x, Backspace, c, Enter read from the console by a non-blocking read as {:?}; a cooked read hands out the finished line in one read, the Backspace applied: {:?}",
             String::from_utf8_lossy(&got),
             String::from_utf8_lossy(COOKED_LINE)
         )),
         Err(e) => r.fail(format_args!(
-            "after the interactive shell exited, non-blocking reads of the console for {STEP_MS} ms by the PM timer, with a, b, x, Backspace, c, Enter typed, returned {e}; line mode hands out the finished line {:?}",
+            "after the interactive shell exited, non-blocking reads of the console for {STEP_MS} ms by the PM timer, with a, b, x, Backspace, c, Enter typed, returned {e}; a cooked read hands out the finished line {:?}",
             String::from_utf8_lossy(COOKED_LINE)
         )),
     }
