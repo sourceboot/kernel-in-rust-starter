@@ -1,4 +1,4 @@
-# user/rust/ -- `ulib`, the course's user-mode Rust crate (CONTRACT §A.8; LADDER §1).
+# user/rust/ -- `ulib`, the course's user-mode Rust crate.
 #
 # Course-owned, like the rest of user/. Its two bin targets are YOUR files, named
 # by path: userland/init.rs (lab 28) and userland/sh.rs (lab 29). The library is

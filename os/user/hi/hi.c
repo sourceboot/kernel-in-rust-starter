@@ -1,8 +1,8 @@
 /*
  * user/hi/hi.c -- lab 09's program, and the course's retention device:
- * labs 12, 13, 14, 15, 17, 23 and 24 run it again (DESIGN.md).
+ * labs 12, 13, 14, 15, 17, 23 and 24 run it again.
  *
- * Protocol (CONTRACT §A.3): argv = ["hi", <nonce: 32 hex>, <index: decimal>].
+ * Protocol: argv = ["hi", <nonce: 32 hex>, <index: decimal>].
  * It reads its own CS, prints the line Part C fixes,
  *     hi: cs=0x2b rpl=3 nonce=<argv[1]>
  * with the values it actually read, then evidence on '#' lines, then its one
@@ -15,7 +15,7 @@
 #include "../sys.h"
 
 #define ID      "ring3.cs.rpl"
-#define USER_CS 0x2b    /* CONTRACT §A.9 S1: user code64 is 0x28, entered with RPL 3 */
+#define USER_CS 0x2b    /* lab 04's GDT: user code64 is 0x28, entered with RPL 3 */
 
 static int index_valid(const char *s)
 {
@@ -59,7 +59,7 @@ int main(int argc, char **argv, char **envp)
     line_end(&l);
 
     /* The ABI once more: two more lab-09 calls, printed as they come back
-     * (the kernel answers 1, and 0 with 80x25: CONTRACT §A.4). */
+     * (the kernel answers 1, and 0 with 80x25). */
     line_str(&l, "# getpid=");
     line_sdec(&l, sys_getpid());
     line_end(&l);

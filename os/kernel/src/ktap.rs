@@ -1,5 +1,5 @@
 //! The cockpit: test registry, KTAP runner, expectation recorder, and the
-//! run's nonce (CONTRACT §A.2, §A.3). Course-owned — the learner reads it,
+//! run's nonce. Course-owned — the learner reads it,
 //! never retypes it: the course's tests execute inside this code. It touches
 //! learner code through exactly one seam, `serial::write_str` — your UART is
 //! the physical layer of every report. (The vehicles in `boot/src/bin/` call
@@ -16,7 +16,7 @@
 //! test with its `#` evidence lines BEFORE it, then `# sboot end` last.
 //! There is no `# SKIP` and no trailer on a result line.
 //!
-//! The ANCHORS (CONTRACT §A.3a, 2026-10-25). Four kinds of exported symbol
+//! The ANCHORS. Four kinds of exported symbol
 //! are where the grading engine sets its breakpoints, and their names are
 //! engine contract: `sboot_ktap_run` (the runner, `run_all`), `sboot_ktest_<id>`
 //! (each test fn `ktest!` defines), `sboot_ktap_record` (the recorder: every
@@ -98,7 +98,7 @@ pub fn note(args: fmt::Arguments) {
     let _ = writeln!(Out, "# {args}");
 }
 
-// ── The nonce (CONTRACT §A.2) ────────────────────────────────────────────
+// ── The nonce ────────────────────────────────────────────────────────────
 
 /// `None` = not read yet; `Some(None)` = read, absent or malformed.
 static NONCE: SpinLock<Option<Option<[u8; 32]>>> = SpinLock::new(None);
@@ -147,7 +147,7 @@ pub fn fnv1a64(bytes: &[u8]) -> u64 {
     h
 }
 
-/// The splitmix64 finaliser, constants as CONTRACT §A.2 gives them.
+/// The splitmix64 finaliser, with its standard constants.
 pub fn splitmix64(x: u64) -> u64 {
     let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -157,7 +157,7 @@ pub fn splitmix64(x: u64) -> u64 {
 
 /// `derive(nonce, id) = splitmix64(lo ^ hi ^ fnv1a64(id))`: the nonce's hex
 /// parsed to 16 bytes, `lo` = bytes 0..8 and `hi` = bytes 8..16, each read
-/// little-endian (CONTRACT §A.2). `user/sys.h derive()` computes the same.
+/// little-endian. `user/sys.h derive()` computes the same.
 pub fn derive(nonce: &[u8; 32], id: &str) -> u64 {
     let mut raw = [0u8; 16];
     for (i, b) in raw.iter_mut().enumerate() {
@@ -208,7 +208,7 @@ impl TestCtx {
 
     /// `derive(nonce, id)` for this run. Without a nonce the value is the
     /// all-zero nonce's, so the test still runs, and the row prints `not ok`
-    /// by design (CONTRACT §A.2). By convention `id` is the row's own id, or
+    /// by design. By convention `id` is the row's own id, or
     /// `<row id>/<k>` for a row's k-th value.
     pub fn derived(&self, id: &str) -> u64 {
         self.used_nonce.set(true);
@@ -239,7 +239,7 @@ pub fn begin(plan: usize) {
     let _ = writeln!(Out, "1..{plan}");
 }
 
-/// The run's last line (CONTRACT A.1-11).
+/// The run's last line.
 pub fn end() {
     let _ = writeln!(Out, "# sboot end");
 }
@@ -273,7 +273,7 @@ pub extern "C" fn halt() -> ! {
 
 /// Run every registered test, emitting KTAP over the learner's serial port.
 /// A test whose id is registered twice is not run: every copy prints
-/// `not ok` (CONTRACT §A.3). Returns whether all tests passed. The runner
+/// `not ok`. Returns whether all tests passed. The runner
 /// anchor (`sboot_ktap_run`): its entry is the trail's first stop.
 #[inline(never)]
 #[export_name = "sboot_ktap_run"]

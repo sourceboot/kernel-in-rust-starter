@@ -1,5 +1,5 @@
 /*
- * user/sh/sh.c -- lab 23's shell, the course's (RATIFY Q6): the learner's kernel runs it,
+ * user/sh/sh.c -- lab 23's shell, the course's: the learner's kernel runs it,
  * the learner does not write it. The finish line of the title.
  *
  *     sh                          reads commands from fd 0, one line at a time
@@ -19,7 +19,7 @@
  * control, no variables you can set. Inside or outside quotes, `$?` is the last status and
  * `$NAME` is NAME's value in the shell's own environment (empty if unset); any other `$` is
  * itself. The status of a pipeline is its last command's: the exit code, or 128 + the signal
- * for a process the kernel killed (CONTRACT §A.6).
+ * for a process the kernel killed.
  *
  * Built in: `cd [dir]` (no dir: "/"), `exit [n]` (no n: the last status), `pwd`, and
  * `echo [word...]` (the words joined by one space, then '\n'; no options). `cd` and `exit`
@@ -38,7 +38,7 @@
  *     sh: fork: <errno>, sh: pipe: <errno>    (1; commands already started are waited for)
  *     sh: cd: <dir>: <errno>  (1)   sh: pwd: <errno>  (1)   sh: exit: <arg>: EINVAL  (2, stays)
  * <errno> is the name (ENOENT, ...) or -N. Syscalls: read, write, open, close, pipe2, dup2,
- * fork, execve, wait4, chdir, getcwd, exit -- each in CONTRACT §A.4 at or before lab 23.
+ * fork, execve, wait4, chdir, getcwd, exit -- each served at or before lab 23.
  */
 #include "../sys.h"
 

@@ -60,7 +60,7 @@
  * (non-canonical: the ring-3 fetch (5) makes there is a #GP on QEMU 10.2.1
  * and 11.1.1 and a #PF on 8.2.2). The program cannot tell a SIGSEGV that
  * rt_sigreturn sent from one a fault at the forged rip caused, so the
- * vehicle watches: since 2026-10-31 (G1928) it loads, for this mode, a
+ * vehicle watches: since 2026-10-31 it loads, for this mode, a
  * copy of the kernel's IDT whose #GP and #PF gates note any fault taken
  * in ring 3 at a rip at or past 0x0000800000000000 and then go on to the
  * kernel's own entries (ktest-32.rs, `watch`). It no longer reads

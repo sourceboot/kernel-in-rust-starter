@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # user/build.sh -- builds every course program into bin/ with the pinned
-# toolchain (CONTRACT §A.8; the pin is TOOLCHAIN.md). A maintainer runs this
+# toolchain (the pin is TOOLCHAIN.md). A maintainer runs this
 # by hand (no CI workflow runs it yet); a learner never does: the binaries ship
 # built, beside their sources.
 #
 #   ./build.sh            build everything, check every binary, write bin/boot.archive
-#                         (CONTRACT §A.7), read it back, write bin/SHA256SUMS
+#                         (README.md "The boot archive"), read it back, write bin/SHA256SUMS
 #   ZIG=/path/to/zig ./build.sh     use a zig that is not first on PATH
 #   OBJDUMP=llvm-objdump ./build.sh use another disassembler for the SSE check
 #   BUSYBOX_TARBALL=/path/busybox-1.37.0.tar.bz2 ./build.sh
@@ -29,21 +29,21 @@ BIN=$HERE/bin
 #   e_entry. "elf": loaded by lab 13's ELF loader; may carry a RW segment.
 #   "flat-sse": "flat", and the SSE check allows exactly the movq lines between a
 #   general register or memory and xmm0/xmm1 (hostile-spin's inline asm, on purpose:
-#   lab 12's regs.survive.preempt row is the FXSAVE check -- CONTRACT §A.8 as amended
+#   lab 12's regs.survive.preempt row is the FXSAVE check -- allowed since
 #   2026-10-17). Any other SSE line in such a program still fails the build.
-#   "musl" (lab 25, CONTRACT §A.8 as built 2026-10-22): a static program built against
+#   "musl" (lab 25, built 2026-10-22): a static program built against
 #   zig's own musl with no crt0 and no linker script -- the toolchain's default static
 #   layout (first PT_LOAD r-- at offset 0 -> 0x1000000, then r-x, then rw-), at most
 #   one PT_TLS, any SSE (musl's own memcpy and printf use it), never AVX: no ymm/zmm
 #   and no VEX-encoded xmm instruction. Stripped (-s): zig's cached libc objects carry
 #   DWARF with the absolute path of the machine's zig install, and -g0 does not reach them.
-#   "port" (lab 27, CONTRACT §A.8 as built 2026-10-22): an upstream program built
+#   "port" (lab 27, built 2026-10-22): an upstream program built
 #   UNMODIFIED from its own makefile's file list. The sources field names that makefile;
 #   its `SRC_DOOM = …` line is the list of objects, each built from the .c beside it, all
 #   in one zig cc call with PORT_CFLAGS. Then every "musl" check. doomgeneric's own
 #   sources, licence and makefile sit under doomgeneric/ byte for byte as the pinned
 #   upstream commit has them (user/README.md, "doomgeneric").
-#   "busybox" (lab 30, CONTRACT §A.8 as built 2026-10-23): upstream busybox, UNMODIFIED, from
+#   "busybox" (lab 30, built 2026-10-23): upstream busybox, UNMODIFIED, from
 #   its pinned release tarball (BUSYBOX_* below; not in the repo), configured by the committed
 #   .config the sources field names, built by busybox's own makefiles with zig cc as CC. Then
 #   every "musl" check, and its applet list must equal busybox/applets, which the image writer
@@ -98,12 +98,12 @@ PROGRAMS=(
   "ttyprobe|ttyprobe/ttyprobe.c|musl"
 )
 
-# The boot archive (CONTRACT §A.7): what labs 13-16 mount at / and 17 on at /boot.
+# The boot archive: what labs 13-16 mount at / and 17 on at /boot.
 # The W3 programs (ls ... sh, labs 17-23) are not in it: they ride ext2's /bin (2026-10-17).
 ARCHIVE=(init hi args hostile-kwrite hostile-badnum hostile-badptr hostile-spin forker producer consumer)
 
-# CONTRACT §A.8 (labs 09-24), plus -fno-builtin and the warnings, plus two measured additions:
-#  * -mno-sse -mno-sse2 -mno-mmx -msoft-float, §A.8's named fallback: zig cc 0.17.0 turns
+# The course's flags (labs 09-24), plus -fno-builtin and the warnings, plus two measured additions:
+#  * -mno-sse -mno-sse2 -mno-mmx -msoft-float, the fallback: zig cc 0.17.0 turns
 #    -mgeneral-regs-only into -sse/-mmx/-x87 and then appends its own baseline
 #    +sse/+sse2/+mmx/+x87, so the flag alone changes no byte (hi kept 31 SSE lines, the
 #    same sha256 as without it); the -mno-* flags reach zig's own CPU model and leave 0.
@@ -119,7 +119,7 @@ CFLAGS=(
 LDFLAGS=(-T "$HERE/user.ld")
 # The "musl" layout's flags: libc and its start-up code are the toolchain's, SSE is allowed.
 MUSL_CFLAGS=(-target x86_64-linux-musl -static -O2 -Wall -Wextra -g0 -s)
-# The "port" layout's flags: CONTRACT Appendix (1)'s build line (`make -f Makefile.linuxvt
+# The "port" layout's flags: upstream's build line (`make -f Makefile.linuxvt
 # CC="zig cc -target x86_64-linux-musl" CFLAGS="-static -O2 -DNORMALUNIX -DLINUX -DSNDSERV
 # -D_DEFAULT_SOURCE" LDFLAGS="-static"`), plus -g0 -s as for "musl": without them the bytes
 # carry DWARF with the build directory's absolute path (measured 2026-10-22: the Appendix
@@ -208,7 +208,7 @@ EOF
   rm -rf "$tmp"
 }
 
-# The ELF checks every course binary passes (CONTRACT §A.5, §A.8).
+# The ELF checks every course binary passes.
 elfcheck() { # file layout
   python3 -I - "$1" "$2" <<'PY'
 import struct, sys
@@ -291,7 +291,7 @@ for row in "${PROGRAMS[@]}"; do
   for s in $srcs; do src+=("$HERE/$s"); done
   "$ZIG" cc "${CFLAGS[@]}" "${LDFLAGS[@]}" -o "$BIN/$name" "${src[@]}"
   elfcheck "$BIN/$name" "$layout"
-  # No SSE in a pre-25 program (CONTRACT §A.5, §A.8): the disassembly names no vector register or op.
+  # No SSE in a pre-25 program: the disassembly names no vector register or op.
   sse=$("$OBJDUMP" -d "$BIN/$name" | grep -E 'xmm|ymm|movaps|movups|movdqa|movdqu|fxsave|cvt' || true)
   n=$(printf '%s' "$sse" | grep -c . || true)
   if [[ "$layout" == flat-sse ]]; then
@@ -307,7 +307,7 @@ for row in "${PROGRAMS[@]}"; do
   fi
 done
 
-# bin/boot.archive (CONTRACT §A.7): magic 0x5B007B00A2C4 (u64 LE), count (u32 LE), then per
+# bin/boot.archive: magic 0x5B007B00A2C4 (u64 LE), count (u32 LE), then per
 # entry {name: 56 bytes NUL-padded, offset: u64 LE, size: u64 LE}; offsets from the file's
 # start; each file's data 8-aligned, zero padding between. Entries sorted by name (bytewise);
 # no timestamps, so the bytes follow from the binaries alone.

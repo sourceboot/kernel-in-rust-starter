@@ -13,7 +13,7 @@
  * the exit status 1; a usage error is 2. A record whose d_reclen is under 20 or runs past
  * what getdents64 returned is reported as EIO (the kernel built it wrong); more than
  * MAX_NAMES names or NAME_BYTES bytes of names in one directory is ENOMEM.
- * Syscalls: open, getdents64, stat, close, write, exit (CONTRACT §A.4, lab 17).
+ * Syscalls: open, getdents64, stat, close, write, exit (lab 17).
  */
 #include "../sys.h"
 

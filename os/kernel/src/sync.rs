@@ -1,10 +1,10 @@
 //! `SpinLock<T>` — Rust for Kernels lab 03's lock, provided here so the course has one.
-//! Course-owned (proposed CONTRACT §B.1 amendment, 2026-10-16: the spine uses
+//! Course-owned (the kernel uses
 //! `SpinLock` from lab 09 on — the console, the task table, pipes — and no
 //! learner module owns it). You wrote this one already; it ships whole.
 //!
-//! One thing here is new: the deadlock check (2026-10-17, CONTRACT §A.9
-//! S4). `lock` that finds the lock held with interrupts off prints one line,
+//! One thing here is new: the deadlock check (lab 15's lock
+//! rule). `lock` that finds the lock held with interrupts off prints one line,
 //! `# deadlock: <file>:<line>: a <type> lock found held with interrupts off;
 //! nothing on this CPU can release it`, naming where `lock` was called and
 //! what the lock guards — and then keeps spinning, as before. On one CPU

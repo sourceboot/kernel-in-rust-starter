@@ -2,7 +2,7 @@
 
 The second program here the course did not write, and the first one a learner keeps using: from
 lab 30 `/bin/sh` is busybox's `ash`, and every name in `applets` is a hard link to `/bin/busybox`
-(CONTRACT §A.7, §A.8).
+on the lab-30-on disk images.
 
 **Upstream:** busybox 1.37.0, the release tarball
 `https://busybox.net/downloads/busybox-1.37.0.tar.bz2` (2,565,764 bytes), sha256
@@ -33,7 +33,7 @@ names exactly `applets`, so the two files cannot drift apart.
 
 **Off, deliberately:** `FEATURE_SH_STANDALONE`, `FEATURE_PREFER_APPLETS` and `FEATURE_SH_NOFORK`
 — every applet is reached as a file in `/bin` through the learner's `execve`, never by ash calling
-it in-process, so the hard links are what a lab exercises (LADDER Q3; the fallback stays unused).
+it in-process, so the hard links are what a lab exercises (the fallback stays unused).
 
 **Build** (`build.sh`, layout `busybox`): the tarball is unpacked in a temporary directory, the
 config copied in as `.config`, then
@@ -65,9 +65,9 @@ copy of `syscall::dispatch`, `ktest-30`'s seven groups): `read`, `write`, `open`
 numbers with no arm, both of which busybox survives: `sendfile` (40; its copy loop falls back to
 `read`/`write`) and `access` (21; `rm` asks `W_OK` and goes on). Never `brk`, `mprotect`,
 `uname`, or an `mmap` with `MAP_FIXED` or `PROT_NONE`: zig's allocator maps 124 KiB with a hint
-and unmaps the unaligned 60 KiB. See CONTRACT §B.2-30 and the slice-8 report for the counts.
+and unmaps the unaligned 60 KiB.
 
-**The source offer (GPL-2.0 §3):** busybox ships in the learner's workspace as a binary
+**The source offer (GPL-2.0 section 3):** busybox ships in the learner's workspace as a binary
 (`bin/busybox`, and inside every lab-30-on disk image), and the course offers the complete
 corresponding source at the URL below; `busybox.config` and `os/user/build.sh` are in this
 workspace. The URL goes live with the same deploy that first ships the binary (*placed

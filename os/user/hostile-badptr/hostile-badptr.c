@@ -1,9 +1,9 @@
 /*
  * user/hostile-badptr/hostile-badptr.c -- lab 12: write(2) with pointers the process may not read.
  *
- * Protocol (CONTRACT §A.3): argv = ["hostile-badptr", <nonce>, <index>].
+ * Protocol: argv = ["hostile-badptr", <nonce>, <index>].
  * Calls write(1, p, 16) for three p, each of which must come back -EFAULT (14),
- * a refusal, never a kill (§A.6: copy_from_user's range check):
+ * a refusal, never a kill (copy_from_user's range check):
  *   0                       the NULL page: nothing maps it (course binaries start at 0x1000000)
  *   0x0000100000000000      user half, unmapped (no VMA, no PTE)
  *   0xffff800000001000      kernel half (the HHDM: present, U=0)

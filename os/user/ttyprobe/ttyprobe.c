@@ -52,7 +52,7 @@
  *      and the read's answer). The vehicle types poll A's z as soon as its
  *      line is out and poll B's only well after it began, and a poll that
  *      does not answer in time is ended by ctrl+c's SIGINT (added
- *      2026-11-15, sprint 9 #128, ledger G2218; two polls since its fix
+ *      2026-11-15; two polls since its fix
  *      round).
  *   5. ISIG off, ICRNL on, VMIN 21: one read of 21 bytes, while x, Enter, up,
  *      down, right, Home, End, Esc and Backspace are typed, returns their

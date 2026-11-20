@@ -1,12 +1,12 @@
 /*
  * user/hostile-badnum/hostile-badnum.c -- lab 12: syscall numbers the kernel does not serve.
  *
- * Protocol (CONTRACT §A.3): argv = ["hostile-badnum", <nonce>, <index>].
+ * Protocol: argv = ["hostile-badnum", <nonce>, <index>].
  * Issues three numbers and expects exactly -ENOSYS (38) from each, a refusal,
- * never a kill (§A.4, §A.6):
- *   1000           above every number in §A.4's table (and above Linux's)
+ * never a kill:
+ *   1000           above every number the course serves (and above Linux's)
  *   (u64)-1        the all-ones number: a dispatch that indexes a table by it faults
- *   174            create_module: inside the range §A.4's table spans, but §A.4 reserves it
+ *   174            create_module: inside the range the course's numbers span, but the course reserves it
  *                  as never served by any lab, and Linux itself answers -ENOSYS (the call
  *                  was removed in 2.6; its table slot is sys_ni_syscall). So the row means
  *                  the same thing on every kernel from lab 12 to the last one, and natively.
@@ -19,7 +19,7 @@
 #include "../sys.h"
 
 #define ID "sys.badnum.enosys"
-#define SYS_create_module 174   /* §A.4: reserved, never served by any lab; Linux: -ENOSYS */
+#define SYS_create_module 174   /* reserved, never served by any lab; Linux: -ENOSYS */
 
 int main(int argc, char **argv, char **envp)
 {

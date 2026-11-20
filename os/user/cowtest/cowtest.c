@@ -1,8 +1,8 @@
 /*
  * user/cowtest/cowtest.c -- lab 24: copy-on-write fork, seen from user space.
  *
- * Protocol (CONTRACT §B.2-24): argv = ["cowtest", <nonce>, "t" <16 hex>], the
- * second word unpublished (CONTRACT §A.1-5). fd 0 is the control pipe the
+ * Protocol (lab 24): argv = ["cowtest", <nonce>, "t" <16 hex>], the
+ * second word unpublished. fd 0 is the control pipe the
  * kernel side writes one command into at a time; fds 1 and 2 are the pipe it
  * reads. Every line below goes out in one write(1). The program holds 48 MiB
  * in .bss (BIG_PAGES pages); once touched, word w of page p holds pre(p, w):
@@ -254,7 +254,7 @@ static int hexword(const volatile u8 *s, u64 *out)
  * shared X/Y/Z pages are left alone: copying them where the rows look is the
  * point.)
  *
- * WHY (2026-10-28, ledger G1821): the first store to a shared page faults and is
+ * WHY (2026-10-28): the first store to a shared page faults and is
  * re-run once the kernel has copied it. Measured at one site: row 1's `setg`
  * (testq %rax,%rax; ...; testq %r14,%r14; setg -0xb8(%rbp), the parent's "fork 1
  * gave a pid" flag, the first store to a stack page fork 1 shared). There QEMU

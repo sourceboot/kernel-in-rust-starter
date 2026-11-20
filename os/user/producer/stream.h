@@ -1,6 +1,6 @@
 /*
  * user/producer/stream.h -- lab 15's nonce-seeded stream, which producer writes and
- * consumer checks (CONTRACT §B.2-15 pipe.chain.checksum). One copy for both.
+ * consumer checks (lab 15's pipe.chain.checksum). One copy for both.
  *
  *   seed      = derive(nonce, "pipe.chain.checksum")
  *   length    = 4096 + seed % 8192                       (4096..12287 bytes: always > PIPE_BUF)

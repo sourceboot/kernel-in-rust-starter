@@ -1,7 +1,7 @@
 /*
  * user/init/init.c -- the course's init: from lab 14 on, the runner of every lab's programs.
  *
- * Protocol (CONTRACT §A.3, the init shape in README.md):
+ * Protocol (the init shape in README.md):
  *     argv = [<path init was exec'd from>, <nonce>, <index>, <lab>]
  * The vehicle passes argv[0] as the path it ran init from ("/init" while the
  * boot archive is `/`, labs 14-16; "/boot/init" from 17), and init runs each

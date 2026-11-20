@@ -5,7 +5,7 @@
  *
  * One unlink(2) per path; a directory is the kernel's EISDIR (use rmdir). An error is
  * `rm: <path>: <errno name or -N>` on fd 2; rm goes on and exits 1 if any failed; no path
- * is a usage error, exit 2. Syscalls: unlink, write, exit (CONTRACT §A.4, lab 18).
+ * is a usage error, exit 2. Syscalls: unlink, write, exit (lab 18).
  */
 #include "../sys.h"
 

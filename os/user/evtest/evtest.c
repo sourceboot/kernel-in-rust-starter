@@ -78,14 +78,14 @@
  * CLOCK_REALTIME, the clock that stamps events; -1 when the round is not
  * judged or the press was not the first event read. `at`: CLOCK_MONOTONIC,
  * in us, when poll(3000) returned (0 when not judged). The lab 26 vehicle
- * judges the wake (G2110): it puts the two instants on the PM timer too.
+ * judges the wake: it puts the two instants on the PM timer too.
  * Before its first read() a judged round spins until CLOCK_REALTIME is SPIN_NS
- * past poll(3000)'s return (G2442), so a press stamped when it is read, not when
+ * past poll(3000)'s return, so a press stamped when it is read, not when
  * it came in, reads a negative wake. `poll ok` needs at least one judged round
  * and every judged round passed. As each round's wait ends -- right after
  * poll(3000) returns, or after the drain of a round not judged -- it writes
  * `# sboot polled k/ROUNDS` to the console: the grader times that line on the
- * host's clock from the moment it typed F12 (sprint 11 #159). The line goes to the console, not to
+ * host's clock from the moment it typed F12. The line goes to the console, not to
  * stdout, because stdout is a pipe the test reads only when it gets the
  * CPU; the console write reaches the serial port from this program's own
  * syscall. Last, a read of the empty device must be -1 with EAGAIN; then
@@ -112,23 +112,23 @@
  * in the capture). */
 #define POLL_READY "# sboot poll-ready %d/%d\n"
 /* The line written to the console as soon as round k's wait ends (2026-11-17,
- * sprint 11 #159; ledger G2569, G2570): the grader times it on the HOST clock from
+ * lab 26): the grader times it on the HOST clock from
  * the moment it typed F12, and judges the middle of the three rounds. */
 #define POLLED "# sboot polled %d/%d\n"
-/* The rubric's [[script]] types one F12 per round (2026-11-06, G1834). */
+/* The rubric's [[script]] types one F12 per round (2026-11-06). */
 #ifndef ROUNDS
 #define ROUNDS 3
 #endif
 /* A round whose two clock reads, around poll(0), are further apart than this
  * is not judged: a kernel that holds the program between poll(0)'s look and
- * poll(3000)'s would let F12 in first. Measured 2026-11-06 (G1834; CONTRACT
- * §B.2-26): the reference's gap. */
+ * poll(3000)'s would let F12 in first. Measured 2026-11-06:
+ * the reference's gap. */
 #ifndef GAP_MAX_NS
 #define GAP_MAX_NS 5000000LL
 #endif
 /* How long an unjudged round waits for its F12's release. */
 #define DRAIN_MS 2000
-/* The spin (2026-11-08, sprint 8 #92c, G2442): a judged round reads no event until
+/* The spin (2026-11-08): a judged round reads no event until
  * CLOCK_REALTIME is SPIN_NS past poll(3000)'s return. An event stamped when devfs::feed
  * queued it is then stamped at or before the return; one stamped when it is read is
  * stamped at least SPIN_NS after it, which the vehicle fails. A clock that has not moved
@@ -143,9 +143,9 @@
 
 static char bad[1024];
 
-/* noinline (2026-11-08, sprint 8 #92): with the wake fields evtest grew past 9 blocks of
+/* noinline (2026-11-08): with the wake fields evtest grew past 9 blocks of
  * 4 KiB; out of line, add and ns keep it at 9, so every later file of the lab 24-33
- * images keeps its blocks (the W4/W5 window pins' linked digests, G2093-G2097). */
+ * images keeps its blocks (the W4/W5 window pins' linked digests). */
 __attribute__((noinline)) static void add(char *to, size_t cap, const char *what, long got) {
     size_t n = strlen(to);
     snprintf(to + n, cap - n, "%s%s %ld", n ? "; " : "", what, got);

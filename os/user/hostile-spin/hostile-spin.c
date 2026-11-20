@@ -2,10 +2,10 @@
  * user/hostile-spin/hostile-spin.c -- lab 12: a program that never makes a syscall,
  * and the registers-survive-preemption row.
  *
- * Protocol (CONTRACT §A.3): argv = ["hostile-spin", <nonce>, <index>] (the reporter)
+ * Protocol: argv = ["hostile-spin", <nonce>, <index>] (the reporter)
  * or ["hostile-spin", <nonce>, <index>, "noise"] (the noise instance).
  *
- * The reporter loads seven values derived from the nonce (§A.2 derive, id
+ * The reporter loads seven values derived from the nonce (derive(), id
  * regs.survive.preempt) into five callee-saved general registers (rbx,
  * r12-r15) and two SSE registers (xmm0, xmm1), spins CHECKS times through
  * ITERS iterations of a loop that touches none of them, and after every
@@ -24,7 +24,7 @@
  * second SSE writer a missing FXSAVE would go unseen.
  *
  * This is the one pre-23 program with SSE instructions in it, on purpose
- * (CONTRACT §A.8, amended 2026-10-17): they are the movq lines in the inline
+ * (allowed since 2026-10-17): they are the movq lines in the inline
  * asm below, and build.sh's layout `flat-sse` allows exactly those.
  * rdtsc brackets every check; the min and max interval go on a '#' line (a max
  * far above the min is a check the process was descheduled during).

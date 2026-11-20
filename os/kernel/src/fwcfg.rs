@@ -1,5 +1,5 @@
 //! QEMU's fw_cfg device, read over its two I/O ports — the cockpit's nonce
-//! channel (CONTRACT §A.2). Course-owned; shipped whole.
+//! channel. Course-owned; shipped whole.
 //!
 //! The port interface is what every QEMU since 2.x has: write a 16-bit
 //! selector to 0x510, then read the selected item's bytes one at a time from
@@ -89,5 +89,5 @@ pub fn read(sel: u16, size: u32, buf: &mut [u8]) -> usize {
     n
 }
 
-/// The course's nonce file name (CONTRACT §A.2).
+/// The course's nonce file name.
 pub const NONCE_FILE: &str = "opt/org.sourceboot/nonce";

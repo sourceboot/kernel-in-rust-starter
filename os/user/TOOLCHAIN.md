@@ -1,6 +1,6 @@
 # The course programs' toolchain — the pin
 
-**`zig cc` 0.17.0.** One pinned toolchain builds every program under `user/` (CONTRACT §A.8).
+**`zig cc` 0.17.0.** One pinned toolchain builds every program under `user/`.
 **The learner never builds these.** A maintainer runs `user/build.sh` by hand (no CI workflow
 runs it yet), and the binaries ship built under
 `user/bin/`, course-owned, with their sources beside them. Nothing on a learner's machine needs
@@ -28,7 +28,7 @@ first on `PATH`. `build.sh` refuses to run under any
 
 ## The build machine as of this pin
 
-The reference build was made on Puneet's Mac mini (M4 Pro, arm64, macOS) with Homebrew's
+The reference build was made on an Apple-silicon Mac mini (M4 Pro, arm64, macOS) with Homebrew's
 `zig` 0.17.0 bottle at `/opt/homebrew/bin/zig` (→ `../Cellar/zig/0.17.0/bin/zig`), whose
 `zig version` prints `0.17.0`. That is Homebrew's build, not the official `aarch64-macos`
 tarball above. The same tree built in two directories on that machine gives the same bytes;
@@ -41,9 +41,9 @@ a finding, not a re-commit.
 `build.sh` holds the one copy. Measured on the pin, 2026-10-16:
 
 - **`-target x86_64-linux-musl -static -O2 -nostdlib -ffreestanding -mgeneral-regs-only
-  -fno-stack-protector`**: CONTRACT §A.8's line for labs 09–24. Its own `_start` (`crt0.c`), its
+  -fno-stack-protector`**: the course's line for labs 09–24. Its own `_start` (`crt0.c`), its
   own syscall stubs (`sys.h`), no libc.
-- **`-mno-sse -mno-sse2 -mno-mmx -msoft-float`**: §A.8's named fallback, because **`zig cc
+- **`-mno-sse -mno-sse2 -mno-mmx -msoft-float`**: the fallback, because **`zig cc
   0.17.0` does not honour `-mgeneral-regs-only` on x86-64**. Under `-###` it lowers the flag to
   `-target-feature -x87 -mmx -sse` and then appends its own CPU model's `+mmx +sse +sse2 +x87`,
   which win. Built with the flag alone, `hi` disassembled to 31 lines naming `xmm` (the
@@ -63,7 +63,7 @@ a finding, not a re-commit.
 
 ## The `musl` layout (lab 25 on, 2026-10-22)
 
-`hello`, `tls` and `mem` are ordinary static Linux programs: §A.8's lab 25 line, built against
+`hello`, `tls` and `mem` are ordinary static Linux programs: the lab 25 line, built against
 the musl that ships inside zig 0.17.0 (`lib/zig/libc/musl`, no download) with zig's own
 `malloc` (`lib/zig/c/malloc.zig`, over `std.heap.SmpAllocator` and `PageAllocator`). The flags,
 measured on the pin 2026-10-22:
@@ -86,7 +86,7 @@ measured on the pin 2026-10-22:
 
 `doomgeneric` is the `musl` layout with somebody else's source: the files `SRC_DOOM` names in
 upstream's `Makefile.linuxvt`, compiled in one `zig cc` call with that Makefile's defines
-(`-static -O2 -DNORMALUNIX -DLINUX -DSNDSERV -D_DEFAULT_SOURCE`, CONTRACT Appendix (1)), plus
+(`-static -O2 -DNORMALUNIX -DLINUX -DSNDSERV -D_DEFAULT_SOURCE`), plus
 `-g0 -s` for the reasons above and **`-ffile-prefix-map=<source dir>/=`**: upstream's
 `Z_ChangeTag` passes `__FILE__`, and zig cc makes every source name absolute, so without it the
 binary holds the checkout's path (measured 2026-10-22: 2 such strings; the same tree in a second

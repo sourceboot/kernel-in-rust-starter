@@ -1,7 +1,7 @@
 /*
  * user/producer/producer.c -- lab 15: the writing end of init's pipe.
  *
- * Protocol (CONTRACT §A.3): argv = ["producer", <nonce>, <index>, "chain" | "tiny"],
+ * Protocol: argv = ["producer", <nonce>, <index>, "chain" | "tiny"],
  * run by init with fd 1 = the pipe's write end. It reports no row (consumer
  * does); its '#' evidence goes to fd 2, the console.
  *   chain  writes stream.h's stream: all but the last STREAM_TAIL bytes to fd 1 in

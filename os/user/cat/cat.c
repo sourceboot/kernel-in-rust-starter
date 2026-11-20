@@ -7,7 +7,7 @@
  * byte it read, retrying a short write. An error is `cat: <path>: <errno name or -N>` on fd 2
  * (`<stdin>` for fd 0, `stdout` for a refused write, which ends the run); cat goes on to the
  * next path and exits 1 if any failed. A directory is EISDIR from read.
- * Syscalls: open, read, write, close, exit (CONTRACT §A.4, lab 17).
+ * Syscalls: open, read, write, close, exit (lab 17).
  */
 #include "../sys.h"
 

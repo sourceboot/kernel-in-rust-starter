@@ -13,7 +13,7 @@
  * longer than 1023 bytes, is `mounts: <file>: EINVAL`; a mount point stat refuses is
  * `mounts: <mount point>: <errno name or -N>`; both on fd 2, and the exit status is then 1.
  * A table that cannot be opened or read: the same line for <file>, exit 1.
- * Syscalls: open, read, stat, close, write, exit (CONTRACT §A.4, all lab 17's; it is lab 22's
+ * Syscalls: open, read, stat, close, write, exit (all lab 17's; it is lab 22's
  * program because /proc/mounts is).
  */
 #include "../sys.h"

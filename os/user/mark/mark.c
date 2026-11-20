@@ -1,7 +1,7 @@
 /*
  * user/mark/mark.c -- lab 29's group marker: the line that says one group of typed commands
  * has finished, and where the shell that ran it stands. And two things lab 29's vehicle
- * reads about the kernel and the shell that ran it (sprint 9 #127, 2026-11-15).
+ * reads about the kernel and the shell that ran it.
  *
  *     mark <N>                   prints `mark <N> <cwd>` and then `# ppid=<P>` on fd 1, in one
  *                                write; exit 0
@@ -16,16 +16,16 @@
  * script ends each group with this program instead, and the cwd it prints is how the
  * script sees `cd` work (the grammar has no `pwd`). The `# ` line is a note: lab 29's
  * session leaves notes out of every comparison, and reads `mark 2`'s to see that the shell
- * itself started the command, not a process the shell started (G2210).
+ * itself started the command, not a process the shell started.
  * A missing or malformed <N> is `mark: usage: mark <N>` on fd 2, exit 2; a refused getcwd is
  * `mark: getcwd: <errno>`, exit 1.
  *
- * The probe (G2211): lab 29's vehicle starts `/bin/mark -x mark` itself, at cwd `/`. A kernel
- * resolves a path with no `/` against the cwd (CONTRACT, lab 23), where there is no `mark`,
+ * The probe: lab 29's vehicle starts `/bin/mark -x mark` itself, at cwd `/`. A kernel
+ * resolves a path with no `/` against the cwd (lab 23), where there is no `mark`,
  * so the execve returns: the probe prints `# execve(<name>) = -<errno> (<NAME>)` on fd 1 and
  * exits 0. A kernel that looks a bare name up under /bin itself runs /bin/mark as `mark -x`,
  * which exits 3, and the vehicle reads that status.
- * Syscalls: getcwd, getppid, execve, write, exit (CONTRACT §A.4, labs 09, 13, 14 and 23).
+ * Syscalls: getcwd, getppid, execve, write, exit (labs 09, 13, 14 and 23).
  */
 #include "../sys.h"
 

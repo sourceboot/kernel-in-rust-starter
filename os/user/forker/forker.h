@@ -1,5 +1,5 @@
 /*
- * user/forker/forker.h -- the lab 14 values forker and init both derive (CONTRACT §A.2 derive).
+ * user/forker/forker.h -- the lab 14 values forker and init both derive (with sys.h's derive()).
  * One copy, so the two programs cannot disagree. The ranges do not overlap: an
  * orphan init reaps with a fork.wait.codes code is a child forker failed to
  * reap, never the grandchild.

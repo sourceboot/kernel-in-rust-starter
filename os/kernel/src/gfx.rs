@@ -9,3 +9,13 @@ use crate::fb::Fb;
 pub fn main(_fb: &mut Fb) {
     // Your kernel. Your screen. Draw something.
 }
+
+/// Paint every pixel of the screen `color`.
+pub fn fill(_fb: &mut Fb, _color: u32) {
+    todo!("lab 01 task 1 — fill: plot every pixel of the screen")
+}
+
+/// Paint the `w`×`h` rectangle whose top-left corner is `(x, y)`.
+pub fn rect(_fb: &mut Fb, _x: usize, _y: usize, _w: usize, _h: usize, _color: u32) {
+    todo!("lab 01 task 2 — rect: plot every pixel of the rectangle")
+}

@@ -7,7 +7,7 @@
  * '\n' -- in ONE write call when the line fits 4096 bytes (a longer one takes one call per
  * 4096). No words: the file is left empty (0 bytes). An error is
  * `mkfile: <path>: <errno name or -N>` on fd 2 and exit 1; no path is a usage error, exit 2.
- * Syscalls: open, write, close, exit (CONTRACT §A.4, lab 18: open's write flags).
+ * Syscalls: open, write, close, exit (lab 18: open's write flags).
  */
 #include "../sys.h"
 

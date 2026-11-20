@@ -14,7 +14,7 @@
  *     st_blocks=<decimal>       (512-byte units, as Linux counts them)
  * An error is `stat: <path>: <errno name or -N>` on fd 2; stat goes on and exits 1 if any
  * failed; no path is a usage error, exit 2.
- * Syscalls: stat, write, exit (CONTRACT §A.4, lab 17).
+ * Syscalls: stat, write, exit (lab 17).
  */
 #include "../sys.h"
 

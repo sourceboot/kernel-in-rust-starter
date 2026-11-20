@@ -1,5 +1,5 @@
 /*
- * user/user.ld -- the link for every pre-23 course program (CONTRACT §A.5, §A.8).
+ * user/user.ld -- the link for every pre-23 course program.
  *
  * ET_EXEC at 0x1000000, entry _start. The ELF and program headers ride the
  * first page of the text segment, so the first PT_LOAD starts at file offset

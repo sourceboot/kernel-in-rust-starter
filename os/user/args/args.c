@@ -1,7 +1,7 @@
 /*
- * user/args/args.c -- lab 13: what execve put on the initial stack (CONTRACT §A.5).
+ * user/args/args.c -- lab 13: what execve put on the initial stack.
  *
- * Protocol (CONTRACT §A.3, the lab-13 shape in README.md):
+ * Protocol (the lab-13 shape in README.md):
  *     argv = ["args", <nonce>, <index>, <derive(nonce, "exec.argc_argv") as 16 hex>]
  *     envp = [..., "SBOOT_NONCE=<nonce>", ...]
  * It prints every argv and envp string on its own '#' line, then five rows,

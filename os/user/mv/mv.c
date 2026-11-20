@@ -6,7 +6,7 @@
  * One rename(2): replaces an existing <to> the way the kernel's rename does; across file
  * systems it is EXDEV (mv copies nothing). An error is `mv: <from>: <errno name or -N>` on
  * fd 2 and exit 1; any other argument count is a usage error, exit 2.
- * Syscalls: rename, write, exit (CONTRACT §A.4, lab 18).
+ * Syscalls: rename, write, exit (lab 18).
  */
 #include "../sys.h"
 

@@ -1,13 +1,13 @@
 /*
- * user/sys.h -- the course's freestanding user-space header (CONTRACT §A.4, §A.8).
+ * user/sys.h -- the course's freestanding user-space header.
  *
  * Course-owned. No libc, no SSE, no TLS: every line here compiles under
  * -ffreestanding -nostdlib -mgeneral-regs-only. Everything is static inline,
  * so a program that includes it pulls in only what it calls.
  *
  * Contents: the raw x86-64 Linux syscall stubs, the SYS_* numbers the
- * pre-25 programs use (Linux's numbering, which is §A.4's), the errno
- * helpers, derive() (§A.2), and write(1) helpers that print without printf.
+ * pre-25 programs use (Linux's numbering), the errno
+ * helpers, derive(), and write(1) helpers that print without printf.
  */
 #ifndef SBOOT_USER_SYS_H
 #define SBOOT_USER_SYS_H
@@ -19,7 +19,7 @@ typedef unsigned long long u64;
 typedef long long          i64;
 typedef unsigned long      usize;
 
-/* ---- syscall numbers: x86-64 Linux, = CONTRACT §A.4 (lab that adds the arm) ---- */
+/* ---- syscall numbers: x86-64 Linux's (the lab that adds the arm) ---- */
 #define SYS_read            0   /* 09: console returns 0 (EOF) until 21 */
 #define SYS_write           1   /* 09 */
 #define SYS_close           3   /* 09 */
@@ -46,7 +46,7 @@ typedef unsigned long      usize;
 #define SYS_unlink         87   /* 18 */
 #define SYS_chdir          80   /* 21 */
 #define SYS_getcwd         79   /* 21 */
-/* Later programs add their numbers here, with §A.4's lab, never renumbered. */
+/* Later programs add their numbers here, with the lab that adds the arm, never renumbered. */
 
 /* ---- flags the lab 13-15 calls take (Linux's values) ---- */
 #define WNOHANG        1          /* wait4 */
@@ -57,7 +57,7 @@ typedef unsigned long      usize;
 #define F_GETFL        3
 #define F_SETFL        4
 #define FD_CLOEXEC     1
-/* open's flags (Linux's values): 17 accepts the read-side ones, 18 adds the write side (§A.4) */
+/* open's flags (Linux's values): 17 accepts the read-side ones, 18 adds the write side */
 #define O_RDONLY       0
 #define O_WRONLY       1
 #define O_RDWR         2
@@ -69,7 +69,7 @@ typedef unsigned long      usize;
 #define SEEK_SET       0
 #define SEEK_CUR       1
 #define SEEK_END       2
-/* wait4's status is Linux's encoding (§A.6): an exit is code << 8, a kill is the signal in the low 7 bits. */
+/* wait4's status is Linux's encoding: an exit is code << 8, a kill is the signal in the low 7 bits. */
 #define WIFEXITED(s)   (((s) & 0x7f) == 0)
 #define WEXITSTATUS(s) (((s) >> 8) & 0xff)
 #define WTERMSIG(s)    ((s) & 0x7f)
@@ -79,7 +79,7 @@ typedef unsigned long      usize;
 #define STDOUT_FILENO  1
 #define STDERR_FILENO  2
 
-/* ---- errno: Linux's numbers; a syscall returns -errno on failure (§A.6) ---- */
+/* ---- errno: Linux's numbers; a syscall returns -errno on failure ---- */
 #define EPERM    1
 #define ENOENT   2
 #define EBADF    9
@@ -108,7 +108,7 @@ typedef unsigned long      usize;
 #define ENOTEMPTY 39
 #define ELOOP   40
 
-/* The name of an errno the course's refusals use (§A.6), or 0 for any other: a program then
+/* The name of an errno the course's refusals use, or 0 for any other: a program then
  * prints -N. The W3 programs' error lines are `<prog>: <path>: <name or -N>` (README.md). */
 static inline const char *errno_name(long e)
 {
@@ -240,7 +240,7 @@ static inline i64 sys_dup2(int oldfd, int newfd)              { return syscall2(
 static inline i64 sys_fcntl(int fd, int cmd, i64 arg)         { return syscall3(SYS_fcntl, fd, cmd, arg); }
 
 /* ---- the lab 17-23 calls (the W3 programs: ls, cat, stat, mkfile, rm, mv, mkdir, rmdir, mounts, sh) ---- */
-/* struct stat, x86-64 Linux's layout (§A.4: 144 bytes). */
+/* struct stat, x86-64 Linux's layout (144 bytes). */
 struct stat {
     u64 st_dev, st_ino, st_nlink;
     u32 st_mode, st_uid, st_gid, __pad0;
@@ -357,7 +357,7 @@ static inline void write_hex(u64 v)   { struct line l = { 0, {0} }; line_hex(&l,
 static inline void write_dec(u64 v)   { struct line l = { 0, {0} }; line_dec(&l, v);   write_buf(l.b, l.n); }
 static inline void write_sdec(i64 v)  { struct line l = { 0, {0} }; line_sdec(&l, v);  write_buf(l.b, l.n); }
 
-/* ---- derive (CONTRACT §A.2) ----
+/* ---- derive ----
  * derive(nonce, id) = splitmix64(lo ^ hi ^ fnv1a64(id)), where the nonce is 32
  * hex characters = 16 bytes, lo/hi are bytes 0..8 and 8..16 read little-endian,
  * and fnv1a64 is FNV-1a 64 over the id's bytes. The cockpit's ktap::derive is
@@ -406,7 +406,7 @@ static inline u64 derive(const char *nonce, const char *id)
     return splitmix64(lo ^ hi ^ fnv1a64(id));
 }
 
-/* ---- the protocol every program shares (CONTRACT §A.3; README.md "The protocol") ---- */
+/* ---- the protocol every program shares (README.md "The protocol") ---- */
 /* Parses a decimal of 1-9 digits (an index, a count, an fd number). 1 on success, else 0. */
 static inline int dec_parse(const char *s, u64 *out)
 {

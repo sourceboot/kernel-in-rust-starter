@@ -226,8 +226,8 @@ int main(int argc, char **argv) {
     uint8_t *g2 = mremap(g, 64 * page, 16 * page, 0);
     if (g2 != g) return fail_at("mremap that shrinks did not stay in place", 0, 0, (uint64_t)g2, (uint64_t)g);
     if (gone("that an mremap shrink had cut off", g + 40 * page)) return 1;
-    /* MAP_FIXED at the freed head: refused with EINVAL in lab 25 (CONTRACT
-     * section A.4, row 9); a kernel that takes it (a later lab may) must map
+    /* MAP_FIXED at the freed head: refused with EINVAL in lab 25 (mmap,
+     * syscall 9); a kernel that takes it (a later lab may) must map
      * exactly there. */
     void *f = mmap(h, page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
     if (f == MAP_FAILED ? errno != EINVAL : f != (void *)h)

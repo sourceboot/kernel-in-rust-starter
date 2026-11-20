@@ -1,7 +1,7 @@
 /*
  * user/forker/forker.c -- lab 14: fork, exit and wait4, seen from user space.
  *
- * Protocol (CONTRACT §A.3): argv = ["forker", <nonce>, <index>], run by the
+ * Protocol: argv = ["forker", <nonce>, <index>], run by the
  * course's init (fork + execve), whose pid it reads with getppid(). Rows,
  * numbered index .. index+2 (init reports fork.orphan.to_init as index+3):
  *   fork.wait.codes             N children (forker.h), child i exits with its derived code;
@@ -38,11 +38,11 @@
 /* The "hold" mode's fd (lab 28's vehicle installs the pipe there, in init, before it runs). */
 #define HOLD_FD        9
 /* fork.child.write.invisible: the child exits with this when its getppid() is not forker's
- * pid. Outside forker.h's two ranges (1..100, 150..249) (class B, TPM log 2026-10-19, B9). */
+ * pid. Outside forker.h's two ranges (1..100, 150..249). */
 #define PPID_WRONG     120
 /* wait.echild.no_hang, part 3: the yields forker gives a child that exits at once before a
  * WNOHANG wait4 must have collected it. On one CPU the first yield is enough: the child was
- * queued at the fork, ahead of forker's yield (class B, TPM log 2026-10-19). */
+ * queued at the fork, ahead of forker's yield. */
 #define ENDED_YIELDS   20
 #define ENDED_CODE     9
 

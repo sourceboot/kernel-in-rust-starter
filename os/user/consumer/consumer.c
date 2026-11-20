@@ -1,7 +1,7 @@
 /*
  * user/consumer/consumer.c -- lab 15: the reading end of init's pipe, and its rows.
  *
- * Protocol (CONTRACT §A.3): run by init with fd 0 = the pipe's read end,
+ * Protocol: run by init with fd 0 = the pipe's read end,
  *     argv = ["consumer", <nonce>, <index>, "chain", <qr>, <qw>, "keep"]   rows index .. index+2
  *       ("keep" is optional: lab 23's shell types the line without it, and then no fd
  *       above 2 is checked; given, the fds are cloexec_fds(nonce) (stream.h), never numbers in argv)

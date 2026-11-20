@@ -1,5 +1,5 @@
 //! The kernel crate's root. COURSE-OWNED: the module list below is fixed for
-//! the whole course (CONTRACT §B.1) — every module a lab will ask you to
+//! the whole course — every module a lab will ask you to
 //! write is declared here from day one, and each ships as a stub until its
 //! lab. You edit the learner modules; this file, `ktap.rs`, `fwcfg.rs`,
 //! `bootinfo.rs`, `handshake.rs`, `exit.rs`, `addr.rs`, `sync.rs` and all of

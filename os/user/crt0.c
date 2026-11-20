@@ -1,7 +1,7 @@
 /*
  * user/crt0.c -- the entry point every pre-23 course program links with.
  *
- * At entry (CONTRACT §A.5, the psABI): rsp points at argc, then argv[0..argc],
+ * At entry (the psABI): rsp points at argc, then argv[0..argc],
  * a NULL, envp[...], a NULL, the auxv. rsp % 16 == 0 at entry, but this file
  * does not rely on it: it re-aligns before the call, so a kernel that gets
  * the alignment wrong still reaches main() (a later lab's row checks the

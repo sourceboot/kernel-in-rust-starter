@@ -1,5 +1,5 @@
 //! Physical and virtual addresses as two types the compiler keeps apart.
-//! Course-owned (proposed CONTRACT §B.1 amendment, 2026-10-16: §B.2 names
+//! Course-owned (the labs use
 //! `PhysAddr`, `VirtAddr` and `PhysRange` from lab 04 on but no module holds
 //! them). Shipped whole; no lab asks you to write it.
 

@@ -5,7 +5,7 @@
  *
  * One mkdir(2) per path, no -p. An error is `mkdir: <path>: <errno name or -N>` on fd 2;
  * mkdir goes on and exits 1 if any failed; no path is a usage error, exit 2.
- * Syscalls: mkdir, write, exit (CONTRACT §A.4, lab 18).
+ * Syscalls: mkdir, write, exit (lab 18).
  */
 #include "../sys.h"
 

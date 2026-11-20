@@ -1,15 +1,15 @@
 /*
  * user/hostile-kwrite/hostile-kwrite.c -- lab 12: a program that writes a kernel address.
  *
- * Protocol (CONTRACT §A.3): argv = ["hostile-kwrite", <nonce>, <index>].
+ * Protocol: argv = ["hostile-kwrite", <nonce>, <index>].
  * It names what it is about to do on one '#' line, then stores one byte at
  * KADDR, an address in the kernel half (the HHDM's second page: present, U=0).
- * A correct kernel kills it there with §A.6's line,
+ * A correct kernel kills it there with the kill line,
  *     kill: pid=<n> reason=pf-kernel-addr rip=0x<hex> addr=0xffff800000001000
  * and keeps serving; the row kill.kwrite is the vehicle's to print (K), from
  * that line. This program prints nothing after the store. If the store
  * returns, it says so and prints `not ok <index> - kill.kwrite`, which the
- * judge's duplicate-id rule (§A.2 (d)) turns into a failed row whatever the
+ * judge's duplicate-id rule turns into a failed row whatever the
  * vehicle prints.
  */
 #include "../sys.h"
