@@ -19,8 +19,8 @@
  * and VTIME among them), is set with TCSETS and read back the same, on that
  * file and on a second open of /dev/tty made, and set to the termios it
  * reads, before that TCSETS (the terminal has one termios, not one per open
- * file: fix round 2; opened before, fix round 3); then the first is set
- * again and read back the same (every byte: 2026-10-29, slice 9 fix round 1):
+ * file, and the second open is made first); then the first is set
+ * again and read back the same (every byte):
  *
  *   ttyprobe tcsets ok <the nonce>
  *
@@ -51,9 +51,9 @@
  *      `pollb`; the line gives poll's answer, the bytes read, revents in hex
  *      and the read's answer). The vehicle types poll A's z as soon as its
  *      line is out and poll B's only well after it began, and a poll that
- *      does not answer in time is ended by ctrl+c's SIGINT (added
- *      2026-11-15; two polls since its fix
- *      round).
+ *      does not answer in time is ended by ctrl+c's SIGINT (two
+ *      polls: A's key comes at once, B's
+ *      late).
  *   5. ISIG off, ICRNL on, VMIN 21: one read of 21 bytes, while x, Enter, up,
  *      down, right, Home, End, Esc and Backspace are typed, returns their
  *      21 bytes in one call, Enter a NL (`keys`). Keys typed after those
@@ -70,8 +70,8 @@
  *   ttyprobe raw keys <the nonce>
  *   ttyprobe raw keys = <answer> <hex> <the nonce>
  *
- * Steps 2, 3 and 5 were added 2026-10-29 (slice 9 fix round 1), step 4
- * 2026-11-15. The keys of steps 3-5 are the vehicle's, pushed into the
+ *
+ * The keys of steps 3-5 are the vehicle's, pushed into the
  * keyboard's ring once the line before the read (or poll) is out; the
  * vehicle also times step 2's read by its two lines. The first termios is
  * put back at the end.
@@ -85,7 +85,7 @@
  * directory made with mode 0 -- root may run the two files (any of the
  * three execute bits will do) and search the directory (a directory needs
  * none); each is checked by stat to carry the mode it was made with, and
- * removed after (added 2026-10-23, slice 8 fix round):
+ * removed after:
  *
  *   ttyprobe access ok <the nonce>
  *
@@ -210,8 +210,8 @@ static void tcsets(void) {
     tcget(fd, t0);
     /* The second open is made, and set to what it reads, before the TCSETS
      * on the first: a console that keeps a termios per open file, or copies
-     * the terminal's at open, then reads t0 through it (fix round 3: opened
-     * after, a per-file copy synced on TCSETS read back right). */
+     * the terminal's at open, then reads t0 through it (opened
+     * after, a per-file copy synced on TCSETS would read back right). */
     int fd2 = tty();
     tcset(fd2, t0);
     memcpy(t1, t0, 36);
@@ -319,10 +319,10 @@ static void raw(void) {
     /* 1: the keys typed at the keyboard, O_NONBLOCK reads. It gives up after
      * 50 naps of 20 ms, 1 s by the guest's own clock, so that a kernel that
      * never hands over six bytes still prints them and reaches steps 2-4
-     * inside the vehicle's 40 s wait for the next step's line (by the PM
-     * timer), even when the host starves the guest's PIT: under background
-     * QoS it delivered 99-106 ticks in 3000 PM-timer ms (fix round 3; 10 s
-     * or 500 naps outlasted the 40 s there; fix round 1: 1,000 naps crossed
+     * inside the vehicle's 40 s wait for the next step's line (by the
+     * PM timer), even when the host starves the guest's PIT: under background
+     * QoS it delivered 99-106 ticks in 3000 PM-timer ms (10 s
+     * or 500 naps outlasted the 40 s there, and 1,000 naps crossed
      * it at load 13-21). */
     raw_mode(nb, t0, 0, 0, 1);
     printf("ttyprobe raw ready %016" PRIx64 "\n", nonce);

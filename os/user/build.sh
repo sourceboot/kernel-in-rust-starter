@@ -29,21 +29,21 @@ BIN=$HERE/bin
 #   e_entry. "elf": loaded by lab 13's ELF loader; may carry a RW segment.
 #   "flat-sse": "flat", and the SSE check allows exactly the movq lines between a
 #   general register or memory and xmm0/xmm1 (hostile-spin's inline asm, on purpose:
-#   lab 12's regs.survive.preempt row is the FXSAVE check -- allowed since
-#   2026-10-17). Any other SSE line in such a program still fails the build.
-#   "musl" (lab 25, built 2026-10-22): a static program built against
+#   lab 12's regs.survive.preempt row is the FXSAVE check). Any other SSE line
+#   in such a program still fails the build.
+#   "musl" (lab 25 on): a static program built against
 #   zig's own musl with no crt0 and no linker script -- the toolchain's default static
 #   layout (first PT_LOAD r-- at offset 0 -> 0x1000000, then r-x, then rw-), at most
 #   one PT_TLS, any SSE (musl's own memcpy and printf use it), never AVX: no ymm/zmm
 #   and no VEX-encoded xmm instruction. Stripped (-s): zig's cached libc objects carry
 #   DWARF with the absolute path of the machine's zig install, and -g0 does not reach them.
-#   "port" (lab 27, built 2026-10-22): an upstream program built
+#   "port" (lab 27): an upstream program built
 #   UNMODIFIED from its own makefile's file list. The sources field names that makefile;
 #   its `SRC_DOOM = …` line is the list of objects, each built from the .c beside it, all
 #   in one zig cc call with PORT_CFLAGS. Then every "musl" check. doomgeneric's own
 #   sources, licence and makefile sit under doomgeneric/ byte for byte as the pinned
 #   upstream commit has them (user/README.md, "doomgeneric").
-#   "busybox" (lab 30, built 2026-10-23): upstream busybox, UNMODIFIED, from
+#   "busybox" (lab 30): upstream busybox, UNMODIFIED, from
 #   its pinned release tarball (BUSYBOX_* below; not in the repo), configured by the committed
 #   .config the sources field names, built by busybox's own makefiles with zig cc as CC. Then
 #   every "musl" check, and its applet list must equal busybox/applets, which the image writer
@@ -59,7 +59,7 @@ PROGRAMS=(
   "forker|forker/forker.c|elf"
   "producer|producer/producer.c|elf"
   "consumer|consumer/consumer.c|elf"
-  # labs 17-23 (the W3 programs): not in ARCHIVE -- the image writer copies bin/ into ext2's /bin
+  # labs 17-23 (the file tools and the shell): not in ARCHIVE -- the image writer copies bin/ into ext2's /bin
   "ls|ls/ls.c|elf"
   "cat|cat/cat.c|elf"
   "stat|stat/stat.c|elf"
@@ -70,10 +70,10 @@ PROGRAMS=(
   "rmdir|rmdir/rmdir.c|elf"
   "mounts|mounts/mounts.c|elf"
   "sh|sh/sh.c|elf"
-  # lab 24 on (the W4 programs): not in ARCHIVE; ext2's /bin carries them from lab 24's image on
+  # lab 24 on (the lab 24-on programs): not in ARCHIVE; ext2's /bin carries them from lab 24's image on
   # (xtask/src/ext2.rs W4_PROGRAMS)
   "cowtest|cowtest/cowtest.c|elf"
-  # lab 25 (the W4 musl programs, layout musl): the same rule
+  # lab 25 (the musl programs, layout musl): the same rule
   "hello|hello/hello.c|musl"
   "tls|tls/tls.c|musl"
   "mem|mem/mem.c|musl"
@@ -99,7 +99,7 @@ PROGRAMS=(
 )
 
 # The boot archive: what labs 13-16 mount at / and 17 on at /boot.
-# The W3 programs (ls ... sh, labs 17-23) are not in it: they ride ext2's /bin (2026-10-17).
+# The labs 17-23 tools (ls ... sh) are not in it: they ride ext2's /bin.
 ARCHIVE=(init hi args hostile-kwrite hostile-badnum hostile-badptr hostile-spin forker producer consumer)
 
 # The course's flags (labs 09-24), plus -fno-builtin and the warnings, plus two measured additions:
@@ -122,7 +122,7 @@ MUSL_CFLAGS=(-target x86_64-linux-musl -static -O2 -Wall -Wextra -g0 -s)
 # The "port" layout's flags: upstream's build line (`make -f Makefile.linuxvt
 # CC="zig cc -target x86_64-linux-musl" CFLAGS="-static -O2 -DNORMALUNIX -DLINUX -DSNDSERV
 # -D_DEFAULT_SOURCE" LDFLAGS="-static"`), plus -g0 -s as for "musl": without them the bytes
-# carry DWARF with the build directory's absolute path (measured 2026-10-22: the Appendix
+# carry DWARF with the build directory's absolute path (measured: upstream's build
 # line's binary differs by size and sha256 from one directory to another), and
 # -ffile-prefix-map below for the same reason (`__FILE__`).
 PORT_CFLAGS=(-target x86_64-linux-musl -static -O2 -DNORMALUNIX -DLINUX -DSNDSERV -D_DEFAULT_SOURCE -g0 -s)
@@ -271,7 +271,7 @@ for row in "${PROGRAMS[@]}"; do
       [[ -n "$objs" ]] || { echo "build.sh: $name: no SRC_DOOM line in $srcs" >&2; exit 1; }
       for o in $objs; do src+=("$(dirname "$mk")/${o%.o}.c"); done
       # -ffile-prefix-map: `__FILE__` (z_zone.h's Z_ChangeTag) is then "w_wad.c", not the
-      # checkout's absolute path (measured 2026-10-22: two directories, two sha256s, until this;
+      # checkout's absolute path (measured: two directories, two sha256s, without it;
       # zig cc makes a relative source name absolute, so compiling from the directory is not enough).
       "$ZIG" cc "${PORT_CFLAGS[@]}" -ffile-prefix-map="$(dirname "$mk")/=" -o "$BIN/$name" "${src[@]}"
     else

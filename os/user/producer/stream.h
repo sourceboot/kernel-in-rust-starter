@@ -11,7 +11,7 @@
  *
  * The tiny stream (pipe.stress.tiny_writes): TINY_COUNT one-byte writes, byte i = i % 251.
  *
- * cloexec_fds (pipe.cloexec, fix round 3, 2026-10-19): the CLOEXEC_N fds above 2 that init
+ * cloexec_fds (pipe.cloexec): the CLOEXEC_N fds above 2 that init
  * hands the chain consumer, half of them marked close-on-exec. Both programs derive the
  * numbers from the nonce, so none reaches the kernel in argv: fds 11..22 (above init's six
  * pipe ends) shuffled by derive(nonce, "pipe.cloexec.fds"), the first CLOEXEC_N taken. Slot
@@ -19,6 +19,16 @@
  * mark when the consumer is forked. The marked and the unmarked each include an fd that shares
  * its open file with an fd of the other kind and an fd that shares it with nothing, so neither
  * an fd's number nor its sharing tells them apart: only the close-on-exec bit does.
+ *
+ * Why the swap: when the draw marks exactly {19, 20, 21, 22}, fd[0] and fd[1]
+ * trade numbers. Without it a kernel that closes every fd above 2 outside 7..18 and never
+ * reads the bit passed on 1 draw in 495 (1/C(12,4)): the marked fds were exactly the high
+ * ones it closes. Slots 0 and 1 are dups of the same open file, so the swap moves only the
+ * mark: the open files, the sharing and every other slot stay as drawn, and one of 19..22
+ * is then unmarked and must stay open. Counted over every draw: that kernel now passes on
+ * none; a kernel that closes a fixed set of numbers and reads no bit does best with six,
+ * {11, 12, 13, 19, 20, 21}, on 11 draws in 1680 (1 in 154 before), and with four on 1 in 480
+ * (1 in 495 before). A kernel that honours the bit passes on every draw, as before.
  */
 #ifndef SBOOT_USER_STREAM_H
 #define SBOOT_USER_STREAM_H
@@ -46,6 +56,9 @@ static inline void cloexec_fds(const char *nonce, int fd[CLOEXEC_N])
         int t = fds[i]; fds[i] = fds[j]; fds[j] = t;
     }
     for (int i = 0; i < CLOEXEC_N; i++) fd[i] = fds[i];
+    int high = 0;
+    for (int i = 0; i < CLOEXEC_N; i++) high += cloexec_marked(i) && fd[i] >= 19;
+    if (high == 4) { int t = fd[0]; fd[0] = fd[1]; fd[1] = t; }   /* the swap: see above */
 }
 
 #endif

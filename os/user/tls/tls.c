@@ -27,7 +27,7 @@
  *
  * Time: the counter's rate is the middle of three 20 ms measurements against
  * CLOCK_MONOTONIC, and each phase ends at <ms> by the counter or by the clock,
- * whichever comes first, so a host pause cannot stretch the run (2026-10-23).
+ * whichever comes first, so a host pause cannot stretch the run.
  */
 #define _GNU_SOURCE
 #include <inttypes.h>

@@ -10,7 +10,7 @@
  * with read) and writes with writev. It also asks for the calls a
  * program takes for granted -- the ids, the CPU set, the clocks, a sleep, the
  * signal tables, a futex -- and checks each answer, including that the signal
- * table refuses a number outside 1 to 64 with EINVAL (2026-11-02: musl's
+ * table refuses a number outside 1 to 64 with EINVAL (musl's
  * own sigaction() refuses one before it reaches the kernel, so those three
  * asks are raw syscalls). It prints two lines:
  *

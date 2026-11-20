@@ -254,7 +254,7 @@ static int hexword(const volatile u8 *s, u64 *out)
  * shared X/Y/Z pages are left alone: copying them where the rows look is the
  * point.)
  *
- * WHY (2026-10-28): the first store to a shared page faults and is
+ * WHY: the first store to a shared page faults and is
  * re-run once the kernel has copied it. Measured at one site: row 1's `setg`
  * (testq %rax,%rax; ...; testq %r14,%r14; setg -0xb8(%rbp), the parent's "fork 1
  * gave a pid" flag, the first store to a stack page fork 1 shared). There QEMU

@@ -109,7 +109,7 @@ typedef unsigned long      usize;
 #define ELOOP   40
 
 /* The name of an errno the course's refusals use, or 0 for any other: a program then
- * prints -N. The W3 programs' error lines are `<prog>: <path>: <name or -N>` (README.md). */
+ * prints -N. The labs 17-23 tools' error lines are `<prog>: <path>: <name or -N>` (README.md). */
 static inline const char *errno_name(long e)
 {
     switch (e) {
@@ -239,7 +239,7 @@ static inline i64 sys_dup(int fd)                             { return syscall1(
 static inline i64 sys_dup2(int oldfd, int newfd)              { return syscall2(SYS_dup2, oldfd, newfd); }
 static inline i64 sys_fcntl(int fd, int cmd, i64 arg)         { return syscall3(SYS_fcntl, fd, cmd, arg); }
 
-/* ---- the lab 17-23 calls (the W3 programs: ls, cat, stat, mkfile, rm, mv, mkdir, rmdir, mounts, sh) ---- */
+/* ---- the lab 17-23 calls (the tools: ls, cat, stat, mkfile, rm, mv, mkdir, rmdir, mounts, sh) ---- */
 /* struct stat, x86-64 Linux's layout (144 bytes). */
 struct stat {
     u64 st_dev, st_ino, st_nlink;
@@ -443,7 +443,7 @@ static inline void line_ptr(struct line *l, u64 v)
     line_hex64(l, v);
 }
 
-/* ---- the W3 programs' shared output (labs 17-23) ----
+/* ---- the labs 17-23 tools' shared output ----
  * err_line: `<prog>: <what>: <errno name or -N>` on fd 2, in one write. */
 static inline void err_line(const char *prog, const char *what, i64 r)
 {

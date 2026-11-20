@@ -10,8 +10,8 @@
  *                  as never served by any lab, and Linux itself answers -ENOSYS (the call
  *                  was removed in 2.6; its table slot is sys_ni_syscall). So the row means
  *                  the same thing on every kernel from lab 12 to the last one, and natively.
- *                  (2026-10-22, slice 7: until then the third number was 158, arch_prctl,
- *                  which lab 25 serves; lab 12's row must not depend on a later lab.)
+ *                  (Not 158, arch_prctl, which lab 25 serves: lab 12's row must not
+ *                  depend on a later lab.)
  * One '#' line per call with what came back, then
  *     ok <index> - sys.badnum.enosys     when all three returned -ENOSYS
  * and exit 0. A malformed argv prints `not ok 0 - sys.badnum.enosys` and exits 2.

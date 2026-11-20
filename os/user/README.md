@@ -1,6 +1,6 @@
 # `user/` — the course's programs
 
-Course-owned (E1): the learner builds the kernel that runs these, never these. Every program is
+Course-owned: the learner builds the kernel that runs these, never these. Every program is
 freestanding C built by the pinned `zig cc` (**[TOOLCHAIN.md](TOOLCHAIN.md)**), run by hand —
 no CI workflow runs `build.sh` yet — and the binaries ship under `bin/` beside their sources
 (the pin and its flags: TOOLCHAIN.md).
@@ -20,12 +20,12 @@ no CI workflow runs `build.sh` yet — and the binaries ship under `bin/` beside
 | `forker/forker.c`, `forker/forker.h` | lab 14: `fork.wait.codes`, `fork.child.write.invisible`, `wait.echild.no_hang`, and the orphan `init` reports; `forker.h` holds the codes both derive |
 | `producer/producer.c`, `producer/stream.h` | lab 15: the writing end of `init`'s pipes; `stream.h` is the nonce-seeded stream both ends compute |
 | `consumer/consumer.c` | lab 15: the reading end → `pipe.chain.checksum`, `pipe.eof.last_writer`, `pipe.cloexec`, `pipe.stress.tiny_writes` |
-| `cat/cat.c`, `stat/stat.c` | lab 17: the read-side tools (below, "The W3 programs") |
-| `ls/ls.c` | lab 20: it lists with `getdents64`, which is 20's since the split (2026-10-19) |
-| `mkfile/mkfile.c`, `rm/rm.c`, `mv/mv.c`, `mkdir/mkdir.c`, `rmdir/rmdir.c` | labs 18–20: the write-side tools (the old 18, re-cut by the split on 2026-10-19 into 18, 19 and 20: `mkfile` 18, `rm` 19, `mv`, `mkdir`, `rmdir` 20) |
+| `cat/cat.c`, `stat/stat.c` | lab 17: the read-side tools (below, "The labs 17–23 tools") |
+| `ls/ls.c` | lab 20: it lists with `getdents64`, which is lab 20's |
+| `mkfile/mkfile.c`, `rm/rm.c`, `mv/mv.c`, `mkdir/mkdir.c`, `rmdir/rmdir.c` | labs 18–20: the write-side tools (`mkfile` 18, `rm` 19, `mv`, `mkdir`, `rmdir` 20) |
 | `mounts/mounts.c` | lab 22: the mount table, with each mount point's `st_dev` |
 | `sh/sh.c` | lab 23: the course's shell |
-| `cowtest/cowtest.c` | lab 24: 48 MiB, three forks, private pages, a text write, a counted child → the four `cow.*` rows (below, "The W4 programs") |
+| `cowtest/cowtest.c` | lab 24: 48 MiB, three forks, private pages, a text write, a counted child → the four `cow.*` rows (below, "The lab 24-on programs") |
 | `hello/hello.c` | lab 25: a static musl program — stdio through `writev`/`readv`, the ids, the clocks, `nanosleep`, the signal-mask and futex calls musl makes → `musl.hello.line` |
 | `tls/tls.c` | lab 25: thread-local storage through `%fs`, its own `arch_prctl(ARCH_SET_FS)`, and SSE registers, all checked across preemption → `musl.tls.survives.preempt` |
 | `mem/mem.c` | lab 25: 32 MiB through musl's `malloc`/`realloc`/`free`, stack growth, and `mmap`/`munmap`/`mremap` asked directly → `musl.mem.32m.checksum` |
@@ -61,12 +61,12 @@ build. It is the one deliberate exception to "no SSE before 23" (below, `hostile
 above, plus a `RW` `PT_LOAD` at `0x1004000` (file offset `0x4000`) when the program has
 `.data`/`.bss`: `forker` (8 bytes of `.data`, `filesz = memsz = 8`: the global the fork row
 writes) and `init` (`filesz` 0, `memsz` 0x50: `.bss` only — its directory and nonce pointers).
-`args`, `producer` and `consumer` have no writable data and stay one segment. The W3 programs
-(labs 17–23) are all `elf`: `rm`, `mv`, `mkdir`, `rmdir` are one segment; the others have a
+`args`, `producer` and `consumer` have no writable data and stay one segment. The labs 17–23
+tools are all `elf`: `rm`, `mv`, `mkdir`, `rmdir` are one segment; the others have a
 `.bss`-only `RW` segment (`filesz` 0) for their buffers. `cowtest` (lab 24) is `elf` with a
 48 MiB `.bss`-only `RW` segment (`memsz` 0x3001018).
 
-**Layout `musl`** (lab 25 on, 2026-10-22): a program built against zig's own musl — its
+**Layout `musl`** (lab 25 on): a program built against zig's own musl — its
 `_start`, its `malloc`, its `printf` — with no `crt0.c` and no `user.ld`, so the toolchain's
 default static layout: `PT_PHDR`, a `R` `PT_LOAD` at file offset 0 → `0x1000000` (headers and
 read-only data), a `R E` one, one or two `RW` ones, at most one `PT_TLS` (`tls` has an 8-byte
@@ -86,10 +86,10 @@ VEX-encoded `v…` instruction on `xmm`); SSE is allowed — musl's own `memcpy`
 | `hostile-badptr` | flat | 4760 | `0xf48` | `b6f1c0e0c12388ddbfb0da0e56d25c7a345cbfacaa7cb4414370e64d75f533ea` |
 | `hostile-spin` | flat-sse | 8640 | `0x1e78` | `002ea10a3dfaf38a1dacb9283f4af1f440bd512ee9fa01d7a05e55554af976d4` |
 | `args` | elf | 10064 | `0x240c` | `bf8a80598fc034baa81dd182805d4ae05f6e18721febcec79f14055fd397b660` |
-| `init` | elf | 34016 | `0x713e` · `0`/`0x50` | `d2dd69b4228abb1843ce17b20b4a9b4829db071921004304ee0dfec8bf820732` |
+| `init` | elf | 34016 | `0x717e` · `0`/`0x50` | `b1c504865a1e63d44b1e6f7fd113e2303b8bc34e4f7c8ee3fc2c1c8aca058c91` |
 | `forker` | elf | 17504 | `0x39d0` · `0x8`/`0x8` | `b05fd6b6a8115a1763b2ec3f0494208d8e965189b6cbf38280e9f9e9d59305a1` |
 | `producer` | elf | 7640 | `0x1acc` | `fdce8ead361a6d7f884f53332fde169524450ee45f55057b2044963b04bbf6f6` |
-| `consumer` | elf | 15384 | `0x38cd` | `ee14e6fed940c9327b9bd013fea6ee56ec28391046f9caa3e451b8792d136414` |
+| `consumer` | elf | 15464 | `0x391d` | `c8fb14eafe7a6c4a8db19db3ce221436d4468dc1a8effb9546875c8ae71710b9` |
 | `ls` | elf | 9112 | `0x1420` · `0`/`0x7020` | `72fc4e4253d54c90f6862cef1d7f3fbb2fea11732565f0d4ed8ba62bbddab5d5` |
 | `cat` | elf | 4960 | `0x9c0` · `0`/`0x1000` | `16dc8cb29d6ee55c6dd09f47566712095336258ad9d1fd69fd5d23782fc80df6` |
 | `stat` | elf | 9088 | `0x11c8` · `0`/`0x1018` | `d536f5badbd609d97e7fc32c814833e01c8cd01a3032d92e5679f7742f9f1324` |
@@ -107,9 +107,9 @@ VEX-encoded `v…` instruction on `xmm`); SSE is allowed — musl's own `memcpy`
 | `fbtest` | musl | 27456 | (below) | `5ff9f1d2baec8efd9497a3cdcaab7e72922690e1e6bade61b7f803e2d3edb53d` |
 | `evtest` | musl | 35880 | (below) | `44302055d13e07ad9b3cd00fb5dbff0059c33598309058dfc1bd0738296b03f5` |
 | `doomgeneric` | port | 513776 | (below) | `2c39dbdf976f82bf46816210f897ddd0206bf73eab2f594d88b25f1f4a0474a5` |
-| `boot.archive` | — | 113704 | — | `4d1c61f6564fd5736e6aeadcedc7214f4253fcee79dc9c564491ab59c000fc8a` |
+| `boot.archive` | — | 113784 | — | `af86532f79b360ec43e6eaf339d3834303fe47a72c39c44d9419d03ca22cf857` |
 
-`bin/SHA256SUMS` is the authority; this table is its copy as of 2026-10-19 (forker rebuilt for lab 14's `getppid` and `sched_yield` checks; then init and consumer for lab 15's fix round 1: `dup2.shared.flags` reads `F_GETFL` before, during and after the set and on a second open file, and `pipe.cloexec` checks an unmarked fd above 2 when argv names one; then both again for its fix round 2: that fd is drawn from the nonce, `dup2.shared.flags` uses eight nonce-shuffled fds and reads `F_GETFL` on another pipe's read end; then both again for its fix round 3: `pipe.cloexec` checks eight nonce-drawn fds, some marked with `F_SETFD` and some not, and `dup2.shared.flags` holds a different flag on two open files at once; `doomgeneric` added 2026-10-22, lab 27; `hostile-badnum` and `boot.archive` rebuilt 2026-10-22, slice 7: lab 12's third number is 174; `cowtest`, `mem`, `fbtest` and `evtest` rebuilt 2026-10-22 by slice 7's fix rounds for labs 24–26, their rows re-copied from `bin/SHA256SUMS` the same day; `cowtest` rebuilt 2026-10-28: each fork is followed, in the same asm, by a write to the stack and `torn_*` pages it shared, so QEMU 8.2's stale RFLAGS at a copy-on-write fault cannot reach a compiled `setcc`; `forker` and `boot.archive` rebuilt 2026-10-29 for lab 28's fix round 2: the `hold` argument, below — the same sizes, every other binary byte-identical).
+`bin/SHA256SUMS` is the authority; this table is a copy of it.
 
 ## The protocol every program follows
 
@@ -175,7 +175,7 @@ exactly the U rows lab 12 gives it; the K rows are the vehicle's.
 | program | prints | rows it reports | syscalls (measured, strace 6.19 on Linux 7.0) |
 |---|---|---|---|
 | `hostile-kwrite` | `# hostile-kwrite: writing one byte to 0xffff800000001000`, then stores there | none while the kill works (`kill.kwrite` is the vehicle's, from the kill line, which a correct kernel prints as `reason=pf-kernel-addr … addr=0xffff800000001000`); if the store *returns* it prints `not ok <index> - kill.kwrite`, which the duplicate-id rule makes a failed row | `write`×1, then the fault |
-| `hostile-badnum` | one `#` line per call with what came back | `sys.badnum.enosys`: `syscall(1000)`, `syscall(-1)` and `syscall(174)` (`create_module`: the course reserves it as never served by any lab, and Linux answers `-ENOSYS` too) all return `-38` *(2026-10-22, slice 7: the third number was 158, `arch_prctl`, which lab 25 serves)* | 1000, -1, 174, `write`×4, `exit` |
+| `hostile-badnum` | one `#` line per call with what came back | `sys.badnum.enosys`: `syscall(1000)`, `syscall(-1)` and `syscall(174)` (`create_module`: the course reserves it as never served by any lab, and Linux answers `-ENOSYS` too) all return `-38` *(not 158, `arch_prctl`, which lab 25 serves)* | 1000, -1, 174, `write`×4, `exit` |
 | `hostile-badptr` | one `#` line per call | `sys.badptr.efault`: `write(1, p, 16)` returns `-14` for `p = 0`, `0x0000100000000000` (user half, unmapped) and `0xffff800000001000` (kernel half) | `write`×7, `exit` |
 | `hostile-spin` | `# hostile-spin: seed=<16 hex>, checking rbx r12-r15 xmm0 xmm1`, then after the checks `# regs.survive.preempt: 64 checks x 1048576 iterations; tsc per check min=… max=…` | `regs.survive.preempt` (derived), then spins forever with no syscall | `write`×3, then none |
 
@@ -235,14 +235,16 @@ exit 2.
   index, chain, <q[0]>, <q[1]>, keep]` with `p[0]` on fd 0 (each child `dup2`s and closes both `p`
   ends; `q` stays open in both across `execve`, which must close it). Between the two forks `init`
   makes the eight fds of `cloexec_fds(nonce)` (`producer/stream.h`: fds 11..22 shuffled by
-  `derive(nonce, "pipe.cloexec.fds")`, the first eight) with `cloexec_make`: two more pipes
+  `derive(nonce, "pipe.cloexec.fds")`, the first eight; when the four marked slots draw exactly
+  19, 20, 21 and 22, slots 0 and 1 trade numbers, so one of 19..22 is unmarked and no fixed set of
+  numbers marks the right fds on every nonce) with `cloexec_make`: two more pipes
   (`pipe2(r, 0)`, `pipe2(s, 0)`), then slot *i*'s fd is `dup2` of `p[0]`, `p[0]`, `r[0]`, `r[0]`,
   `r[1]`, `s[0]`, `s[1]`, `r[1]` for *i* = 0..7, and `F_SETFD(FD_CLOEXEC)` marks slots 1, 2, 5 and 7
   (`cloexec_marked`); slots 3 and 6 are marked and then unmarked with `F_SETFD(0)`. So each kind has
   an fd that shares its open file with the other kind and an fd that shares it with nothing else
   of its kind. `init` closes `r` and `s`, so only the consumer is forked holding the eight, and
-  closes them after (fix round 1, 2026-10-19, one fd; drawn from the nonce in fix round 2; eight,
-  marked by `F_SETFD`, in fix round 3 — so an `execve` that closes fds by number, by range or by
+  closes them after (eight fds, drawn from the nonce, some marked by `F_SETFD` —
+  so an `execve` that closes fds by number, by range or by
   whether they are shared, instead of by the bit, fails; the numbers never reach the kernel in
   argv: the consumer derives the same eight). A child whose `dup2` onto fd 0 or 1 fails prints
   `# init: dup2(<from>, <to>) = <errno> in the child; <name> not run` and exits 127 before its
@@ -262,15 +264,15 @@ and exits 0 when its `getppid()` is the pid forker read from `getpid()` before t
 `PPID_WRONG` = 120); reaped, the parent still reads A. `wait.echild.no_hang` — `wait4(-1)` before any
 fork is `-ECHILD`; `wait4(pid, WNOHANG)` on a child in a 2000-yield loop is 0; `wait4(pid, 0)`
 then reaps it with code 7; a child that exits 9 at once is collected by `wait4(child, WNOHANG)`
-within 20 `sched_yield()`s, each answering 0 (added 2026-10-19, lab 14 B9). Then the orphan setup for `init`'s row: a child forks a grandchild and
+within 20 `sched_yield()`s, each answering 0. Then the orphan setup for `init`'s row: a child forks a grandchild and
 exits at once; the grandchild yields until `getppid()` is `init`'s pid (forker's own `getppid()`),
 at most 200,000 times, and exits with `orphan_code` — or 3 if it never was reparented. Syscalls:
 `fork`, `wait4`, `getpid`, `getppid`, `sched_yield`, `write`, `exit`.
 
-Lab 28's vehicle runs it as `[forker, nonce, index, hold]` (added 2026-10-29, lab 28 fix round 2):
+Lab 28's vehicle runs it as `[forker, nonce, index, hold]`:
 the grandchild first reads one byte from fd 9, a pipe whose only write end the vehicle keeps (it
 installs the read end as fd 9 of the shell at its prompt, just before `forker` is typed, so `forker`
-and the grandchild inherit it; lab 28's fix round 3 moved it there from `init`, which could close it), and exits with
+and the grandchild inherit it — not from `init`, which could close it), and exits with
 `orphan_code` when that read returns end of file — so the vehicle, by the PM timer, decides when the
 orphan ends, not the guest CPU's speed. A read that does not return end of file (fd 9 closed, or
 something else) falls back to the yields above. With `hold` the `#` line ends `exits when its fd 9
@@ -292,9 +294,9 @@ stream's length — a kernel that signals EOF when *one* fd of the write end clo
 tail — and the read after it is 0 again), `pipe.cloexec` (`fcntl(F_GETFD)` is `-EBADF` on both
 `q` numbers, not on fd 0, and, when argv[6] is the word `keep`, `-EBADF` on each marked fd of
 `cloexec_fds(nonce)` and exactly 0 on each unmarked one: fds above 2 that fork carried, which
-`execve` must close or keep by their bit alone; added 2026-10-19, fix round 1, against an `execve`
-that closes every fd above 2, drawn from the nonce in fix round 2, against one that keeps only the
-fd argv names, and eight fds in fix round 3, against one that keeps a range or the shared fds; argv[6] is optional, because lab 23's shell
+`execve` must close or keep by their bit alone: an unmarked one catches an `execve`
+that closes every fd above 2, the nonce's draw one that keeps only the
+fd argv names, and the eight one that keeps a range or the shared fds; argv[6] is optional, because lab 23's shell
 types `consumer … chain 3 4` without it, and then no fd above 2 is checked). `consumer tiny` yields 200 times (`TINY_YIELDS`) before its first
 read, so the producer meets a full ring and blocks, then reads: `pipe.stress.tiny_writes` (10,000
 bytes, in order). Syscalls: producer `write`, `dup`, `close`, `sched_yield`, `exit`; consumer
@@ -302,9 +304,9 @@ bytes, in order). Syscalls: producer `write`, `dup`, `close`, `sched_yield`, `ex
 
 **`dup2.shared.flags`** (reported by `init`, row `index+4`; consumer's rows stay
 `index`..`index+3`). Before forking anyone, `init` shuffles fds 20..31 with
-`derive(nonce, "dup2.shared.flags.fds")` (`dup2_fds`; fix round 2, 2026-10-19 — the row used fd
-20 alone before) and takes the first four as A and the next four as X. *Since fix round 3
-(2026-10-19)* two open files hold different flags at once: group Q is `q[0]` and the four A, group
+`derive(nonce, "dup2.shared.flags.fds")` (`dup2_fds`, so no fd number
+is fixed) and takes the first four as A and the next four as X. Two
+open files hold different flags at once: group Q is `q[0]` and the four A, group
 P is `p[0]` and the four X, and each dup is `dup2` of its group's first fd or of an earlier dup,
 picked by `derive(nonce, "dup2.shared.flags.order")`. `init` then sets, in an order the same
 value picks, `O_NONBLOCK` with `fcntl(F_SETFL)` through one member of Q, `O_APPEND` through one
@@ -328,7 +330,7 @@ dup *is* the shared open file, not a stand-in for it — and no object with an o
 lab 17 (a pipe and the console have none; `lseek` is 17's). Offset coverage, if wanted, goes
 inside lab 17's `ext2.lseek`.
 
-## The W3 programs (labs 17–23)
+## The labs 17–23 tools
 
 Ordinary tools, not row reporters: they take the usual argv (no nonce, no index) and print no
 KTAP line, so a vehicle or `sh` can run them on any lab from the one they arrive in. They share
@@ -342,7 +344,7 @@ KTAP line, so a vehicle or `sh` can run them on any lab from the one they arrive
 - **Paths:** before lab 23 a relative path has no cwd to be relative to, so a
   vehicle passes absolute ones; `ls` with no operand lists `.`.
 
-| program | lab | usage | what it does | syscalls (measured, `strace -f -c`, lab-linux01) |
+| program | lab | usage | what it does | syscalls (measured, `strace -f -c`, on Linux) |
 |---|---|---|---|---|
 | `ls` | 20 | `ls [-a] [path…]` | `open(O_RDONLY\|O_DIRECTORY\|O_CLOEXEC)`, `getdents64` into a **512-byte** buffer until 0 (a directory of more than ~16 entries takes several calls), names sorted bytewise, one per line; without `-a` a name starting with `.` is left out. A non-directory operand (`ENOTDIR`, then `stat` finds it) is printed as given; with several operands each directory follows a `<path>:` line and a blank line separates outputs, in argument order. A record with `d_reclen` < 20, running past the returned count, or with no NUL is `EIO`; over 1,024 names or 16 KiB of names in one directory is `ENOMEM` | `open`, `getdents64`, `stat`, `close`, `write`, `exit` |
 | `cat` | 17 | `cat [path…]` | each file (or fd 0 for none or `-`, named `<stdin>` in errors) to fd 1 in 4,096-byte `read`s, short writes retried; a directory is `read`'s `EISDIR` | `open`, `read`, `write`, `close`, `exit` |
@@ -355,8 +357,8 @@ KTAP line, so a vehicle or `sh` can run them on any lab from the one they arrive
 | `mounts` | 22 | `mounts [file]` | reads `/proc/mounts` (or `file`) in 512-byte `read`s; each line is Linux's shape, `<source> <mount point> <fstype> …`, the mount point's `\NNN` escapes decoded; prints `<mount point> <fstype> st_dev=<decimal>` from a `stat` of it. A line with under three fields or over 1,023 bytes is `mounts: <file>: EINVAL`; a refused `stat` is `mounts: <mount point>: <name>` | `open`, `read`, `stat`, `close`, `write`, `exit` (all lab 17 calls) |
 | `sh` | 23 | `sh` | below | `read`, `write`, `open`, `close`, `pipe2`, `dup2`, `fork`, `execve`, `wait4`, `chdir`, `getcwd`, `exit` |
 
-`mkdir` and `rmdir` were not in the first list of programs; they were added 2026-10-17 because
-without them the `mkdir`/`rmdir` arms (lab 18's then, lab 20's since the split, 2026-10-19) have no caller a learner can run, and at lab 23's
+`mkdir` and `rmdir` are here because
+without them lab 20's `mkdir`/`rmdir` arms have no caller a learner can run, and at lab 23's
 shell `mkdir d` then `cd d` is the `chdir` demonstration. `mounts` reads the table rather than
 probing paths because nothing in user space can list mounts without `/proc/mounts`; its one
 line per mount carries both lab 22 facts a learner checks by hand — every mount is listed, and
@@ -395,17 +397,17 @@ each answers its own `st_dev`. It needs `/proc/mounts` in Linux's field order (`
   · `sh: too many words` over 63 in one command [2] · `sh: too many commands` over 8 [2] ·
   `sh: fork: <name>`, `sh: pipe: <name>` [1] · `sh: cd: <dir>: <name>` [1] · `sh: pwd: <name>`
   [1] · `sh: exit: <arg>: EINVAL` [2; the shell stays].
-- **Lab 23's rows** (as amended 2026-10-17): `sh.exit_code.shown` is `echo $?` after a
+- **Lab 23's rows**: `sh.exit_code.shown` is `echo $?` after a
   command that fails (`cat /nonexistent` → `1`, a missing name → `127`); `sh.remount.survives`
   writes its file with `echo <text> > <path>` through `sh`'s own redirection, then `exit`;
   `sh.hi.by_name` can type `hi $SBOOT_NONCE 1`, `$SBOOT_NONCE` coming from the environment `init`
   passes on.
 
-## The W4 programs (lab 24 on)
+## The lab 24-on programs
 
-Not in `bin/boot.archive` (the archive stays the W1–W3 set, byte for byte): ext2's `/bin` carries
+Not in `bin/boot.archive` (the archive keeps the set it had before lab 24, byte for byte): ext2's `/bin` carries
 them from lab 24's image on, and a vehicle below 24 never sees them (`xtask/src/ext2.rs`
-`W4_PROGRAMS`, `W4_FIRST_LAB`; the list names the later W4 programs too, so each lab that adds one
+`W4_PROGRAMS`, `W4_FIRST_LAB`; the list names the later programs too, so each lab that adds one
 changes only `build.sh`).
 
 ### `cowtest` (lab 24; `cowtest/cowtest.c`)
@@ -440,7 +442,7 @@ computes itself from the nonce; each is given a derived value in hex and an unpu
   gaps in its time-stamp counter longer than 0.2 ms count how often it was preempted. The
   counter's rate is the middle of three 20 ms windows against `CLOCK_MONOTONIC`, and each phase
   ends at `<ms>` by the counter or the clock, whichever comes first, so a host pause cannot
-  stretch the run (2026-10-23).
+  stretch the run.
 - **`mem <16 hex> t<12 hex>`**: first two pages from `mmap`, one given back, the other touched and given back (so every run meets `mmap`, `munmap` and a first-touch fault in that order); then 32 MiB through musl's `malloc`/`realloc`/`free` (zig 0.17.0's:
   page-sized blocks straight from `mmap`, trimmed to their alignment with `munmap`, grown with
   `mremap(MREMAP_MAYMOVE)`), every word checked before its block goes; a recursion that grows the
@@ -448,7 +450,7 @@ computes itself from the nonce; each is given a derived value in hex and an unpu
   `mremap` that must move, and `MAP_FIXED` (refused with `EINVAL`, or mapped exactly where asked).
 
 What each executes, counted per number by a counter in a work copy of `syscall::dispatch` (never
-in the shipped file) on 2026-10-22, listed in the order each was first met:
+in the shipped file), listed in the order each was first met:
 
 | program | syscalls (count) |
 |---|---|
@@ -471,7 +473,7 @@ patched; a kernel that cannot run it unmodified is what lab 27 finds.
 **Build:** `build.sh` reads `SRC_DOOM` from `Makefile.linuxvt` and compiles those files in one
 `zig cc` call with the Makefile's flags (`-static -O2 -DNORMALUNIX
 -DLINUX -DSNDSERV -D_DEFAULT_SOURCE`) plus `-g0 -s` and `-ffile-prefix-map`, which make the bytes
-independent of the checkout's directory (measured 2026-10-22: the same `bin/doomgeneric` from two
+independent of the checkout's directory (measured: the same `bin/doomgeneric` from two
 directories; without them, two sizes and two sha256s). It then makes every `musl` check. The two
 compiler warnings it prints (`p_maputl.c`, `r_segs.c`) are upstream's.
 
@@ -482,15 +484,15 @@ image writer places it at `/port/game.wad` from lab 27's image on.
 
 `ktest-27` starts `/bin/doomgeneric -iwad /port/game.wad` with the console as fds 0–2 and `/dev`
 mounted after `devfs::probe`. What it executes up to 6 s after its exec, counted per number by a
-counter in a work copy of `syscall::dispatch` on 2026-10-22: `open` 6, `close` 3, `poll` 320,
+counter in a work copy of `syscall::dispatch`: `open` 6, `close` 3, `poll` 320,
 `lseek` 2,138, `mmap` 8, `munmap` 5, `ioctl` 6, `readv` 2,134, `writev` 38, `nanosleep` 1,416,
 `fcntl` 1, `mkdir` 2, `arch_prctl` 1, `sched_getaffinity` 1, `getdents64` 2, `set_tid_address` 1,
-`clock_gettime` 3,798, and no `-ENOSYS` — Appendix (1)'s set less `execve` (the vehicle execs it).
+`clock_gettime` 3,798, and no `-ENOSYS`; `execve` is not among them (the vehicle execs it).
 
 ### `mark` (lab 29; `mark/mark.c`)
 
 `mark <N>` prints `mark <N> <cwd>` and then the note `# ppid=<getppid>` in one write (usage error:
-exit 2; a refused `getcwd`: exit 1). Two probes lab 29's vehicle reads (added 2026-11-15):
+exit 2; a refused `getcwd`: exit 1). Two probes lab 29's vehicle reads:
 the `# ppid=` note of `mark 2`, which must be the learner's shell's pid (a command the shell's own
 child runs); and `mark -x <name>`, which the vehicle starts itself at cwd `/` and which
 calls the `execve` syscall on `<name>` exactly as given (`mark`, no `/`): a kernel that resolves it
@@ -508,7 +510,7 @@ and built by upstream's Makefiles with the pinned zig (TOOLCHAIN.md): 241,160 by
 `927cffcd…2c24`. From lab 30's image on, `/bin/busybox` and its 18 applet names
 (`busybox/applets`) are one inode with 19 links, `/bin/sh` among them; the course programs an
 applet shadows (`cat`, `ls`, `mkdir`, `mv`, `rm`, `sh`) are left out of that image's `/bin`, and
-every earlier image leaves busybox out. `ktest-30` runs `ash` over the busybox-surface report's
+every earlier image leaves busybox out. `ktest-30` runs `ash` over a fixed
 session; what it executes, and the two numbers with no arm it survives (`sendfile`, `access`), is
 in `busybox/README.md`. Its licence is GPL-2.0, and its source offer is there: the pinned tarball is
 hosted at https://sourceboot.com/third-party/busybox-1.37.0.tar.bz2.
@@ -540,7 +542,7 @@ interrupt; the handler checks its arguments and the ucontext, overwrites what it
 cut short by a SIGUSR1 handler installed with SA_RESTART starts again and returns the child's
 status (`sigregs restart <pid matched> status <n>`). `suspend`: `rt_sigsuspend` with an empty mask
 returns -1/EINTR once the handler has run, the old mask back (`sigregs suspend EINTR <nonce>`).
-Added in slice 9 (2026-10-29): `rflags`: the handler rewrites the frame's saved eflags, and only
+`rflags`: the handler rewrites the frame's saved eflags, and only
 the FIX_EFLAGS bits (DF, the arithmetic flags) may come back, never IOPL, IF or NT; the handler
 also reads its blocked mask (the action's `sa_mask` included) and its frame pointer's alignment,
 and the mask after `rt_sigreturn` must be the program's own (`sigregs rflags kept <nonce>`).
@@ -568,7 +570,7 @@ last four answered by `= <answer> <hex>`: six typed bytes read 20 ms apart on an
 tries), VMIN 0 with nothing typed (returns 0 at once, `vmin0`; ktest-33 times it between its two
 lines), a read that sleeps until ctrl+c's SIGINT ends it with -EINTR (`isig`), a poll for POLLIN
 with a 10 s timeout and nothing typed that must answer 1 once ktest-33 types z, the key then taken
-by one O_NONBLOCK read, twice (`polla`, z typed at once; `pollb`, z typed late; added 2026-11-15),
+by one O_NONBLOCK read, twice (`polla`, z typed at once; `pollb`, z typed late),
 and VMIN 21 while nine keys are
 typed (`keys`); the first termios is put back at the end. `access`: access(2) as root on files of mode 0 and 0644, a missing name, `/tmp`,
 `/bin/busybox`, a mode above 7, and X_OK on a group-only and an other-only executable and a
@@ -576,26 +578,26 @@ mode-0 directory (`ttyprobe access ok <nonce>`). `trunc`: ftruncate(2) cuts a 12
 100, grows it to 5000 (zeros), and refuses a negative length, a read-only file and a pipe with
 EINVAL (`ttyprobe trunc ok <nonce>`). A failed check prints `ttyprobe: <what>` and a wrong
 argument `ttyprobe: usage: …`; both exit 1. ext2's `/bin` carries it from lab 33's image on
-(`TERMIOS_PROGRAMS`, `TERMIOS_LAB`), never earlier; sha256 `09e6c331…2f9b` (39,192 B, 2026-11-15, two polls;
-`0e8d0594…8475` with one, `2f9d1c06…1013` before the poll step). The source's header
+(`TERMIOS_PROGRAMS`, `TERMIOS_LAB`), never earlier; sha256 `09e6c331…2f9b` (39,192 B).
+The source's header
 is the full statement of each mode; `ktest-33` drives it and types the keys.
 
 ## Native check on Linux
 
 These are Linux-ABI binaries, so each runs under a real x86-64 Linux as an oracle before a
-course kernel exists (2026-10-17, lab-linux01, Linux 7.0, nonce
+course kernel exists (Linux 7.0, nonce
 `3f2a9c01d84e7b6655aa10ee93c7f402`): `args` 5/5, `hostile-badptr` ok, `hostile-spin` ok (also
 with the noise instance on the same CPU), `init … 14` 4/4 when run under a child subreaper
 (`prctl(PR_SET_CHILD_SUBREAPER)`, a host-only wrapper, never shipped; without it Linux reparents
-the orphan to its own init and the row is `not ok`), `init … 15` 5/5 (re-run 2026-10-17 with
-nonce `c273b542791488f55d571423227d6f66` after `dup2.shared.flags` landed). Expected differences:
+the orphan to its own init and the row is `not ok`), `init … 15` 5/5 (a second run, with
+nonce `c273b542791488f55d571423227d6f66`, once `dup2.shared.flags` was in). Expected differences:
 `hi` prints `cs=0x33` (Linux's user code selector) and `not ok`; `hostile-badnum` printed `not ok`
-because Linux serves `arch_prctl` (that was the 2026-10-17 run, when its third number was 158; since
-2026-10-22 it is 174, which Linux answers `-ENOSYS`, so a native run should print `ok`: not re-run on
-Linux, the lab lap is owed); `hostile-kwrite` dies of `SIGSEGV` at
+because Linux serves `arch_prctl` (that run's third number was 158; it is 174
+now, which Linux answers `-ENOSYS`, so a native run should print `ok`; not yet re-run on
+Linux); `hostile-kwrite` dies of `SIGSEGV` at
 `0xffff800000001000`.
 
-**The W3 programs** (2026-10-17, lab-linux01, Linux 7.0.0-34, strace 6.19, in one `mktemp -d`
+**The labs 17–23 tools** (Linux 7.0.0-34, strace 6.19, in one `mktemp -d`
 directory on tmpfs, nonce `c69d739d5653668a40845dc501d20036`): `ls many` and `ls -a many` on a
 300-entry directory are byte-identical to `LC_ALL=C ls -1` / `ls -1a` (20 `getdents64` calls of
 512 bytes); `cat` of a 20,000-byte file is byte-identical through a path and through fd 0 (5
@@ -637,12 +639,12 @@ binaries alone. Today: 10 entries, 113,704 bytes, the table ends at byte 732, th
 | 8 | `init` | `0x11970` | 34016 |
 | 9 | `producer` | `0x19e50` | 7640 |
 
-Names carry no leading `/`: mounted at `/`, entry `init` is `/init`. The W3 programs (`ls` …
-`sh`) are **not** in the archive (2026-10-17): the image writer copies `bin/` into ext2's `/bin`
+Names carry no leading `/`: mounted at `/`, entry `init` is `/init`. The labs 17–23 tools (`ls` …
+`sh`) are **not** in the archive: the image writer copies `bin/` into ext2's `/bin`
 (labs 16 on), which is where `sh` looks for a bare name, so the ten entries and the archive's
 bytes did not move when they were added.
 
-## Adding a program (a later slice)
+## Adding a program
 
 1. A directory `<name>/` with its `.c` file(s); `#include "../sys.h"`; `int main(int argc, char
    **argv, char **envp)`. New syscall numbers go into `sys.h`'s `SYS_*` list with the lab that serves them;
@@ -652,4 +654,3 @@ bytes did not move when they were added.
    `ARCHIVE` if the boot archive carries it (from lab 17 a program rides ext2's `/bin` instead,
    and adding it leaves `boot.archive` byte-identical).
 3. Run `./build.sh` with the pinned zig and commit `bin/` with the sources.
-4. If the image writer places it on the disk, one row in `FIXTURES.md` (a later slice).

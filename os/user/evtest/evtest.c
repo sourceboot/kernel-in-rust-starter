@@ -111,29 +111,29 @@
  * round's line is a part of another's (the grader's wait matches anywhere
  * in the capture). */
 #define POLL_READY "# sboot poll-ready %d/%d\n"
-/* The line written to the console as soon as round k's wait ends (2026-11-17,
+/* The line written to the console as soon as round k's wait ends (in
  * lab 26): the grader times it on the HOST clock from
  * the moment it typed F12, and judges the middle of the three rounds. */
 #define POLLED "# sboot polled %d/%d\n"
-/* The rubric's [[script]] types one F12 per round (2026-11-06). */
+/* The rubric's [[script]] types one F12 per round. */
 #ifndef ROUNDS
 #define ROUNDS 3
 #endif
 /* A round whose two clock reads, around poll(0), are further apart than this
  * is not judged: a kernel that holds the program between poll(0)'s look and
- * poll(3000)'s would let F12 in first. Measured 2026-11-06:
+ * poll(3000)'s would let F12 in first. Measured:
  * the reference's gap. */
 #ifndef GAP_MAX_NS
 #define GAP_MAX_NS 5000000LL
 #endif
 /* How long an unjudged round waits for its F12's release. */
 #define DRAIN_MS 2000
-/* The spin (2026-11-08): a judged round reads no event until
+/* The spin: a judged round reads no event until
  * CLOCK_REALTIME is SPIN_NS past poll(3000)'s return. An event stamped when devfs::feed
  * queued it is then stamped at or before the return; one stamped when it is read is
  * stamped at least SPIN_NS after it, which the vehicle fails. A clock that has not moved
  * SPIN_NS in SPIN_CALLS reads (about 1 s of them) leaves the round unjudged (`cap`).
- * Measured 2026-11-08 on the mini (QEMU 11.1.1 TCG, the reference, load 4): 263330-276647
+ * Measured on an Apple-silicon Mac mini (QEMU 11.1.1 TCG, the reference, load 4): 263330-276647
  * reads in 100 ms of CLOCK_REALTIME, so 3000000 is about 1.1 s. */
 #define SPIN_NS 2000000LL
 #ifndef SPIN_CALLS
@@ -143,9 +143,9 @@
 
 static char bad[1024];
 
-/* noinline (2026-11-08): with the wake fields evtest grew past 9 blocks of
+/* noinline: with the wake fields evtest grew past 9 blocks of
  * 4 KiB; out of line, add and ns keep it at 9, so every later file of the lab 24-33
- * images keeps its blocks (the W4/W5 window pins' linked digests). */
+ * images keeps its blocks, and those images keep their layout. */
 __attribute__((noinline)) static void add(char *to, size_t cap, const char *what, long got) {
     size_t n = strlen(to);
     snprintf(to + n, cap - n, "%s%s %ld", n ? "; " : "", what, got);

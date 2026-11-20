@@ -33,34 +33,34 @@
  *
  *   sigregs suspend EINTR <16 hex: the nonce>
  *
- * rflags (added 2026-10-29, slice 9): a SIGUSR1 handler rewrites the
+ * rflags: a SIGUSR1 handler rewrites the
  * frame's saved eflags -- IOPL 3, IF clear, NT set, DF set and the six
  * arithmetic flags to a pattern drawn from the nonce -- and the flags are
  * read with pushfq on the first instruction after the `syscall` the signal
  * came back through. DF and the arithmetic flags are FIX_EFLAGS bits, so
  * they come back from the frame; IOPL, IF and NT are not, so they stay what
- * the program had. (Fix round 1, 2026-10-29:) the action's sa_mask holds
+ * the program had. The action's sa_mask holds
  * SIGUSR2, and the handler reads the blocked mask (SIGUSR1 and SIGUSR2 must
  * be in it) and its own frame pointer (16-aligned: the handler was entered
  * as after a `call`, rsp + 8 16-aligned); after rt_sigreturn the mask must
- * be the one the program had, which (fix round 2) it sets empty first, so a
+ * be the one the program had, which it sets empty first, so a
  * bit the handler's mask leaves behind shows. It prints
  *
  *   sigregs rflags kept <16 hex: the nonce>
  *
- * ring3 (added 2026-10-29, slice 9): children, each with a SIGUSR1
+ * ring3: children, each with a SIGUSR1
  * handler that forges one thing rt_sigreturn returns to: (1) rsp in the
  * kernel half, with rip on a user-mode routine that exits without touching
  * the stack, so a kernel that returns to it shows as that exit; (2) rip in
  * the kernel half (a kernel that returns there takes a #PF in ring 3 at
  * that rip); (3) cs and ss of ring 0 in the frame's csgsfs. (1) and (2)
  * must end with SIGSEGV; (3) must go on in ring 3 with its own cs and ss,
- * or end with SIGSEGV. Fix round 1 (2026-10-29) adds: (4) and (5), (1)
+ * or end with SIGSEGV. Then (4) and (5): (1)
  * and (2) at 0x0000800000000000, the first address past the user half
  * (non-canonical: the ring-3 fetch (5) makes there is a #GP on QEMU 10.2.1
  * and 11.1.1 and a #PF on 8.2.2). The program cannot tell a SIGSEGV that
  * rt_sigreturn sent from one a fault at the forged rip caused, so the
- * vehicle watches: since 2026-10-31 it loads, for this mode, a
+ * vehicle watches: it loads, for this mode, a
  * copy of the kernel's IDT whose #GP and #PF gates note any fault taken
  * in ring 3 at a rip at or past 0x0000800000000000 and then go on to the
  * kernel's own entries (ktest-32.rs, `watch`). It no longer reads
@@ -69,7 +69,7 @@
  * kernel half; all four must end with SIGSEGV; (8) a reserved MXCSR bit
  * (31) in the frame's FXSAVE area: the program must go on with it clear,
  * or end with SIGSEGV; (9) SIGKILL and SIGSTOP in uc_sigmask: the SIGKILL
- * its parent then sends must still end it. Fix round 2 (2026-10-29) adds:
+ * its parent then sends must still end it. And:
  * (10) fpstate at 0x0000400000000000, unmapped, in the user half; (11)
  * fpstate whose 512 bytes cross the end of the user half; (12) rt_sigreturn
  * made by hand, no handler run, with rsp at 0x0000400000000000; all three
@@ -77,7 +77,7 @@
  * and then reads it does not; (13) SIGKILL and SIGSTOP in the action's
  * sa_mask, and (14) SIGKILL in the mask rt_sigsuspend is given: the SIGKILL
  * its parent sends while the handler runs, or while it sleeps, must end it.
- * Fix round 3 (2026-10-29) adds two ranges that start on a mapped page and
+ * And two ranges that start on a mapped page and
  * run on into an unmapped one (two pages mapped, the second unmapped again):
  * (15) fpstate 256 bytes before the hole; (16) rt_sigreturn made by hand,
  * no handler run, with rsp 64 bytes before it. Both must end with SIGSEGV,

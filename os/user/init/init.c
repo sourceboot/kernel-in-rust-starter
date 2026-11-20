@@ -147,7 +147,7 @@ static int lab14(u64 index)
 
 /* dup2.shared.flags: dup2 shares the open file, so a status flag set through one fd is read
  * through the other; cloexec stays per fd. The flag is cleared again before any child is forked. */
-/* The fds the row dup2s onto, from the nonce (fix round 2, 2026-10-19), so no fd number is
+/* The fds the row dup2s onto, from the nonce, so no fd number is
  * fixed: the twelve fds 20..31 (free in every lab 15 run: init holds 0-2 and the two pipes'
  * four ends) are shuffled by derive(nonce, "dup2.shared.flags.fds"); the first DUPS become
  * dups of the fd whose flag is set (A), the next DUPS dups of another pipe's read end (X).
@@ -183,7 +183,7 @@ static void getfl_grp(const int fd[GRP], const int made[GRP], i64 v[GRP])
 {
     for (int i = 0; i < GRP; i++) v[i] = made[i] ? sys_fcntl(fd[i], F_GETFL, 0) : -EBADF;
 }
-/* Fix round 3 (2026-10-19): two open files hold different flags at once. Group Q is the
+/* Two open files hold different flags at once. Group Q is the
  * O_CLOEXEC pipe's read end and four dups of it, group P the first pipe's read end and four
  * dups of it; each dup is made from the group's first fd or from an earlier dup, picked by
  * the nonce. O_NONBLOCK is set through one member of Q, O_APPEND through one member of P and
@@ -371,7 +371,7 @@ static void dup2_row(int fd, int other, int third, u64 index)
     line_row(&l, seen && only && own && per_fd, index, "dup2.shared.flags");
 }
 
-/* pipe.cloexec's fds (fix round 3, 2026-10-19): CLOEXEC_N fds from cloexec_fds(nonce)
+/* pipe.cloexec's fds: CLOEXEC_N fds from cloexec_fds(nonce)
  * (stream.h), each made by dup2 -- unmarked -- and then marked with F_SETFD where
  * cloexec_marked(i) says so; slots 3 and 6 are marked and then unmarked again. Their open
  * files: slots 0 and 1 the first pipe's read end (fd 0 in the consumer, unmarked); 2 and 3

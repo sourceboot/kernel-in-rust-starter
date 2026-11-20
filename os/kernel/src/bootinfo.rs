@@ -8,7 +8,7 @@
 
 /// "SB" + boot + version 2. The magic names the handoff protocol, not the
 /// struct's length: fields appended at the end (as `kernel_phys`/`kernel_virt`/
-/// `kernel_len` were, 2026-10-16) do not bump it. The kernel refuses to run on
+/// `kernel_len` were) do not bump it. The kernel refuses to run on
 /// a mismatch rather than trust a pointer nobody vouched for.
 pub const BOOT_MAGIC: u64 = 0x5B00_7B00_7000_0002;
 
@@ -46,7 +46,7 @@ pub struct BootInfo {
     pub fb: FramebufferInfo,
     pub memmap_len: u64,
     pub memmap: [MemRegion; MEMMAP_MAX],
-    /// Where the bootloader put this kernel's image (appended 2026-10-16 for
+    /// Where the bootloader put this kernel's image (appended later, for
     /// lab 07's `frame::init(memmap, kernel)`): its physical base, the
     /// virtual base it is linked at, and its length in bytes, page-rounded.
     pub kernel_phys: u64,

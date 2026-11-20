@@ -24,7 +24,7 @@
  * second SSE writer a missing FXSAVE would go unseen.
  *
  * This is the one pre-23 program with SSE instructions in it, on purpose
- * (allowed since 2026-10-17): they are the movq lines in the inline
+ * (for lab 12's FXSAVE check): they are the movq lines in the inline
  * asm below, and build.sh's layout `flat-sse` allows exactly those.
  * rdtsc brackets every check; the min and max interval go on a '#' line (a max
  * far above the min is a check the process was descheduled during).

@@ -7,7 +7,7 @@ on the lab-30-on disk images.
 **Upstream:** busybox 1.37.0, the release tarball
 `https://busybox.net/downloads/busybox-1.37.0.tar.bz2` (2,565,764 bytes), sha256
 `3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4` — the value busybox.net
-publishes beside it (`busybox-1.37.0.tar.bz2.sha256`), checked 2026-10-23. Licence: GPL-2.0-only
+publishes beside it (`busybox-1.37.0.tar.bz2.sha256`). Licence: GPL-2.0-only
 (the tarball's `LICENSE`). **The tarball is not in this workspace** (the course hosts the same
 file, at the URL in the offer below): `build.sh` reads it from `target/assets/busybox-1.37.0.tar.bz2` (or the path in
 `BUSYBOX_TARBALL`) and refuses, before it touches `bin/`, when it is missing or its sha256 is not
@@ -24,7 +24,7 @@ names exactly `applets`, so the two files cannot drift apart.
   builtins, `$((…))` (`FEATURE_SH_MATH`) and job control (`ASH_JOB_CONTROL`, which lab 31's
   signals meet). `cd`, `kill`, `trap`, `wait` and `$(…)` are ash's own.
 - `mkdir`, `cat`, `grep`, `wc`, `ls`, `head`, `printf`, `sort`, `sed`, `cp`, `mv`, `rm`: the
-  twelve file applets of the busybox-surface report's session (2026-10-18); `ktest-30` runs each.
+  twelve file applets of the session `ktest-30` types; it runs each.
   `ls` has `FEATURE_LS_FILETYPES`, `_SORTFILES`, `_TIMESTAMPS` and `_USERNAME` (the `ls -l`
   columns).
 - `sleep`, `yes`, `kill`: what lab 31 and 32 run (a process to stop, a stream to interrupt).
@@ -49,13 +49,13 @@ strips, and there is no `llvm-strip` to call; `KCONFIG_NOTIMESTAMP=1` keeps the 
 (the banner reads `BusyBox v1.37.0 ()`). GNU make 3.81 (macOS's) builds it. Then every `musl`
 check: `ET_EXEC`, at most one `PT_TLS`, no AVX.
 
-**The binary** (2026-10-23, the mini): `bin/busybox`, 241,160 bytes, sha256
+**The binary** (built on the machine `TOOLCHAIN.md` names): `bin/busybox`, 241,160 bytes, sha256
 `927cffcd9c58f49ea9524e4edc200658ec2fd1b9f9e9e9fa2895a2f421f22c24`, the same bytes built in two
 different directories. `ET_EXEC`, entry `0x10094f0`; `LOAD` R at `0x1000000`, R-E at
 `0x10094f0`, RW at `0x103c878` (`filesz 0x320`, `memsz 0x9790`); one `PT_TLS` (`memsz 4`);
 `GNU_STACK` 16 MiB; 0 AVX instructions.
 
-**What it executes on the reference** (the re-trace, 2026-10-23: a per-number counter in a work
+**What it executes on the reference** (a per-number counter in a work
 copy of `syscall::dispatch`, `ktest-30`'s seven groups): `read`, `write`, `open`, `close`,
 `stat`, `lstat`, `lseek`, `mmap`, `munmap`, `rt_sigaction`, `rt_sigprocmask`, `ioctl`,
 `writev`, `pipe`, `dup2`, `getpid`, `fork`, `wait4`,
@@ -70,8 +70,7 @@ and unmaps the unaligned 60 KiB.
 **The source offer (GPL-2.0 section 3):** busybox ships in the learner's workspace as a binary
 (`bin/busybox`, and inside every lab-30-on disk image), and the course offers the complete
 corresponding source at the URL below; `busybox.config` and `os/user/build.sh` are in this
-workspace. The URL goes live with the same deploy that first ships the binary (*placed
-2026-10-24*). The offer:
+workspace. The URL went live with the deploy that first shipped the binary. The offer:
 
 > This workspace contains BusyBox 1.37.0 (`os/user/bin/busybox`), © Erik Andersen, Rob Landley,
 > Denys Vlasenko and others, licensed under the GNU General Public License, version 2. It was
