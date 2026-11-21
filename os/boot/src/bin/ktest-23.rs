@@ -53,7 +53,13 @@
 //! short `qN` was met by a kernel's own log line (`irq2`, `irq3`) before the
 //! shell had run the group. `# sboot mark-N` holds a space and a `-`, which
 //! are in neither the drawn first-line word's alphabet nor the nonce's hex,
-//! and no typed key, no program and no plausible log line prints it. The
+//! and no typed key, no program and no plausible log line prints it. Two
+//! more waits pace the two lines that write the disk, `echo $SBOOT_WORD >
+//! k23n` and `echo $SBOOT_KEY > k23`: the tee prints `# sboot wrote-1` and
+//! `# sboot wrote-2` on a line of their own just before the prompt that
+//! follows each (`WROTE`), so nothing is typed while the shell is inside the
+//! write, where a kernel runs with interrupts off and a key past the
+//! keyboard's queue is lost (G2904, 2026-11-20). The
 //! shell ends on `exit`; the rows are
 //! judged on what came through the tee, split at each prompt (`$ `) into one
 //! segment per command typed.
@@ -742,7 +748,26 @@ struct Tee {
     fresh: bool,
     /// The markers whose `# sboot mark-N` line is out.
     marks: u32,
+    /// Prompts since the last `# sboot mark-N` line.
+    since_mark: u32,
+    /// The `# sboot wrote-N` lines out (`WROTE`).
+    wrote: u32,
 }
+
+/// Where the tee prints `# sboot wrote-N`, the script's wait after a line
+/// that writes the disk: (marker, prompt). Just before the given prompt after
+/// marker N's line, which the shell prints only once the write has returned:
+/// marker 2's group types `cat /proc/sboot/nonce > /dev/null`, `cat <
+/// /dev/null`, `cd $SBOOT_DIR` and `echo $SBOOT_WORD > k23n`, one prompt
+/// each, so the 5th prompt follows the write; marker 8's types `echo
+/// $SBOOT_KEY > k23` at the 1st, so the 2nd follows it. Without the wait the
+/// engine types the next line while the shell is inside that write, with
+/// interrupts off, and keys past the keyboard's queue are lost (ledger
+/// G2904). The tee never sees the typed line (the console echoes it), and the
+/// write prints nothing, so the place is the marker, a line of the tee's own,
+/// and the count after it: /bin/sh prints one prompt per line it reads,
+/// whatever the console, and `group` reads the rows by the same count.
+const WROTE: [(u32, u32); 2] = [(2, 5), (8, 2)];
 
 impl Tee {
     fn feed(&mut self, bytes: &[u8]) {
@@ -755,7 +780,29 @@ impl Tee {
             } else if self.dollar {
                 self.dollar = false;
                 if b == b' ' {
-                    w.push(b);
+                    self.since_mark += 1;
+                    let wrote = WROTE.get(self.wrote as usize).is_some_and(|&(m, at)| self.marks == m && self.since_mark == at);
+                    if wrote {
+                        self.wrote += 1;
+                        let line = format!("# sboot wrote-{}\n", self.wrote);
+                        match w.len().checked_sub(3).filter(|&i| w[i..] == *b"# $") {
+                            // On its own line before the prompt, so the console's
+                            // echo still follows the forwarded `# $ `.
+                            Some(i) => {
+                                w.splice(i..i, line.bytes());
+                                w.push(b);
+                            }
+                            // The `$` came in an earlier read and is out: the line
+                            // goes after the prompt, on a line of its own.
+                            None => {
+                                w.push(b);
+                                w.push(b'\n');
+                                w.extend_from_slice(line.as_bytes());
+                            }
+                        }
+                    } else {
+                        w.push(b);
+                    }
                     self.at_start = true;
                     self.prompts += 1;
                     if self.prompts == 1 {
@@ -784,6 +831,7 @@ impl Tee {
                 // mark-N` follows it, on a line of its own (G1844).
                 if self.fresh && self.marks < 8 && marker_line(&self.line, self.marks + 1).is_some() {
                     self.marks += 1;
+                    self.since_mark = 0;
                     w.extend_from_slice(format!("# sboot mark-{}\n", self.marks).as_bytes());
                 }
                 self.line.clear();
@@ -1006,7 +1054,7 @@ fn session(words: &Words, line: &[u8]) -> Result<Session, String> {
     let sh = start_with("/bin/sh", || exec::spawn("/bin/sh", &["sh"], &envp), &[(1, &w), (2, &w)]);
     drop(w);
     let sh = sh?;
-    let mut tee = Tee { at_start: true, dollar: false, prompts: 0, held: None, last: None, line: Vec::new(), fresh: false, marks: 0 };
+    let mut tee = Tee { at_start: true, dollar: false, prompts: 0, held: None, last: None, line: Vec::new(), fresh: false, marks: 0, since_mark: 0, wrote: 0 };
     // The first line's scancodes go in once the first prompt is out, at
     // most one key per turn of the loop, so the shell takes them as they
     // come.
@@ -1113,7 +1161,7 @@ fn segments(out: &[u8]) -> Vec<&[u8]> {
 /// status 0), `<status> qN\n` for marker N's `echo $? "q"N`. The tee prints
 /// `# sboot mark-N`, the script's wait, when the line holds; the rows read
 /// the markers themselves (`marker`). No note this file prints holds `sboot
-/// mark-`: the script's waits would take it for a marker.
+/// mark-` or `sboot wrote-`: the script's waits would take it for theirs.
 fn marker_line(seg: &[u8], n: u32) -> Option<u32> {
     if n == 1 {
         return (seg == b"q1\n").then_some(0);
