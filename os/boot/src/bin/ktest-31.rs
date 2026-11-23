@@ -446,6 +446,11 @@ fn status_text(s: Option<i32>) -> String {
     }
 }
 
+/// `n` ticks of a count, inflected: `1 tick`, `2 ticks`.
+fn n_ticks(n: u64) -> String {
+    format!("{n} tick{}", if n == 1 { "" } else { "s" })
+}
+
 /// The live child of `init` running the shell: argv[0] `sh`, or a path
 /// ending in `/sh` (C's habit of passing the path as argv[0]; CONTRACT
 /// §B.2-28, as ktest-28's `is_sh`).
@@ -1014,9 +1019,10 @@ fn nap_row(sh: &mut Sh, w: [&str; 2]) {
         Err(why) => return fail_one(r, n, format_args!("{why}")),
     };
     let dt = ticks().wrapping_sub(t0);
+    let dtn = n_ticks(dt);
     let what = "`sigprobe nap` set SIGUSR1's action to SIG_IGN, and its child sent it SIGUSR1, SIGWINCH and SIGURG while it was in a 600 ms `nanosleep`";
     let want = format!("{wp} 0");
-    let short = format!("its run took {dt} ticks of IRQ 0, fewer than the {NAP_FLOOR} of one 600 ms sleep, so a `nanosleep` that no signal cut short returned before its time was up");
+    let short = format!("its run took {dtn} of IRQ 0, fewer than the {NAP_FLOOR} of one 600 ms sleep, so a `nanosleep` that no signal cut short returned before its time was up");
     if st == Some(2) && dt < NAP_FLOOR {
         r.fail(format_args!("{what}: it printed {lines:?}, `$?` 2 — {short}, and the child had not sent the three signals by the fifth"));
     } else if st == Some(2) {
@@ -1181,14 +1187,15 @@ fn uncatchable_row(sh: &mut Sh, w: [&str; 5], wp: [&str; 2]) {
         return r.finish(n);
     }
     let dt = await_end(sh, p, t0);
+    let dtn = n_ticks(dt);
     match exit_of(p) {
         Some(9) if dt > KILL_TICKS => r.fail(format_args!(
-            "{what} (pid {}) ended, killed by signal 9, but {dt} ticks of IRQ 0 after `kill -9` was written to the shell, past {KILL_TICKS}: SIGKILL ends a wait at once, whatever the mask holds",
+            "{what} (pid {}) ended, killed by signal 9, but {dtn} of IRQ 0 after `kill -9` was written to the shell, past {KILL_TICKS}: SIGKILL ends a wait at once, whatever the mask holds",
             p.0
         )),
         Some(9) => {
             if !r.failed {
-                note(format_args!("{UNCATCH_ID}: the shell (pid {}) still ran {SETTLE_TICKS} ticks of IRQ 0 after it had its `sleep 30`; `kill -9` ended it {dt} ticks of IRQ 0 after it was written, killed by signal 9", p.0));
+                note(format_args!("{UNCATCH_ID}: the shell (pid {}) still ran {SETTLE_TICKS} ticks of IRQ 0 after it had its `sleep 30`; `kill -9` ended it {dtn} of IRQ 0 after it was written, killed by signal 9", p.0));
             }
         }
         None if task_of(p).is_none() => r.fail(format_args!(
@@ -1196,7 +1203,7 @@ fn uncatchable_row(sh: &mut Sh, w: [&str; 5], wp: [&str; 2]) {
             p.0
         )),
         Some(s) => r.fail(format_args!(
-            "{what} (pid {}) ended as {} {dt} ticks of IRQ 0 after `kill -9` sent it SIGKILL: no action and no mask keeps SIGKILL out (`rt_sigaction(9, <an action>)` is -EINVAL, and `rt_sigprocmask` never blocks it), so it ends the process, killed by signal 9 (status 137 to a shell)",
+            "{what} (pid {}) ended as {} {dtn} of IRQ 0 after `kill -9` sent it SIGKILL: no action and no mask keeps SIGKILL out (`rt_sigaction(9, <an action>)` is -EINVAL, and `rt_sigprocmask` never blocks it), so it ends the process, killed by signal 9 (status 137 to a shell)",
             p.0,
             status_text(Some(s))
         )),
@@ -1324,14 +1331,15 @@ fn staged_row(sh: &mut Sh, n: usize, id: &'static str, job: &str, target: Target
         return r.finish(n);
     }
     let dt = await_end(sh, p, t0);
+    let dtn = n_ticks(dt);
     match exit_of(p) {
         Some(s) if s as u64 == num && dt > KILL_TICKS => r.fail(format_args!(
-            "{who} (pid {}), {doing}, ended, killed by signal {num}, but {dt} ticks of IRQ 0 after `kill -{num}` was written to the shell, past {KILL_TICKS}: a signal ends {sleep} at once, so the sleep must see it each time it wakes",
+            "{who} (pid {}), {doing}, ended, killed by signal {num}, but {dtn} of IRQ 0 after `kill -{num}` was written to the shell, past {KILL_TICKS}: a signal ends {sleep} at once, so the sleep must see it each time it wakes",
             p.0
         )),
         Some(s) if s as u64 == num => {
             if !r.failed {
-                note(format_args!("{id}: {who} (pid {}) still ran {SETTLE_TICKS} ticks of IRQ 0 after `{job} &` started; `kill -{num}` ended it {dt} ticks of IRQ 0 after it was written, killed by signal {num}", p.0));
+                note(format_args!("{id}: {who} (pid {}) still ran {SETTLE_TICKS} ticks of IRQ 0 after `{job} &` started; `kill -{num}` ended it {dtn} of IRQ 0 after it was written, killed by signal {num}", p.0));
             }
         }
         None if task_of(p).is_none() => r.fail(format_args!(
@@ -1339,7 +1347,7 @@ fn staged_row(sh: &mut Sh, n: usize, id: &'static str, job: &str, target: Target
             p.0
         )),
         Some(s) => r.fail(format_args!(
-            "{who} (pid {}), {doing}, ended as {} {dt} ticks of IRQ 0 after `kill -{num}` sent it SIG{name}: a signal ends {sleep} at once, and SIG{name}'s default action ends the process, killed by signal {num}",
+            "{who} (pid {}), {doing}, ended as {} {dtn} of IRQ 0 after `kill -{num}` sent it SIG{name}: a signal ends {sleep} at once, and SIG{name}'s default action ends the process, killed by signal {num}",
             p.0,
             status_text(Some(s))
         )),

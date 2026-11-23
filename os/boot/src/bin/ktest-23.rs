@@ -1181,7 +1181,7 @@ fn marker(segs: &[&[u8]], n: u32) -> Option<(usize, u32)> {
 fn group<'a>(r: &mut Row, segs: &[&'a [u8]], n: u32, want: u32, before: usize) -> Option<Vec<&'a [u8]>> {
     let id = r.id;
     let Some((i, status)) = marker(segs, n) else {
-        r.fail(format_args!("{id}: the shell never printed marker {n}, the line its `echo $? \"q\"{n}` prints last in this row (a lost or mistyped key, or the shell ended early)"));
+        r.fail(format_args!("{id}: the shell never printed marker {n}, the line its `echo $? \"q\"{n}` prints last in this row (a lost or mistyped key, a command that never ended, or the shell ended early)"));
         return None;
     };
     if status != want {

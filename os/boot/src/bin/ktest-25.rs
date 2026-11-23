@@ -759,7 +759,8 @@ fn tls_row(n: usize) -> Vec<Run> {
             }
         }
     }
-    note(format_args!("{TLS_ID}: argv[1] {arg}, words t{w0:012x} t{w1:012x}; {}; {sw} context switches in {took} ms", seen.join("; ")));
+    let seen = if seen.is_empty() { String::from("no copy printed its four counts") } else { seen.join("; ") };
+    note(format_args!("{TLS_ID}: argv[1] {arg}, words t{w0:012x} t{w1:012x}; {seen}; {sw} context switches in {took} ms"));
     row.finish(n);
     runs
 }

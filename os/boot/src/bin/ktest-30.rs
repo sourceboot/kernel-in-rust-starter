@@ -695,6 +695,18 @@ fn ls_fields(line: &str) -> Option<(char, u64, u64, &str)> {
     Some((f[0].chars().next()?, f[1].parse().ok()?, f[4].parse().ok()?, f[f.len() - 1]))
 }
 
+/// What a failed `ls -l` expectation quotes: the line that names `name`,
+/// found by its name, never by its place. `at` is the line in the place the
+/// check reads (`where_` says which); it is quoted only when it is not that
+/// line, so a missing or shifted line is never shown as `name`'s.
+fn named_line(ls: &[&str], name: &str, at: Option<&str>, where_: &str) -> String {
+    match ls.iter().copied().find(|l| ls_fields(l).is_some_and(|f| f.3 == name)) {
+        Some(l) if Some(l) == at => format!("{:?}", Some(l)),
+        Some(l) => format!("{:?}, and {where_} is {at:?}", Some(l)),
+        None => format!("no line names {name}; {where_} is {at:?}"),
+    }
+}
+
 /// Row 7's kernel half, run while init's mounts are in place: a final name
 /// that is a mount point, and a name inside one, through `Stat::lstat` and
 /// the VFS walk. Device, mode and link count: what tells a mounted root from
@@ -978,11 +990,17 @@ fn session(w: &Words, bb_size: u64, base: usize) -> Vec<Option<u64>> {
             }
             match ls_fields(ls.iter().rev().nth(1).copied().unwrap_or("")) {
                 Some(('-', 19, s, "/bin/sh")) if s == bb_size => {}
-                _ => r.fail(format_args!("`ls -l f1 /bin/sh`'s first line should show /bin/sh with 19 links and {bb_size} bytes: {:?}", ls.iter().rev().nth(1))),
+                _ => r.fail(format_args!(
+                    "`ls -l f1 /bin/sh`'s first line should show /bin/sh with 19 links and {bb_size} bytes: {}",
+                    named_line(&ls, "/bin/sh", ls.iter().rev().nth(1).copied(), "the line second from the end")
+                )),
             }
             match ls_fields(ls.last().copied().unwrap_or("")) {
                 Some(('-', 1, s, "f1")) if s == f1_size => {}
-                _ => r.fail(format_args!("`ls -l f1 /bin/sh`'s last line should show f1 with 1 link and {f1_size} bytes: {:?}", ls.last())),
+                _ => r.fail(format_args!(
+                    "`ls -l f1 /bin/sh`'s last line should show f1 with 1 link and {f1_size} bytes: {}",
+                    named_line(&ls, "f1", ls.last().copied(), "the last line")
+                )),
             }
             // What was found, never the passing case's text (C-30-15): `want`
             // still holds every name `ls -l /proc` did not list.
@@ -1033,7 +1051,10 @@ fn session(w: &Words, bb_size: u64, base: usize) -> Vec<Option<u64>> {
             }
             match ls.get(5).and_then(|l| ls_fields(l)) {
                 Some(('-', 18, s, "/bin/busybox")) if s == bb_size => {}
-                _ => r.fail(format_args!("after `rm /bin/yes`, `ls -l /bin/busybox` should show 18 links and {bb_size} bytes: {:?}", ls.get(5))),
+                _ => r.fail(format_args!(
+                    "after `rm /bin/yes`, `ls -l /bin/busybox` should show 18 links and {bb_size} bytes: {}",
+                    named_line(&ls, "/bin/busybox", ls.get(5).copied(), "group 7's sixth line")
+                )),
             }
             let tail: Vec<&str> = ls.iter().skip(6).copied().collect();
             let size = format!("{bb_size}");

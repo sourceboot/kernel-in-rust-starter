@@ -1454,7 +1454,12 @@ fn input_rows() {
                 }
             }
             if let Some(why) = expect_line(&run, "eagain", "eagain ok") {
-                eagain.fail(format_args!("{EAGAIN_ID}: {why}"));
+                let printed = line_of(&out, "eagain:").unwrap_or("");
+                if printed.is_empty() {
+                    eagain.fail(format_args!("{EAGAIN_ID}: {why}"));
+                } else {
+                    eagain.fail(format_args!("{EAGAIN_ID}: /bin/evtest printed {printed:?}; a read of the empty device opened O_NONBLOCK returns -1 with errno EAGAIN (11) at once"));
+                }
             }
             if woke && woke_late {
                 eagain.fail(format_args!(

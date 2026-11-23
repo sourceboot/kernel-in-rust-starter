@@ -1800,23 +1800,27 @@ fn stdev_row(fs: Option<&Fs>) {
             if res(&out, k_mvst) == 0 && le64(&out, mv_at) != fs.ext.stat().dev {
                 r.fail(format_args!("{STDEV_ID}: stat({to:?}) gives st_dev {}, ext2's root {}", le64(&out, mv_at), fs.ext.stat().dev));
             }
+            // Only a stat that returned 0 filled its buffer: a failed one is
+            // said once, by expect_res, and compared with nothing.
             let mut dev = [0u64; 9];
+            let mut ok = [false; 9];
             for (k, path) in paths.iter().enumerate() {
                 r.expect_res(&format!("stat({path:?})"), res(&out, k), 0);
                 dev[k] = le64(&out, at[k]);
+                ok[k] = res(&out, k) == 0;
             }
             for i in 0..4 {
                 for j in i + 1..4 {
-                    if dev[i] == dev[j] {
+                    if ok[i] && ok[j] && dev[i] == dev[j] {
                         r.fail(format_args!("{STDEV_ID}: stat({:?}) and stat({:?}) both give st_dev {}: two mounts, one device number", paths[i], paths[j], dev[i]));
                     }
                 }
-                if dev[i] != roots[i].1 {
+                if ok[i] && dev[i] != roots[i].1 {
                     r.fail(format_args!("{STDEV_ID}: stat({:?}) gives st_dev {}, its root's stat().dev is {}", paths[i], dev[i], roots[i].1));
                 }
             }
             for (k, (path, g)) in inside.iter().enumerate() {
-                if dev[4 + k] != dev[*g] {
+                if ok[4 + k] && ok[*g] && dev[4 + k] != dev[*g] {
                     r.fail(format_args!("{STDEV_ID}: stat({path:?}) gives st_dev {}, the mount it is in ({}) {}", dev[4 + k], roots[*g].0, dev[*g]));
                 }
             }
@@ -1907,7 +1911,9 @@ fn dev_row(fs: Option<&Fs>) {
                 r.expect_res(&format!("read({name}, 1) with O_NONBLOCK and no input waiting"), res(&out, k_read), -11);
                 r.expect_res(&format!("ioctl({name}, TIOCGWINSZ)"), res(&out, k_win), 0);
                 let got = le64(&out, at);
-                if got != want {
+                // Only an fd that opened and an ioctl that returned 0 have a
+                // window size to compare (each failure is said above).
+                if fd_ok(res(&out, k_open)) && res(&out, k_win) == 0 && res(&out, k_ws0) == 0 && got != want {
                     r.fail(format_args!(
                         "{DEV_ID}: ioctl({name}, TIOCGWINSZ) gives {} rows, {} columns; the console fd 0 gives {} rows, {} columns: not the console object",
                         got & 0xffff,
@@ -2001,7 +2007,9 @@ fn nonce_row(fs: Option<&Fs>) {
     want.push(b'\n');
     match run("cat nonce", "/bin/cat", &["cat", "/proc/sboot/nonce"]) {
         Ok(ran) => {
-            r.expect_eq("cat /proc/sboot/nonce's exit status", ran.exit.map_or(u64::MAX, |s| s as u64), 0);
+            if ran.exit != Some(0) {
+                r.fail(format_args!("{NONCE_ID}: cat /proc/sboot/nonce ended {}, expected exit(0)", status_text(ran.exit)));
+            }
             if ran.out != want {
                 r.fail(format_args!(
                     "{NONCE_ID}: cat /proc/sboot/nonce printed {:?}, expected the nonce {:?} and a newline",

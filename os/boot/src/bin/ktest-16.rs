@@ -693,7 +693,14 @@ fn identify() -> Option<Arc<Ata>> {
     let ata = match Ata::probe() {
         Ok(a) => Some(Arc::new(a)),
         Err(e) => {
-            r.fail(format_args!("Ata::probe() returned -{} ({e}): no IDENTIFY answer from the primary master", errno_text(e)));
+            if e == EIO {
+                r.fail(format_args!("Ata::probe() returned -{} ({e}): no IDENTIFY answer from the primary master", errno_text(e)));
+            } else {
+                r.fail(format_args!(
+                    "Ata::probe() returned -{} ({e}), and this machine's primary master is an ATA disk of {DISK_SECTORS} sectors that answers IDENTIFY: -ENODEV is for no drive or one that is not ATA, -EIO for one that never answers",
+                    errno_text(e)
+                ));
+            }
             None
         }
     };

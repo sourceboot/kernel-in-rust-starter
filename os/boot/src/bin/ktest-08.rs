@@ -309,7 +309,10 @@ ktest!("map.user.readback", fn map_user_readback(t: &mut TestCtx) {
         }
         t.expect(a.translate(hva) == Some((k.0, PageSize::Size4K)), "translate finds the kernel-half page's frame");
     } else {
-        t.fail(format_args!("every PML4 entry from 384 to 447 is present in the running tables, so no kernel-half page could be placed"));
+        let (run, own) = ((384..448).filter(|&i| pml4(old, i) != 0).count(), (384..448).filter(|&i| pml4(a.root().0, i) != 0).count());
+        t.fail(format_args!(
+            "no PML4 entry from 384 to 447 is 0 in both the running tables and this space's ({run} of the 64 are non-zero in the running tables, {own} in this space's), so no kernel-half page could be placed"
+        ));
     }
     t.expect(a.translate(va) == Some((f.0, PageSize::Size4K)), "translate finds the frame as a 4 KiB page");
     a.activate();

@@ -624,10 +624,18 @@ fn parent_of(l: &Line, out: &[u8], sh: Option<Pid>, whose: &str) -> Result<(), S
             -p,
             sh.0
         )),
+        // The course shell's child execs the command itself, so under it a
+        // wrong pid is the kernel's `getppid`; under the learner's shell it is
+        // first that shell's own fork and exec.
         Some(p) => Err(format!(
-            "{} ran with parent pid {p}, not {whose} (pid {}): the process the shell forks must exec the command itself, so the command's parent is the shell, not a process the shell started",
+            "{} ran with parent pid {p}, not {whose} (pid {}): {}",
             quoted(&l.text),
-            sh.0
+            sh.0,
+            if whose == "the course shell" {
+                "the course shell's child execs the command itself, so the kernel's `getppid` answered a pid other than its caller's parent"
+            } else {
+                "the process the shell forks must exec the command itself, so the command's parent is the shell, not a process the shell started"
+            }
         )),
         None => Err(format!("{} printed {} on fd 1, with no `# ppid=<pid>` line", quoted(&l.text), shown(out))),
     }

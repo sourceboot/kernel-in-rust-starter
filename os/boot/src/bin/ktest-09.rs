@@ -44,9 +44,10 @@ static HI: &[u8] = include_bytes!("../../../user/bin/hi");
 const BASE: u64 = 0x100_0000;
 const STACK_TOP: u64 = 0x7fff_ffff_f000;
 const STACK_PAGES: u64 = 16;
-/// The row `hi` reports, and the KTAP number it is handed (`argv[2]`).
+/// The row `hi` reports. Its KTAP number (`argv[2]`) is the plan's last:
+/// `hi` runs first, and `ktap::run_all` numbers the registered rows from 1,
+/// so every result line under the `1..N` plan carries its own number.
 const HI_ID: &str = "ring3.cs.rpl";
-const HI_INDEX: &str = "1";
 /// Filled into the stack below the initial vector, to see how much `hi` used.
 const POISON: u8 = 0xa5;
 
@@ -790,7 +791,8 @@ fn describe(t: &TestCtx, r: &Ran) {
 static HI_STATUS: AtomicU64 = AtomicU64::new(u64::MAX);
 static HI_ENOSYS: AtomicU64 = AtomicU64::new(u64::MAX);
 
-/// Run `hi` with `argv = ["hi", <nonce>, "1"]`; it prints its own row.
+/// Run `hi` with `argv = ["hi", <nonce>, N]`, N the plan's last number; it
+/// prints its own row.
 fn run_hi() {
     let nonce = ktap::nonce();
     let nonce_arg: &[u8] = match &nonce {
@@ -800,8 +802,11 @@ fn run_hi() {
     if let Some(n) = &nonce {
         ktap::note(format_args!("hi: ktap::derive(nonce, \"{HI_ID}\") = {:016x}", ktap::derive(n, HI_ID)));
     }
+    let n = ktap::tests().len() + 1;
+    let digits = [b'0' + (n / 10 % 10) as u8, b'0' + (n % 10) as u8];
+    let index: &[u8] = if n < 10 { &digits[1..] } else { &digits[..] };
     let before = syscall::enosys_count();
-    match run(HI, None, &[b"hi", nonce_arg, HI_INDEX.as_bytes()]) {
+    match run(HI, None, &[b"hi", nonce_arg, index]) {
         Ok(r) => {
             let moved = syscall::enosys_count() - before;
             ktap::note(format_args!(

@@ -592,9 +592,10 @@ ktest!("clock.hours", fn clock_hours(t: &mut TestCtx) {
     ));
     // The failure line names a cause only where the error has that cause's
     // shape: 0 is a division that ran first, a factor of a thousand or a
-    // million is the unit, and only what is left — far off, and none of
-    // those — is the product leaving 64 bits (2026-10-18, fix round
-    // sk06-ladder-7).
+    // million is the unit, and the product leaving 64 bits is named only
+    // where now_ns reads what that product, wrapped and then divided, gives.
+    // Any other error over 1000 ppm (a division that ran before the last
+    // multiplication is low by up to about 7 %) is given as its ppm alone.
     let near = |scale: u128| ns > 0 && (ns as u128 * scale).abs_diff(want as u128) <= want as u128 / 100;
     if ns == 0 {
         t.fail(format_args!(
@@ -609,9 +610,16 @@ ktest!("clock.hours", fn clock_hours(t: &mut TestCtx) {
             "now_ns is a million times too small at {k} ticks ({ppm:+} ppm): it counts milliseconds, not nanoseconds"
         ));
     } else if ns.abs_diff(want) > want / 1000 {
-        t.fail(format_args!(
-            "now_ns is {ppm:+} ppm off at {k} ticks: past {U64_TICKS} ticks the product TICKS × 1193 × 10⁹ no longer fits 64 bits, so a product kept in u64 wraps"
-        ));
+        let wrapped = (k as u128 * 1193 * 1_000_000_000 % (1u128 << 64) / 1_193_182) as u64;
+        if ns.abs_diff(wrapped) <= wrapped / 100 {
+            t.fail(format_args!(
+                "now_ns is {ppm:+} ppm off at {k} ticks and reads what TICKS × 1193 × 10⁹ kept in a u64 gives ({wrapped} ns): past {U64_TICKS} ticks that product no longer fits 64 bits, so it wraps"
+            ));
+        } else {
+            t.fail(format_args!(
+                "now_ns is {ppm:+} ppm off at {k} ticks: not 0, not a thousand or a million times too small, and not the {wrapped} ns a product kept in u64 gives"
+            ));
+        }
     } else if ns == k * 1_000_000 {
         t.fail(format_args!(
             "now_ns is exactly {k} ms: 1 ms per tick, {ppm:+} ppm fast — one PIT period is 1193 / 1,193,182 s, 999,847.47 ns"

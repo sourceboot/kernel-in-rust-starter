@@ -1700,11 +1700,10 @@ fn k_run(r: &mut Row, n: usize, raw: &Raw, lm: &LogMap, wrap: &Arc<Wrap>, fs: Ar
         }
     };
     note(format_args!(
-        "{id}: /tmp/{name}, {} bytes, /tmp/{gone} unlinked; {} writes, the commit header is {hdr}, the first refused is write {} ({}); stopped there the tree was {}; after the remount {}",
+        "{id}: /tmp/{name}, {} bytes, /tmp/{gone} unlinked; {} writes, the commit header is {hdr}, {}; stopped there the tree was {}; after the remount {}",
         bytes.len(),
         ws.len(),
-        first.map(|i| i + 1).unwrap_or(0),
-        first.map(|i| kind(&ws[i])).unwrap_or_default(),
+        first.map(|i| format!("the first refused is write {} ({})", i + 1, kind(&ws[i]))).unwrap_or_else(|| String::from("none refused")),
         state_text(&crash).split(' ').next().unwrap_or(""),
         state_text(&st)
     ));
@@ -1720,7 +1719,17 @@ fn count_row(counts: &[Count]) {
     }
     for c in counts {
         let want = c.calls.saturating_sub(c.k as u64);
-        if c.refused != want || want == 0 {
+        if want == 0 {
+            r.fail(format_args!(
+                "{COUNT_ID}: k = {}: the operation made {} {} after arm_fail_after({}), none past the first {}, so the cut never fell inside it{}",
+                c.k,
+                c.calls,
+                if c.calls == 1 { "write" } else { "writes" },
+                c.k,
+                c.k,
+                if c.refused > 0 { format!(", and the drive refused {} of them all the same", c.refused) } else { String::new() }
+            ));
+        } else if c.refused != want {
             r.fail(format_args!("{COUNT_ID}: k = {}: the drive refused {} of the {} writes after arm_fail_after({}), expected {want} (every one after the first {})", c.k, c.refused, c.calls, c.k, c.k));
         }
         if c.moved != c.refused {
@@ -1783,7 +1792,11 @@ fn abort_disk(r: &mut Row, raw: &Raw, wrap: &Arc<Wrap>, fs: Arc<Ext2>) -> Result
         Ok(got) => r.expect_bytes("/tmp/hdr through the learner's mount after the failed write_at", &got, &was),
         Err(e) => r.fail(format_args!("{ABORT_ID}: /tmp/hdr through the learner's mount after the failed write_at: {}", errno_text(e))),
     }
-    note(format_args!("{ABORT_ID}: write_at({off}, {} bytes) on /tmp/hdr: the read of free block {} refused", grow.len(), refused.map(|b| format!("{b}")).unwrap_or_else(|| String::from("-"))));
+    note(format_args!(
+        "{ABORT_ID}: write_at({off}, {} bytes) on /tmp/hdr: {}",
+        grow.len(),
+        refused.map(|b| format!("the read of free block {b} refused")).unwrap_or_else(|| String::from("no read of a free block refused"))
+    ));
     // A transaction of the vehicle's whose second create fails.
     let before = tree(raw)?;
     let bytes = mix(MAGIC + 1, 100);
