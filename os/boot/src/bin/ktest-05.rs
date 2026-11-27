@@ -38,6 +38,9 @@
 
 #[path = "../shim.rs"]
 mod shim;
+#[path = "../pmtime.rs"]
+mod pmtime;
+use pmtime::pm_step;
 
 use core::arch::asm;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -102,8 +105,7 @@ fn pm_wait_ms(ms: u64) {
     let (mut last, mut acc) = (pm(), 0u64);
     while acc * 1000 < ms * PM_HZ {
         let now = pm();
-        acc += (now.wrapping_sub(last) & 0xff_ffff) as u64;
-        last = now;
+        acc += pm_step(&mut last, now) as u64;
         core::hint::spin_loop();
     }
 }

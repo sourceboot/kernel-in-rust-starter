@@ -23,6 +23,9 @@ extern crate alloc;
 
 #[path = "../shim.rs"]
 mod shim;
+#[path = "../pmtime.rs"]
+mod pmtime;
+use pmtime::pm_step;
 
 use core::arch::asm;
 use alloc::string::String;
@@ -61,8 +64,7 @@ impl Clock {
     }
     fn ms(&mut self) -> u64 {
         let now = pm();
-        self.acc += (now.wrapping_sub(self.last) & 0xff_ffff) as u64;
-        self.last = now;
+        self.acc += pm_step(&mut self.last, now) as u64;
         self.acc * 1000 / PM_HZ
     }
     fn us(&mut self) -> u64 {
@@ -684,7 +686,7 @@ ktest!("task.1000.switches", fn thousand_switches(t: &mut TestCtx) {
             ));
         } else if lticks < LONE_TICKS {
             t.fail(format_args!(
-                "with the PIT at 1000 Hz, time::TICKS moved {lticks} in 500 ms while this task spun with interrupts on"
+                "with the PIT at 1000 Hz, time::TICKS moved {lticks} in {lms} ms while this task spun with interrupts on"
             ));
         } else if lone != 0 {
             t.fail(format_args!(

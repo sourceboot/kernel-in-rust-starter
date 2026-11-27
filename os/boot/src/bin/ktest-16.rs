@@ -110,6 +110,9 @@ extern crate alloc;
 
 #[path = "../shim.rs"]
 mod shim;
+#[path = "../pmtime.rs"]
+mod pmtime;
+use pmtime::pm_step;
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -196,8 +199,7 @@ impl Clock {
     }
     fn us(&mut self) -> u64 {
         let now = pm();
-        self.acc += (now.wrapping_sub(self.last) & 0xff_ffff) as u64;
-        self.last = now;
+        self.acc += pm_step(&mut self.last, now) as u64;
         self.acc * 1_000_000 / PM_HZ
     }
 }

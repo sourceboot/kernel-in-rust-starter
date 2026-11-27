@@ -152,6 +152,9 @@ extern crate alloc;
 
 #[path = "../shim.rs"]
 mod shim;
+#[path = "../pmtime.rs"]
+mod pmtime;
+use pmtime::{pm_ahead, pm_step};
 
 use alloc::format;
 use alloc::string::String;
@@ -301,8 +304,7 @@ impl Clock {
     }
     fn us(&mut self) -> u64 {
         let now = pm();
-        self.acc += (now.wrapping_sub(self.last) & 0xff_ffff) as u64;
-        self.last = now;
+        self.acc += pm_step(&mut self.last, now) as u64;
         self.acc * 1_000_000 / PM_HZ
     }
     fn ms(&mut self) -> u64 {
@@ -748,7 +750,8 @@ struct Tee {
     fresh: bool,
     /// The markers whose `# sboot mark-N` line is out.
     marks: u32,
-    /// Prompts since the last `# sboot mark-N` line.
+    /// Prompts since the last `# sboot mark-N` line, a `$ ` inside a line
+    /// counted as one, as `segments` splits the rows (G2975).
     since_mark: u32,
     /// The `# sboot wrote-N` lines out (`WROTE`).
     wrote: u32,
@@ -766,10 +769,26 @@ struct Tee {
 /// G2904). The tee never sees the typed line (the console echoes it), and the
 /// write prints nothing, so the place is the marker, a line of the tee's own,
 /// and the count after it: /bin/sh prints one prompt per line it reads,
-/// whatever the console, and `group` reads the rows by the same count.
+/// whatever the console, and `group` reads the rows by the same count. The
+/// count is every `$ ` the tee carries since the marker's line, at a line
+/// start or inside one, as `segments` splits the rows: a command whose output
+/// does not end in a newline puts the next prompt inside its line, and a
+/// count of line-start prompts alone then never reached the write's, so the
+/// script waited on a `wrote-N` that never came and the run was cut 30 s
+/// later with the rows blaming the next marker (G2975, 2026-11-23).
 const WROTE: [(u32, u32); 2] = [(2, 5), (8, 2)];
 
 impl Tee {
+    /// One more prompt since the last marker's line; whether it is the one
+    /// `WROTE` names next, counting it as printed if so.
+    fn prompt_wrote(&mut self) -> bool {
+        self.since_mark += 1;
+        let due = WROTE.get(self.wrote as usize).is_some_and(|&(m, at)| self.marks == m && self.since_mark == at);
+        if due {
+            self.wrote += 1;
+        }
+        due
+    }
     fn feed(&mut self, bytes: &[u8]) {
         let mut w = Vec::new();
         for &b in bytes {
@@ -780,10 +799,7 @@ impl Tee {
             } else if self.dollar {
                 self.dollar = false;
                 if b == b' ' {
-                    self.since_mark += 1;
-                    let wrote = WROTE.get(self.wrote as usize).is_some_and(|&(m, at)| self.marks == m && self.since_mark == at);
-                    if wrote {
-                        self.wrote += 1;
+                    if self.prompt_wrote() {
                         let line = format!("# sboot wrote-{}\n", self.wrote);
                         match w.len().checked_sub(3).filter(|&i| w[i..] == *b"# $") {
                             // On its own line before the prompt, so the console's
@@ -837,9 +853,17 @@ impl Tee {
                 self.line.clear();
                 self.fresh = false;
             } else if b == b' ' && self.line.last() == Some(&b'$') {
-                // A `$ ` inside a line ends a segment too, as `segments` reads it.
+                // A `$ ` inside a line ends a segment too, as `segments` reads
+                // it, and is a prompt for `WROTE`: its line goes after the
+                // prompt, on a line of its own, as when the `$` came in an
+                // earlier read (G2975).
                 self.line.clear();
                 self.fresh = true;
+                if self.prompt_wrote() {
+                    w.push(b'\n');
+                    w.extend_from_slice(format!("# sboot wrote-{}\n", self.wrote).as_bytes());
+                    self.at_start = true;
+                }
             } else {
                 self.line.push(b);
             }
@@ -960,7 +984,7 @@ fn lsr_within(bit: u8) -> bool {
         if uart_in(LSR) & bit != 0 {
             return true;
         }
-        if (pm().wrapping_sub(start) & 0xff_ffff) as u64 > limit {
+        if pm_ahead(start, pm()) as u64 > limit {
             return false;
         }
     }
@@ -1125,7 +1149,10 @@ fn session(words: &Words, line: &[u8]) -> Result<Session, String> {
 /// Why the typed script cannot have run out, or `None` if it did: its waits
 /// after the first are markers 1 to 8, in order, each by the `# sboot
 /// mark-N` the tee prints after it (marker 1 is `echo "q"1`'s own line,
-/// `q1`), and nothing is typed after the `exit` that follows marker 8.
+/// `q1`), with the two `# sboot wrote-N` waits between (`WROTE`: wrote-1
+/// inside marker 3's group, wrote-2 after marker 8, before the `exit`), and
+/// nothing is typed after that `exit`. A wrote-1 that never came leaves
+/// marker 3 missing, which is the marker named here.
 fn unfinished(s: &Session, segs: &[&[u8]]) -> Option<String> {
     let first = segs.iter().any(|g| *g == b"q1\n");
     let missing = if first { (2..=8).find(|&n| marker(segs, n).is_none())? } else { 1 };

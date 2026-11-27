@@ -124,6 +124,9 @@ extern crate alloc;
 
 #[path = "../shim.rs"]
 mod shim;
+#[path = "../pmtime.rs"]
+mod pmtime;
+use pmtime::{pm_ahead, pm_step};
 
 use alloc::format;
 use alloc::string::String;
@@ -266,8 +269,7 @@ impl Clock {
     }
     fn us(&mut self) -> u64 {
         let now = pm();
-        self.acc += (now.wrapping_sub(self.last) & 0xff_ffff) as u64;
-        self.last = now;
+        self.acc += pm_step(&mut self.last, now) as u64;
         self.acc * 1_000_000 / PM_HZ
     }
     fn ms(&mut self) -> u64 {
@@ -401,11 +403,11 @@ fn pit_check() -> Result<u32, PitFail> {
         low = low.min(c);
         peak = peak.max(c);
         above |= c > 1193;
-        if prev.is_some_and(|p| u.wrapping_sub(p) & 0xff_ffff <= PIT_LINK_PM) {
-            longest = longest.max(t.wrapping_sub(first) & 0xff_ffff);
+        if prev.is_some_and(|p| pm_ahead(p, u) <= PIT_LINK_PM) {
+            longest = longest.max(pm_ahead(first, t));
             if c >= 1100 {
                 since = u;
-            } else if t.wrapping_sub(since) & 0xff_ffff >= PIT_SPAN_PM {
+            } else if pm_ahead(since, t) >= PIT_SPAN_PM {
                 blind = true;
             }
         } else {
@@ -413,7 +415,7 @@ fn pit_check() -> Result<u32, PitFail> {
             since = u;
         }
         prev = Some(t);
-        let el = u.wrapping_sub(p0) & 0xff_ffff;
+        let el = pm_ahead(p0, u);
         if blind || el >= PIT_CAP_PM || (el >= PIT_MIN_PM && peak >= 1100 && low < peak) {
             break el;
         }
@@ -477,7 +479,7 @@ enum Taint {
 fn after(t: Tid, s: u64, b: &Before, span: u32, tally: impl FnOnce() -> bool) -> (Option<Woke>, Option<Taint>) {
     quiet(|| {
         let count = pit_latch();
-        let el = pm().wrapping_sub(b.pm) & 0xff_ffff;
+        let el = pm_ahead(b.pm, pm());
         let woke = if tally() { Some(after_wake(t, s)) } else { None };
         if count > 1193 || b.count > 1193 {
             PIT_ABOVE.store(true, Ordering::SeqCst);
@@ -571,7 +573,7 @@ fn gate(t: Tid, g: &mut Gate) -> (u64, Before) {
         let asleep = off_cpu(t);
         let s = sched::slices(t);
         let b = before();
-        let waited = u64::from(b.pm.wrapping_sub(p0) & 0xff_ffff) * 1_000_000 / PM_HZ;
+        let waited = u64::from(pm_ahead(p0, b.pm)) * 1_000_000 / PM_HZ;
         let clean = asleep && !b.waiting && (GATE_LOW..=GATE_HIGH).contains(&b.count);
         if clean || waited >= GATE_US {
             g.expired += u32::from(!clean);
@@ -580,7 +582,7 @@ fn gate(t: Tid, g: &mut Gate) -> (u64, Before) {
         }
         if asleep {
             let p = pm();
-            while pm().wrapping_sub(p) & 0xff_ffff < GATE_SPIN_PM {
+            while pm_ahead(p, pm()) < GATE_SPIN_PM {
                 core::hint::spin_loop();
             }
         } else {
@@ -872,6 +874,8 @@ fn window_end(t: Tid) -> (u64, Option<u16>, u32) {
                 return (s, None, b);
             }
             last = (s, None, b);
+            // Not `pm_ahead`: a `b` that came back behind `a` reads as far
+            // apart here, so that try is read again, never taken as one moment.
             if b.wrapping_sub(a) & 0xff_ffff <= QW_SKEW_PM {
                 return (s, Some(c), b);
             }
@@ -902,7 +906,7 @@ fn quiet_window(t: Tid, span: u32) -> (u64, u64) {
     }
     let (s1, c1, p1) = window_end(t);
     let n = s1.saturating_sub(s0);
-    let len = u64::from(p1.wrapping_sub(p0) & 0xff_ffff);
+    let len = u64::from(pm_ahead(p0, p1));
     let crossed = match (c0, c1) {
         (Some(c0), Some(c1)) => {
             // Input clocks in the window, times the count's step per clock

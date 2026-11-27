@@ -13,8 +13,8 @@ This repo is exactly what a learner's workspace starts as: a Rust workspace that
 boots through a vendored, pinned [Limine](https://limine-bootloader.org) and hands
 your kernel a framebuffer and a memory map. The lessons, each lab's checks and the
 grader are deliberately **not** in here — they live on
-[sourceboot.com](https://sourceboot.com) and arrive through the `sboot` CLI, into
-a separate cache directory. A repo created from this template stays your code,
+[sourceboot.com](https://sourceboot.com), and `sboot test` checks your work. A
+repo created from this template stays your code,
 which is what makes it worth showing people.
 
 > Renamed 2026-09-01 (was `os2-starter`, when the course id was `os2-rust`). GitHub redirects
@@ -46,16 +46,15 @@ Then install `sboot` and work from inside the clone:
 ```sh
 curl -fsSL https://sourceboot.com/install.sh | sh
 sboot login                   # connects this machine, in your browser
-sboot test 00-welcome         # fetches the lab's tests and grader, builds, boots, grades
+sboot test 00-welcome         # builds, boots and grades lab 00
 ```
 
 `sboot test <lab>` is the whole loop: it builds your kernel, boots it and grades
-what it does, on your own machine, as often as you like. `sboot submit <lab>`
-records the official result — the same checks. `sboot` recognises the repo by its
-`sboot.toml` and downloads each lab's tests on first use (`sboot where` prints
-where they live — outside this repo). Running `sboot start kernel-in-rust` inside
-the clone is safe: it puts back anything that is missing and never touches a file
-you have edited. With the template you already have the tree, so you don't need it.
+what it does, as often as you like. `sboot submit <lab>` records the official
+result — the same checks. `sboot` recognises the repo by its `sboot.toml`.
+Running `sboot start kernel-in-rust` inside the clone is safe: it puts back
+anything that is missing and never touches a file you have edited. With the
+template you already have the tree, so you don't need it.
 
 **Without GitHub:**
 
@@ -106,9 +105,7 @@ stubs are `todo!()`s — they build, they just don't do anything yet):
 cd os && cargo build --release --target x86_64-unknown-none
 ```
 
-Making a bootable image and booting it is `sboot test`'s job: the course's build
-tooling is fetched with each lab, versioned, so this repo never goes stale
-underneath you.
+Making a bootable image and booting it is `sboot test`'s job.
 
 ## The course
 

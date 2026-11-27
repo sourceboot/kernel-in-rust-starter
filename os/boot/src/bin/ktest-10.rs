@@ -31,6 +31,9 @@ extern crate alloc;
 
 #[path = "../shim.rs"]
 mod shim;
+#[path = "../pmtime.rs"]
+mod pmtime;
+use pmtime::pm_ahead;
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -198,7 +201,7 @@ fn pm() -> u32 {
 }
 
 fn pm_us_since(start: u32) -> u64 {
-    (pm().wrapping_sub(start) & 0xff_ffff) as u64 * 1_000_000 / PM_HZ
+    pm_ahead(start, pm()) as u64 * 1_000_000 / PM_HZ
 }
 
 // ── heap.box_vec ─────────────────────────────────────────────────────────
